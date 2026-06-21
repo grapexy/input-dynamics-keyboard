@@ -80,17 +80,32 @@ APK="$(ls -t app/build/outputs/apk/debug/*-debug.apk | head -n 1)"
 idk install --apk "$APK"
 ```
 
-3. Enable and select the IME:
-
-```bash
-idk select-ime
-```
-
-4. Record a bounded run with an external run id:
+3. For live agent-driven input, start one stateful session:
 
 ```bash
 RUN_ID=run-YYYYMMDD-HHMMSS-local-android
-idk record --run-id "$RUN_ID" --out ".agents/experiments/$RUN_ID"
+idk session start --run-id "$RUN_ID"
+```
+
+Only one stateful session can be active for a package runtime. If `session
+start` returns `ok: false` with `busy: true`, do not retry with lower-level
+commands; inspect `idk session status` and wait for the active run to stop.
+
+Then use live commands while the session is active:
+
+```bash
+idk layout --wait-visible
+idk tap --label a
+idk press space
+idk press delete
+idk session stop
+```
+
+4. For bounded capture, use `record` with an external run id:
+
+```bash
+RUN_ID=run-YYYYMMDD-HHMMSS-local-android
+idk record --run-id "$RUN_ID" --out "runs/$RUN_ID"
 ```
 
 When `--duration-ms` is omitted, press Enter in the terminal to stop capture
@@ -122,9 +137,11 @@ command variants and fallbacks.
 ## Non-Screenshot Automation
 
 When the keyboard view is visible, use `KEYBOARD_LAYOUT` instead of screenshots.
-With the CLI, wait for layout state and press common keys by semantic name:
+With the CLI, start a session, wait for layout state, and press common keys by
+semantic name:
 
 ```bash
+idk session start --run-id "$RUN_ID"
 idk layout --wait-visible
 idk touch doctor
 idk tap --label a
@@ -132,12 +149,13 @@ idk press space
 idk press delete
 idk press enter
 idk hide-keyboard
+idk session stop
 ```
 
 Use `tap --code=<code>` only when there is no semantic command. Use
-`touch tap --x <x> --y <y>` for absolute screen coordinates. The CLI routes
-`tap`, `press`, and `touch tap` through AOSP `/system/bin/uinput` and should
-fail rather than switch to another touch backend.
+`touch tap --x <x> --y <y>` for diagnostic absolute screen coordinates. The CLI
+routes session input and `touch tap` through AOSP `/system/bin/uinput` and
+should fail rather than switch to another touch backend.
 
 ## Validation
 

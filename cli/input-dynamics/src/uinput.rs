@@ -10,8 +10,8 @@ use crate::process::{FailureMode, run_process_with_stdin};
 const UINPUT_COMMAND: &str = "/system/bin/uinput";
 const DEVICE_ID: i64 = 1;
 const DEFAULT_HOLD_MS: u64 = 70;
-const DEVICE_SETTLE_MS: u64 = 1_000;
-const DEVICE_TAIL_MS: u64 = 1_000;
+pub(crate) const DEVICE_SETTLE_MS: u64 = 1_000;
+pub(crate) const DEVICE_TAIL_MS: u64 = 1_000;
 const TRACKING_ID: i32 = 100;
 const DEFAULT_TOUCH_MAJOR: i32 = 120;
 const DEFAULT_TOUCH_MINOR: i32 = 80;
@@ -130,6 +130,10 @@ pub(crate) fn tap(app: &App, spec: TapSpec) -> CliResult<Value> {
         "stream_line_count": stream.lines().count(),
         "uinput": output.json(),
     }))
+}
+
+pub(crate) const fn input_device_command() -> &'static str {
+    UINPUT_COMMAND
 }
 
 pub(crate) fn discover_touchscreen_profile(app: &App) -> CliResult<TouchscreenProfile> {
@@ -284,15 +288,35 @@ fn labeled_number(text: &str, label: &str) -> CliResult<i32> {
     Err(CliError::new(format!("missing {label} in ABS axis info")))
 }
 
-fn tap_stream(profile: &TouchscreenProfile, spec: TapSpec) -> CliResult<String> {
+pub(crate) fn tap_lines(profile: &TouchscreenProfile, spec: TapSpec) -> CliResult<Vec<String>> {
+    ensure_coordinate_in_range(profile, spec)?;
     let press_events = down_events(profile, spec);
     let release_events = up_events();
-    let lines = [
-        register_command_line(profile)?,
-        delay_command_line(DEVICE_SETTLE_MS)?,
+    Ok(vec![
         inject_command_line(&press_events)?,
         delay_command_line(spec.hold_ms)?,
         inject_command_line(&release_events)?,
+    ])
+}
+
+pub(crate) fn register_line(profile: &TouchscreenProfile) -> CliResult<String> {
+    register_command_line(profile)
+}
+
+pub(crate) fn delay_line(duration_ms: u64) -> CliResult<String> {
+    delay_command_line(duration_ms)
+}
+
+pub(crate) fn profile_summary(profile: &TouchscreenProfile) -> Value {
+    profile_summary_json(profile)
+}
+
+fn tap_stream(profile: &TouchscreenProfile, spec: TapSpec) -> CliResult<String> {
+    let tap_command_lines = tap_lines(profile, spec)?;
+    let lines = [
+        register_command_line(profile)?,
+        delay_command_line(DEVICE_SETTLE_MS)?,
+        tap_command_lines.join("\n"),
         delay_command_line(DEVICE_TAIL_MS)?,
     ];
     Ok(format!("{}\n", lines.join("\n")))

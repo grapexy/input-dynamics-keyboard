@@ -116,6 +116,11 @@ pub(crate) enum Commands {
         #[arg(long, default_value = "manual")]
         input_cadence_policy: String,
     },
+    /// Manage a stateful input dynamics session.
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
+    },
     /// Tap a key from the current layout by label or code.
     Tap {
         /// Key label to tap.
@@ -134,6 +139,12 @@ pub(crate) enum Commands {
     Touch {
         #[command(subcommand)]
         command: TouchCommand,
+    },
+    /// Run the local input controller process.
+    #[command(hide = true)]
+    Controller {
+        #[command(subcommand)]
+        command: ControllerCommand,
     },
 }
 
@@ -162,5 +173,50 @@ pub(crate) enum TouchCommand {
         /// Touch hold duration.
         #[arg(long, default_value_t = 70)]
         hold_ms: u64,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum SessionCommand {
+    /// Start IME logging and a persistent uinput controller.
+    Start {
+        /// External run id to write into each session record.
+        #[arg(long)]
+        run_id: String,
+        /// Session-level input actor provenance.
+        #[arg(long, default_value = "agent_adb")]
+        input_actor: String,
+        /// Session-level controller provenance.
+        #[arg(long, default_value = "input-dynamics-cli")]
+        input_controller: String,
+        /// Session-level cadence provenance.
+        #[arg(long, default_value = "manual")]
+        input_cadence_policy: String,
+    },
+    /// Read IME and local input-controller status.
+    Status,
+    /// Stop the persistent input controller and IME logging.
+    Stop,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ControllerCommand {
+    /// Run the local input controller server.
+    Run {
+        /// Unix socket path for local command IPC.
+        #[arg(long)]
+        socket: PathBuf,
+        /// Runtime state JSON path.
+        #[arg(long)]
+        state: PathBuf,
+        /// ADB uinput stdout log path.
+        #[arg(long)]
+        uinput_stdout: PathBuf,
+        /// ADB uinput stderr log path.
+        #[arg(long)]
+        uinput_stderr: PathBuf,
+        /// External run id for runtime provenance.
+        #[arg(long)]
+        run_id: String,
     },
 }

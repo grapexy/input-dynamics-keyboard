@@ -5,6 +5,7 @@
 pub(crate) mod app;
 pub(crate) mod args;
 pub(crate) mod commands;
+pub(crate) mod controller;
 pub(crate) mod error;
 pub(crate) mod layout;
 pub(crate) mod output;

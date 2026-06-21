@@ -32,6 +32,8 @@ Use this keyboard only in consented, local research settings.
   screenshot-based coordinate discovery.
 - AOSP uinput-backed CLI touch commands for local agent-driven key presses and
   absolute taps.
+- Single-owner stateful CLI sessions; competing starts return a non-destructive
+  busy result.
 
 ## Quick Start
 
@@ -51,7 +53,7 @@ target/debug/input-dynamics doctor
 target/debug/input-dynamics install
 target/debug/input-dynamics select-ime
 target/debug/input-dynamics touch doctor
-target/debug/input-dynamics record --run-id "$RUN_ID" --out ".agents/experiments/$RUN_ID"
+target/debug/input-dynamics record --run-id "$RUN_ID" --out "runs/$RUN_ID"
 ```
 
 The `record` command starts IME logging, captures an ADB touchscreen event

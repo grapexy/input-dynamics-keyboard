@@ -28,6 +28,29 @@ target/debug/input-dynamics doctor
 
 ## Common Workflow
 
+For live agent-driven input, use the stateful session lifecycle. It selects the
+IME, starts IME logging, starts one persistent AOSP uinput controller, and then
+accepts live `tap` and `press` commands:
+
+```bash
+RUN_ID=run-YYYYMMDD-HHMMSS-local-android
+
+cargo run --quiet -p input-dynamics -- doctor
+cargo run --quiet -p input-dynamics -- install
+cargo run --quiet -p input-dynamics -- touch doctor
+cargo run --quiet -p input-dynamics -- session start --run-id "$RUN_ID"
+cargo run --quiet -p input-dynamics -- layout --wait-visible
+cargo run --quiet -p input-dynamics -- tap --label a
+cargo run --quiet -p input-dynamics -- press space
+cargo run --quiet -p input-dynamics -- press delete
+cargo run --quiet -p input-dynamics -- session stop
+```
+
+Only one stateful session can be active for a package runtime at a time. A
+competing `session start` returns JSON with `ok: false` and `busy: true` before
+changing IME or logging state. Agents should treat that as a hard ownership
+conflict, inspect `session status`, and wait for the active run to stop.
+
 For a complete bounded experiment capture, use `record`. It starts IME logging,
 captures a concurrent ADB touchscreen event stream with `getevent`, stops the
 session, pulls IME logs, writes `manifest.json`, and writes `validation.json`:
@@ -39,7 +62,7 @@ cargo run --quiet -p input-dynamics -- doctor
 cargo run --quiet -p input-dynamics -- install
 cargo run --quiet -p input-dynamics -- select-ime
 cargo run --quiet -p input-dynamics -- touch doctor
-cargo run --quiet -p input-dynamics -- record --run-id "$RUN_ID" --out ".agents/experiments/$RUN_ID"
+cargo run --quiet -p input-dynamics -- record --run-id "$RUN_ID" --out "runs/$RUN_ID"
 ```
 
 When `--duration-ms` is omitted, press Enter in the terminal to stop capture
@@ -99,13 +122,20 @@ scraping human-oriented text.
   null, and `manual`.
 - `stop`: stops the active session.
 - `status`: returns current control status.
+- `session start --run-id <id>`: enables/selects the IME, enables logging,
+  starts an IME session, and starts a persistent local uinput controller. If
+  another stateful session is active or starting, it returns `busy: true`
+  without changing the active run.
+- `session status`: returns IME status plus local input-controller status.
+- `session stop`: stops the local input controller, then stops IME logging.
 - `layout`: returns status including `keyboard_layout` when the IME is visible.
 - `layout --wait-visible` / `layout --wait-hidden`: waits for keyboard layout
   visibility state before returning.
 - `hide-keyboard`: dismisses the visible IME and waits for hidden layout state.
-- `tap --label <label>` or `tap --code <code>`: taps a key from layout data.
+- `tap --label <label>` or `tap --code <code>`: taps a key from layout data
+  through the active session controller.
 - `press delete`, `press enter`, `press space`: taps common keys by semantic
-  name.
+  name through the active session controller.
 - `touch doctor`: checks AOSP uinput availability and reports the mirrored
   physical touchscreen profile used by the CLI.
 - `touch tap --x <x> --y <y> [--hold-ms <ms>]`: sends an absolute screen tap
@@ -120,9 +150,10 @@ scraping human-oriented text.
 
 Use semantic `press` commands for common non-letter keys. `tap --code=-7` still
 works for delete, and `tap --code -7` is also accepted, but semantic commands
-are easier for agents to generate correctly.
+are easier for agents to generate correctly. `tap` and `press` require
+`session start`; use `touch tap` only for low-level diagnostic absolute taps.
 
-`tap`, `press`, and `touch tap` use AOSP `/system/bin/uinput` for touchscreen
+`session` input and `touch tap` use AOSP `/system/bin/uinput` for touchscreen
 input. They fail if the device does not expose that command instead of falling
 back to a second touch implementation.
 

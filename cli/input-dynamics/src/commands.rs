@@ -9,7 +9,8 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use serde_json::{Value, json};
 
 use crate::app::{App, LOG_DIR};
-use crate::args::{Commands, PressKey, TouchCommand};
+use crate::args::{Commands, ControllerCommand, PressKey, SessionCommand, TouchCommand};
+use crate::controller::{self, RunConfig, SessionStartPermit};
 use crate::error::{CliError, CliResult};
 use crate::layout::{json_number_to_shell_arg, key_matches};
 use crate::process::{FailureMode, run_process};
@@ -77,11 +78,17 @@ pub(crate) fn run_command(app: &App, command: Commands) -> CliResult<Value> {
             };
             record_run(app, &config)
         }
+        Commands::Session {
+            command: session_command,
+        } => session(app, session_command),
         Commands::Tap { label, code } => tap_key(app, label.as_deref(), code),
         Commands::Press { key } => press_key(app, key),
         Commands::Touch {
             command: touch_command,
         } => touch(app, &touch_command),
+        Commands::Controller {
+            command: controller_command,
+        } => run_controller_command(app, controller_command),
     }
 }
 
@@ -219,6 +226,134 @@ fn start(
         }));
     }
     app.broadcast("START", extras)
+}
+
+fn session(app: &App, command: SessionCommand) -> CliResult<Value> {
+    match command {
+        SessionCommand::Start {
+            run_id,
+            input_actor,
+            input_controller,
+            input_cadence_policy,
+        } => session_start(
+            app,
+            &run_id,
+            &input_actor,
+            &input_controller,
+            &input_cadence_policy,
+        ),
+        SessionCommand::Status => session_status(app),
+        SessionCommand::Stop => session_stop(app),
+    }
+}
+
+fn session_start(
+    app: &App,
+    run_id: &str,
+    input_actor: &str,
+    input_controller: &str,
+    input_cadence_policy: &str,
+) -> CliResult<Value> {
+    let mut session_lock = match controller::acquire_session_start(app, run_id)? {
+        SessionStartPermit::Acquired(session_lock) => session_lock,
+        SessionStartPermit::Busy(status) => return Ok(status),
+    };
+    let select = select_ime(app)?;
+    let ime = start(
+        app,
+        run_id,
+        input_actor,
+        Some(input_controller),
+        input_cadence_policy,
+    )?;
+    if ime.get("ok").and_then(Value::as_bool) == Some(false) {
+        return Ok(json!({
+            "ok": false,
+            "package_name": app.package(),
+            "error": "failed to start IME logging session",
+            "select_ime": select,
+            "ime": ime,
+        }));
+    }
+
+    match controller::start(app, run_id) {
+        Ok(mut input) => {
+            let input_ok = input.get("ok").and_then(Value::as_bool).unwrap_or(false);
+            let stop_after_input_failure = if input_ok {
+                session_lock.activate(&input)?;
+                input = controller::status(app);
+                Value::Null
+            } else {
+                app.broadcast("STOP", Vec::new()).unwrap_or_else(|error| {
+                    json!({
+                        "ok": false,
+                        "error": error.to_string(),
+                    })
+                })
+            };
+            Ok(json!({
+                "ok": input_ok,
+                "package_name": app.package(),
+                "run_id": run_id,
+                "select_ime": select,
+                "ime": ime,
+                "input": input,
+                "stop_after_input_failure": stop_after_input_failure,
+            }))
+        }
+        Err(error) => {
+            let stop_result = app.broadcast("STOP", Vec::new()).ok();
+            Err(CliError::new(format!(
+                "failed to start input controller after IME session start: {error}; IME stop attempted: {}",
+                stop_result.as_ref().map_or("unavailable", |_| "available")
+            )))
+        }
+    }
+}
+
+fn session_status(app: &App) -> CliResult<Value> {
+    let ime = app.broadcast("STATUS", Vec::new())?;
+    let input = controller::status(app);
+    Ok(json!({
+        "ok": true,
+        "package_name": app.package(),
+        "ime": ime,
+        "input": input,
+    }))
+}
+
+fn session_stop(app: &App) -> CliResult<Value> {
+    let input = controller::stop(app)?;
+    let ime = app.broadcast("STOP", Vec::new())?;
+    controller::clear_session_lock(app)?;
+    Ok(json!({
+        "ok": ime.get("ok").and_then(Value::as_bool).unwrap_or(false)
+            && input.get("ok").and_then(Value::as_bool).unwrap_or(false),
+        "package_name": app.package(),
+        "input": input,
+        "ime": ime,
+    }))
+}
+
+fn run_controller_command(app: &App, command: ControllerCommand) -> CliResult<Value> {
+    match command {
+        ControllerCommand::Run {
+            socket,
+            state,
+            uinput_stdout,
+            uinput_stderr,
+            run_id,
+        } => {
+            let config = RunConfig {
+                socket,
+                state,
+                uinput_stdout,
+                uinput_stderr,
+                run_id,
+            };
+            controller::run(app, &config)
+        }
+    }
 }
 
 fn layout(app: &App, wait: LayoutWait) -> CliResult<Value> {
@@ -431,7 +566,7 @@ fn tap_key(app: &App, label: Option<&str>, code: Option<i64>) -> CliResult<Value
     let x = parse_tap_coordinate(&x_arg, "x")?;
     let y = parse_tap_coordinate(&y_arg, "y")?;
 
-    let touch_output = uinput::tap(app, TapSpec::new(x, y))?;
+    let touch_output = controller::tap(app, TapSpec::new(x, y))?;
 
     Ok(json!({
         "ok": true,
