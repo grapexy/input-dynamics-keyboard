@@ -29,8 +29,8 @@ android {
         applicationId = "org.inputdynamics.ime"
         minSdk = 21
         targetSdk = 35
-        versionCode = 101000
-        versionName = "0.1.0+heli3.9"
+        versionCode = 101001
+        versionName = "0.1.1+heli3.9"
         ndk {
             abiFilters.clear()
             abiFilters.addAll(listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64"))
