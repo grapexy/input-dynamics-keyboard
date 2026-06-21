@@ -8,6 +8,7 @@ local.properties
 .DS_Store
 Gemfile
 build
+target
 app/build
 app/release
 app/.cxx

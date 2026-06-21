@@ -59,6 +59,12 @@
               pkgs.git
               pkgs.jdk17
               pkgs.python3
+              pkgs.cargo
+              pkgs.cargo-deny
+              pkgs.clippy
+              pkgs.rust-analyzer
+              pkgs.rustc
+              pkgs.rustfmt
               pkgs.unzip
               pkgs.uv
               pkgs.zip
@@ -88,6 +94,7 @@
               echo "GitHub CLI config: $GH_CONFIG_DIR"
               echo "GitHub CLI auth: $github_auth_status"
               echo "Build with: ./gradlew :app:assembleDebugNoMinify"
+              echo "Rust checks: cargo ci-fmt && cargo ci-test && cargo ci-clippy"
             '';
           };
         });

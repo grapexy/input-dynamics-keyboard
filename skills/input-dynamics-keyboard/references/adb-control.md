@@ -3,6 +3,9 @@
 Use this reference when an agent needs exact local commands for Input Dynamics
 Keyboard control, status, layout inspection, log readback, or cleanup.
 
+Prefer the `input-dynamics` host CLI when it is available. Use this file when
+the CLI is unavailable or when debugging raw ADB behavior.
+
 ## Packages
 
 ```bash

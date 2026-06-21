@@ -75,5 +75,5 @@ build type, but they are not published by the current GitHub Release workflow:
 ```
 
 ```text
-app/build/outputs/apk/release/InputDynamicsKeyboard_3.9-release-unsigned.apk
+app/build/outputs/apk/release/*-release-unsigned.apk
 ```

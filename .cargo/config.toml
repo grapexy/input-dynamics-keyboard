@@ -1,0 +1,4 @@
+[alias]
+ci-clippy = "clippy --workspace --all-targets --all-features --locked -- -D warnings"
+ci-fmt = "fmt --all --check"
+ci-test = "test --workspace --all-targets --locked"

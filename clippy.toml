@@ -1,0 +1,35 @@
+avoid-breaking-exported-api = false
+allow-expect-in-tests = false
+allow-panic-in-tests = false
+allow-unwrap-in-tests = false
+cognitive-complexity-threshold = 18
+literal-representation-threshold = 16
+max-fn-params-bools = 0
+msrv = "1.85"
+single-char-binding-names-threshold = 3
+too-many-arguments-threshold = 5
+too-many-lines-threshold = 80
+trivial-copy-size-limit = 16
+type-complexity-threshold = 120
+
+disallowed-macros = [
+  { path = "std::dbg", reason = "return structured diagnostics instead of debug prints" },
+  { path = "std::eprintln", reason = "write structured errors through the CLI output layer" },
+  { path = "std::panic", reason = "return a typed error and non-zero exit status" },
+  { path = "std::print", reason = "write through an explicit stdout writer" },
+  { path = "std::println", reason = "write through an explicit stdout writer" },
+  { path = "std::todo", reason = "do not ship placeholder code" },
+  { path = "std::unimplemented", reason = "do not ship placeholder code" },
+]
+
+disallowed-methods = [
+  { path = "std::process::Command::spawn", reason = "use the process wrapper so output is captured" },
+  { path = "std::process::Command::status", reason = "use the process wrapper so output is captured" },
+]
+
+disallowed-types = [
+  { path = "std::collections::HashMap", reason = "prefer deterministic ordering for CLI output" },
+  { path = "std::collections::HashSet", reason = "prefer deterministic ordering for CLI output" },
+  { path = "std::sync::Mutex", reason = "avoid shared mutable state in the CLI" },
+  { path = "std::sync::RwLock", reason = "avoid shared mutable state in the CLI" },
+]

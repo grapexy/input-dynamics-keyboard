@@ -32,36 +32,39 @@ Use this keyboard only in consented, local research settings.
 
 ## Quick Start
 
-Build and install the debug APK:
+Build the host CLI:
+
+```bash
+cargo build -p input-dynamics
+```
+
+Install the latest published debug APK, select the IME, and run a local
+session:
+
+```bash
+RUN_ID=run-YYYYMMDD-HHMMSS-human-android
+
+target/debug/input-dynamics doctor
+target/debug/input-dynamics install
+target/debug/input-dynamics select-ime
+target/debug/input-dynamics start --run-id "$RUN_ID"
+target/debug/input-dynamics status
+target/debug/input-dynamics stop
+target/debug/input-dynamics pull --out "runs/$RUN_ID"
+target/debug/input-dynamics validate "runs/$RUN_ID" --run-id "$RUN_ID"
+```
+
+To build and install a local debug APK instead:
 
 ```bash
 ./gradlew :app:testRunTestsUnitTest :app:assembleDebug
-adb install -r app/build/outputs/apk/debug/InputDynamicsKeyboard_3.9-debug.apk
-PKG=org.inputdynamics.ime.debug
-IME_SERVICE="$(adb shell ime list -s | grep "^$PKG/" | head -n 1)"
-adb shell ime enable "$IME_SERVICE"
-adb shell ime set "$IME_SERVICE"
+APK="$(ls -t app/build/outputs/apk/debug/*-debug.apk | head -n 1)"
+target/debug/input-dynamics install --apk "$APK"
 ```
 
-Start and stop a local run:
+CLI reference: [docs/cli.md](docs/cli.md).
 
-```bash
-PKG=org.inputdynamics.ime.debug
-RUN_ID=run-YYYYMMDD-HHMMSS-human-android
-
-adb shell am broadcast -n "$PKG/.control.InputDynamicsControlReceiver" -a org.inputdynamics.ime.action.ENABLE
-adb shell am broadcast -n "$PKG/.control.InputDynamicsControlReceiver" -a org.inputdynamics.ime.action.START --es run_id "$RUN_ID"
-adb shell am broadcast -n "$PKG/.control.InputDynamicsControlReceiver" -a org.inputdynamics.ime.action.STATUS
-adb shell am broadcast -n "$PKG/.control.InputDynamicsControlReceiver" -a org.inputdynamics.ime.action.STOP
-```
-
-Pull debug logs:
-
-```bash
-adb pull /sdcard/Android/data/org.inputdynamics.ime.debug/files/input_dynamics_logs/ .
-```
-
-Full command reference: [docs/adb-control.md](docs/adb-control.md).
+Raw ADB command reference: [docs/adb-control.md](docs/adb-control.md).
 
 ## APK Releases
 
@@ -73,6 +76,7 @@ the HeliBoard base version for provenance. See [docs/releases.md](docs/releases.
 ## Documentation
 
 - [Documentation index](docs/README.md)
+- [Host CLI for agents and local runs](docs/cli.md)
 - [Input dynamics mode, privacy boundary, and schema](docs/input-dynamics-mode.md)
 - [ADB control and validation](docs/adb-control.md)
 - [APK release process](docs/releases.md)

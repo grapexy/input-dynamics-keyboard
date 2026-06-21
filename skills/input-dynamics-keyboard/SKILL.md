@@ -29,11 +29,7 @@ Use these defaults unless the repo or device status says otherwise:
 ```bash
 REPO=grapexy/input-dynamics-keyboard
 PKG=org.inputdynamics.ime.debug
-IME=helium314.keyboard.latin.LatinIME
-RECEIVER=.control.InputDynamicsControlReceiver
-ACTION_PREFIX=org.inputdynamics.ime.action
 LOG_DIR=input_dynamics_logs
-STATUS_FILE=input_dynamics_control_status.json
 ```
 
 GitHub Release APKs are currently debug-variant APKs, so the default package is
@@ -42,100 +38,93 @@ receiver and action names with `PKG=org.inputdynamics.ime`.
 
 ## Workflow
 
-1. Check the device:
+Prefer the Rust host CLI when a full repo checkout or installed
+`input-dynamics` binary is available. It emits JSON and wraps the lower-level
+ADB commands.
 
 ```bash
-adb devices
+idk() {
+  if command -v input-dynamics >/dev/null 2>&1; then
+    input-dynamics "$@"
+  else
+    cargo run --quiet -p input-dynamics -- "$@"
+  fi
+}
 ```
 
-2. Install the latest published APK:
+1. Check the host and device:
 
 ```bash
-mkdir -p /tmp/input-dynamics-keyboard
-gh release download --repo "$REPO" --pattern '*debug.apk' \
-  --dir /tmp/input-dynamics-keyboard --clobber
-APK="$(ls -t /tmp/input-dynamics-keyboard/*debug.apk | head -n 1)"
-adb install -r "$APK"
+idk doctor
 ```
 
-If GitHub CLI is unavailable or source changes must be tested, build locally
-from a repo checkout instead:
+2. Install the latest published debug APK:
+
+```bash
+idk install
+```
+
+To install a local build instead:
 
 ```bash
 ./gradlew :app:assembleDebug
-APK="$(ls -t app/build/outputs/apk/debug/*.apk | head -n 1)"
-adb install -r "$APK"
+APK="$(ls -t app/build/outputs/apk/debug/*-debug.apk | head -n 1)"
+idk install --apk "$APK"
 ```
 
-3. Confirm the installed APK does not request Internet permission:
+3. Enable and select the IME:
 
 ```bash
-if aapt dump permissions "$APK" | rg 'android.permission.INTERNET'; then
-  echo "Unexpected INTERNET permission"
-  exit 1
-else
-  echo "No INTERNET permission"
-fi
+idk select-ime
 ```
 
-4. Enable and select the IME:
-
-```bash
-adb shell ime enable "$PKG/$IME"
-adb shell ime set "$PKG/$IME"
-```
-
-5. Start a session with an external run id:
+4. Start a session with an external run id:
 
 ```bash
 RUN_ID=run-YYYYMMDD-HHMMSS-local-android
-adb shell am broadcast -n "$PKG/$RECEIVER" -a "$ACTION_PREFIX.ENABLE"
-adb shell am broadcast -n "$PKG/$RECEIVER" -a "$ACTION_PREFIX.START" --es run_id "$RUN_ID"
+idk start --run-id "$RUN_ID"
 ```
 
-6. Read status and layout:
+5. Read status and layout:
 
 ```bash
-adb shell am broadcast -n "$PKG/$RECEIVER" -a "$ACTION_PREFIX.STATUS"
-adb shell am broadcast -n "$PKG/$RECEIVER" -a "$ACTION_PREFIX.KEYBOARD_LAYOUT"
+idk status
+idk layout
 ```
 
-7. Stop and pull logs:
+6. Stop, pull, and validate logs:
 
 ```bash
-adb shell am broadcast -n "$PKG/$RECEIVER" -a "$ACTION_PREFIX.STOP"
-adb pull "/sdcard/Android/data/$PKG/files/$LOG_DIR/" .
+idk stop
+idk pull --out "runs/$RUN_ID"
+idk validate "runs/$RUN_ID" --run-id "$RUN_ID"
 ```
 
-See `references/adb-control.md` for exact command variants and fallbacks.
+If the CLI is unavailable, use `references/adb-control.md` for exact raw ADB
+command variants and fallbacks.
 
 ## Non-Screenshot Automation
 
 When the keyboard view is visible, use `KEYBOARD_LAYOUT` instead of screenshots.
-Select key entries by `key_label` or `key_code`, then tap their screen centers:
+With the CLI, tap by key label or code:
 
 ```bash
-adb shell input tap <tap_center_screen_x_px> <tap_center_screen_y_px>
+idk tap --label a
+idk tap --code 97
 ```
 
-After taps, verify that the JSONL log contains key/touch events and that status
-record counts advance. If `keyboard_layout.available` is false, make the IME
-visible in a text field and request the layout again.
+Without the CLI, select key entries from `KEYBOARD_LAYOUT` by `key_label` or
+`key_code`, then tap their screen centers with `adb shell input tap`.
 
 ## Validation
 
-Validate the pulled JSONL before considering a run complete:
+Validate pulled JSONL before considering a run complete:
 
 ```bash
-cat input_dynamics_logs/session-*.jsonl | jq -s --arg run_id "$RUN_ID" '
-  (map(select(.event == "session_start")) | length) >= 1 and
-  (map(select(.event == "session_stop")) | length) >= 1 and
-  all(.[]; .schema == "input_dynamics_event.v1") and
-  all(.[]; .external_run_id == $run_id) and
-  any(.[]; has("target_package")) and
-  all(.[]; .password_field != true)
-'
+idk validate "runs/$RUN_ID" --run-id "$RUN_ID"
 ```
 
-Read `references/jsonl-schema.md` before changing schema, event names, status
-fields, or validation logic.
+Expected validation includes `session_start`, `session_stop`,
+`external_run_id`, `target_package`, schema `input_dynamics_event.v1`, and no
+`password_field: true` records. Read `references/jsonl-schema.md` before
+changing schema, event names, status fields, or validation logic.

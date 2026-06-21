@@ -51,7 +51,7 @@ When changing exported fields:
 Build and test the debug variant before submitting changes:
 
 ```bash
-./gradlew :app:testDebugUnitTest :app:assembleDebug
+./gradlew :app:testRunTestsUnitTest :app:assembleDebug
 ```
 
 For release packaging checks:
@@ -65,6 +65,17 @@ Before opening a pull request, also run:
 ```bash
 git diff --check
 ```
+
+For Rust host CLI changes, run:
+
+```bash
+cargo ci-fmt
+cargo ci-test
+cargo ci-clippy
+```
+
+Prefer property-based tests for pure parsing, validation, and matching logic.
+Keep small example tests where they clarify lifecycle behavior.
 
 If the change affects ADB controls, validate against a device or emulator and
 include the exact commands used.

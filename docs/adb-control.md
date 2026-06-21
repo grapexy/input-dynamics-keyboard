@@ -4,6 +4,9 @@ Input Dynamics Keyboard has a local ADB control surface for coordinated
 research runs. It uses an explicit broadcast receiver and writes command status
 to `input_dynamics_control_status.json` next to the JSONL logs.
 
+For normal agent and scripted operation, prefer the host CLI in [cli.md](cli.md).
+Use this page as the raw protocol reference and fallback path.
+
 ## Build Artifacts
 
 Build and test the debug variant:
@@ -21,9 +24,9 @@ Build debug and unsigned release APKs:
 Current APK outputs:
 
 ```text
-app/build/outputs/apk/debug/InputDynamicsKeyboard_3.9-debug.apk
-app/build/outputs/apk/debugNoMinify/InputDynamicsKeyboard_3.9-debugNoMinify.apk
-app/build/outputs/apk/release/InputDynamicsKeyboard_3.9-release-unsigned.apk
+app/build/outputs/apk/debug/*-debug.apk
+app/build/outputs/apk/debugNoMinify/*-debugNoMinify.apk
+app/build/outputs/apk/release/*-release-unsigned.apk
 ```
 
 The GitHub Release workflow currently publishes the debug APK. The local release
@@ -54,7 +57,8 @@ org.inputdynamics.ime/org.inputdynamics.ime.control.InputDynamicsControlReceiver
 ## Install Debug Build
 
 ```bash
-adb install -r app/build/outputs/apk/debug/InputDynamicsKeyboard_3.9-debug.apk
+APK="$(ls -t app/build/outputs/apk/debug/*-debug.apk | head -n 1)"
+adb install -r "$APK"
 adb shell ime enable org.inputdynamics.ime.debug/helium314.keyboard.latin.LatinIME
 adb shell ime set org.inputdynamics.ime.debug/helium314.keyboard.latin.LatinIME
 ```
@@ -183,7 +187,8 @@ cat input_dynamics_logs/session-*.jsonl | jq -s --arg run_id "$RUN_ID" '
 Confirm the APK does not request Internet permission:
 
 ```bash
-aapt dump permissions app/build/outputs/apk/debug/InputDynamicsKeyboard_3.9-debug.apk | grep INTERNET
+APK="$(ls -t app/build/outputs/apk/debug/*-debug.apk | head -n 1)"
+aapt dump permissions "$APK" | grep INTERNET
 ```
 
 The command should print nothing.

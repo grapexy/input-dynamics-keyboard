@@ -1,0 +1,26 @@
+[package]
+name = "input-dynamics"
+version = "0.1.0"
+description = "Host-side ADB helper for Input Dynamics Keyboard"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "input-dynamics"
+path = "src/main.rs"
+
+[features]
+default = []
+
+[dependencies]
+clap = { version = "4.5.40", default-features = false, features = ["derive", "error-context", "help", "std", "suggestions", "usage"] }
+serde_json = { version = "1.0.140", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+proptest = { version = "1.6.0", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true
