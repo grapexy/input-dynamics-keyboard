@@ -143,7 +143,9 @@ jobs:
             exit 1
           fi
 
-          "$apksigner_bin" verify --print-certs "$debug_asset" | tee release-assets/APK_SIGNING_CERT_SHA256.txt
+          "$apksigner_bin" verify --print-certs "$debug_asset" \
+            | grep -E 'certificate DN:|certificate SHA-256 digest:' \
+            | tee release-assets/APK_SIGNING_CERT_SHA256.txt
           sha256sum release-assets/*.apk > release-assets/SHA256SUMS.txt
 
           cat > release-assets/RELEASE_NOTES.md <<EOF
