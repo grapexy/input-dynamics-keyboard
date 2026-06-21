@@ -145,8 +145,13 @@ scraping human-oriented text.
   starts an IME session, and starts a persistent local uinput controller. If
   another stateful session is active or starting, it returns `busy: true`
   without changing the active run.
-- `session status`: returns IME status plus local input-controller status.
-- `session stop`: stops the local input controller, then stops IME logging.
+- `session status`: returns IME status plus local input-controller status. When
+  the uinput controller is active, `input.state` includes the physical
+  touchscreen profile hash, mirrored virtual touchscreen event path, Event Hub
+  device metadata, and Input Reader device metadata when Android exposes them.
+- `session stop`: stops the local input controller, verifies normal runtime
+  cleanup, verifies that the mirrored virtual touchscreen event path has
+  disappeared when it was detected, then stops IME logging.
 - `layout`: returns status including `keyboard_layout` when the IME is visible.
 - `layout --wait-visible` / `layout --wait-hidden`: waits for keyboard layout
   visibility state before returning.

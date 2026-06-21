@@ -2,6 +2,7 @@
 
 use serde::Serialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::app::App;
 use crate::error::{CliError, CliResult};
@@ -138,14 +139,33 @@ pub(crate) const fn input_device_command() -> &'static str {
 }
 
 pub(crate) fn discover_touchscreen_profile(app: &App) -> CliResult<TouchscreenProfile> {
+    select_primary_touchscreen_profile(&discover_touchscreen_profiles(app)?)
+}
+
+pub(crate) fn discover_touchscreen_profiles(app: &App) -> CliResult<Vec<TouchscreenProfile>> {
     let output = app.adb_shell(
         vec![String::from("getevent"), String::from("-il")],
         FailureMode::RequireSuccess,
     )?;
-    parse_touchscreen_profile(output.stdout())
+    parse_touchscreen_profiles(output.stdout())
 }
 
+pub(crate) fn select_primary_touchscreen_profile(
+    profiles: &[TouchscreenProfile],
+) -> CliResult<TouchscreenProfile> {
+    profiles
+        .iter()
+        .max_by_key(|profile| profile_score(profile))
+        .cloned()
+        .ok_or_else(|| CliError::new("no direct touchscreen profile was found in getevent -il"))
+}
+
+#[cfg(test)]
 fn parse_touchscreen_profile(text: &str) -> CliResult<TouchscreenProfile> {
+    select_primary_touchscreen_profile(&parse_touchscreen_profiles(text)?)
+}
+
+fn parse_touchscreen_profiles(text: &str) -> CliResult<Vec<TouchscreenProfile>> {
     let mut devices = Vec::new();
     let mut current = None;
     for raw_line in text.lines() {
@@ -178,14 +198,13 @@ fn parse_touchscreen_profile(text: &str) -> CliResult<TouchscreenProfile> {
         devices.push(device);
     }
 
-    devices
+    Ok(devices
         .into_iter()
         .filter(|device| device.prop_bits.contains(&INPUT_PROP_DIRECT))
         .filter(|device| device.has_abs_axis(ABS_MT_POSITION_X))
         .filter(|device| device.has_abs_axis(ABS_MT_POSITION_Y))
         .filter_map(with_supported_bus_name)
-        .max_by_key(profile_score)
-        .ok_or_else(|| CliError::new("no direct touchscreen profile was found in getevent -il"))
+        .collect())
 }
 
 fn parse_device_line(device: &mut TouchscreenProfile, raw_line: &str) -> CliResult<()> {
@@ -310,6 +329,31 @@ pub(crate) fn delay_line(duration_ms: u64) -> CliResult<String> {
 
 pub(crate) fn profile_summary(profile: &TouchscreenProfile) -> Value {
     profile_summary_json(profile)
+}
+
+pub(crate) fn profile_hash(profile: &TouchscreenProfile) -> CliResult<String> {
+    let canonical_json = serde_json::to_vec(&canonical_profile_json(profile))?;
+    let digest = Sha256::digest(canonical_json);
+    Ok(hex_encode(&digest))
+}
+
+pub(crate) fn find_new_mirrored_touchscreen(
+    before: &[TouchscreenProfile],
+    after: &[TouchscreenProfile],
+    physical: &TouchscreenProfile,
+) -> Option<TouchscreenProfile> {
+    after
+        .iter()
+        .filter(|candidate| !profile_path_seen(before, candidate.event_path()))
+        .filter(|candidate| candidate.mirrors(physical))
+        .max_by_key(|candidate| profile_score(candidate))
+        .cloned()
+}
+
+pub(crate) fn touchscreen_event_path_exists(app: &App, event_path: &str) -> CliResult<bool> {
+    Ok(discover_touchscreen_profiles(app)?
+        .iter()
+        .any(|profile| profile.event_path() == event_path))
 }
 
 fn tap_stream(profile: &TouchscreenProfile, spec: TapSpec) -> CliResult<String> {
@@ -541,6 +585,48 @@ fn profile_summary_json(profile: &TouchscreenProfile) -> Value {
     })
 }
 
+fn canonical_profile_json(profile: &TouchscreenProfile) -> Value {
+    let mut key_bits = profile.key_bits.clone();
+    key_bits.sort_unstable();
+    key_bits.dedup();
+    let mut prop_bits = profile.prop_bits.clone();
+    prop_bits.sort_unstable();
+    prop_bits.dedup();
+    let mut abs_axes = profile.abs_axes.clone();
+    abs_axes.sort_by_key(|axis| axis.code);
+    json!({
+        "event_path": profile.event_path,
+        "name": profile.name,
+        "location": profile.location,
+        "unique_id": profile.unique_id,
+        "bus_hex": profile.bus_hex,
+        "bus": profile.bus_name,
+        "vendor_id": profile.vendor_id,
+        "product_id": profile.product_id,
+        "version_id": profile.version_id,
+        "key_bits": key_bits,
+        "prop_bits": prop_bits,
+        "abs_axes": abs_axes
+            .iter()
+            .map(canonical_abs_axis_json)
+            .collect::<Vec<Value>>(),
+    })
+}
+
+fn canonical_abs_axis_json(axis: &AbsAxis) -> Value {
+    json!({
+        "code": axis.code,
+        "name": axis.name,
+        "info": {
+            "minimum": axis.minimum,
+            "maximum": axis.maximum,
+            "fuzz": axis.fuzz,
+            "flat": axis.flat,
+            "resolution": axis.resolution,
+        },
+    })
+}
+
 fn abs_axis_json(axis: &AbsAxis) -> Value {
     json!({
         "code": axis.code,
@@ -607,6 +693,26 @@ fn ensure_axis_coordinate(
 }
 
 impl TouchscreenProfile {
+    pub(crate) fn event_path(&self) -> &str {
+        &self.event_path
+    }
+
+    fn mirrors(&self, physical: &Self) -> bool {
+        self.event_path != physical.event_path
+            && self.name == physical.name
+            && self.location == physical.location
+            && self.bus_hex == physical.bus_hex
+            && self.bus_name == physical.bus_name
+            && self.vendor_id == physical.vendor_id
+            && self.product_id == physical.product_id
+            && self.version_id == physical.version_id
+            && self.prop_bits.contains(&INPUT_PROP_DIRECT)
+            && axes_match(self, physical, ABS_MT_POSITION_X)
+            && axes_match(self, physical, ABS_MT_POSITION_Y)
+            && axes_match(self, physical, ABS_MT_SLOT)
+            && axes_match(self, physical, ABS_MT_TRACKING_ID)
+    }
+
     fn has_abs_axis(&self, code: i32) -> bool {
         self.abs_axes.iter().any(|axis| axis.code == code)
     }
@@ -616,10 +722,47 @@ impl TouchscreenProfile {
     }
 }
 
+fn axes_match(left: &TouchscreenProfile, right: &TouchscreenProfile, code: i32) -> bool {
+    match (left.axis(code), right.axis(code)) {
+        (Some(left_axis), Some(right_axis)) => {
+            left_axis.minimum == right_axis.minimum
+                && left_axis.maximum == right_axis.maximum
+                && left_axis.fuzz == right_axis.fuzz
+                && left_axis.flat == right_axis.flat
+                && left_axis.resolution == right_axis.resolution
+        }
+        (None, None) => true,
+        (Some(_), None) | (None, Some(_)) => false,
+    }
+}
+
+fn profile_path_seen(profiles: &[TouchscreenProfile], event_path: &str) -> bool {
+    profiles
+        .iter()
+        .any(|profile| profile.event_path() == event_path)
+}
+
 fn axis_value(profile: &TouchscreenProfile, code: i32, preferred: i32) -> i32 {
     profile.axis(code).map_or(preferred, |axis| {
         preferred.clamp(axis.minimum, axis.maximum)
     })
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        encoded.push(hex_char(byte >> 4));
+        encoded.push(hex_char(byte & 0x0f));
+    }
+    encoded
+}
+
+fn hex_char(nibble: u8) -> char {
+    match nibble {
+        0..=9 => char::from(b'0'.saturating_add(nibble)),
+        10..=15 => char::from(b'a'.saturating_add(nibble.saturating_sub(10))),
+        _ => '0',
+    }
 }
 
 fn sorted_abs_codes(profile: &TouchscreenProfile) -> Vec<i32> {
@@ -749,9 +892,10 @@ fn abs_code(label: &str) -> Option<i32> {
 mod tests {
     use proptest::strategy::Strategy;
 
+    use crate::error::{CliError, CliResult};
     use crate::uinput::{
-        ABS_MT_POSITION_X, ABS_MT_POSITION_Y, TapSpec, bus_name, parse_touchscreen_profile,
-        tap_stream,
+        ABS_MT_POSITION_X, ABS_MT_POSITION_Y, TapSpec, bus_name, find_new_mirrored_touchscreen,
+        parse_touchscreen_profile, parse_touchscreen_profiles, profile_hash, tap_stream,
     };
 
     const SAMPLE_GETEVENT: &str = r#"
@@ -876,6 +1020,52 @@ add device 2: /dev/input/event2
             rendered.contains("57,-1"),
             "stream should include tracking id release"
         );
+    }
+
+    #[test]
+    fn profile_hash_ignores_current_axis_values() {
+        let original = parse_touchscreen_profile(SAMPLE_GETEVENT);
+        assert!(original.is_ok(), "sample profile should parse");
+        let changed_values = SAMPLE_GETEVENT.replace(
+            "ABS_MT_POSITION_X     : value 0, min 0, max 1439",
+            "ABS_MT_POSITION_X     : value 321, min 0, max 1439",
+        );
+        let changed = parse_touchscreen_profile(&changed_values);
+        assert!(changed.is_ok(), "changed-value profile should parse");
+
+        let original_hash = original.and_then(|profile| profile_hash(&profile));
+        let changed_hash = changed.and_then(|profile| profile_hash(&profile));
+
+        assert_eq!(
+            original_hash.ok(),
+            changed_hash.ok(),
+            "profile hash should describe stable capability metadata, not live axis values"
+        );
+    }
+
+    #[test]
+    fn finds_new_mirrored_touchscreen_profile() -> CliResult<()> {
+        let before_profiles = parse_touchscreen_profiles(SAMPLE_GETEVENT)?;
+        let physical = before_profiles
+            .first()
+            .cloned()
+            .ok_or_else(|| CliError::new("physical profile should be present"))?;
+        let virtual_getevent = SAMPLE_GETEVENT.replace(
+            "add device 1: /dev/input/event3",
+            "add device 5: /dev/input/event4",
+        );
+        let after_getevent = format!("{SAMPLE_GETEVENT}\n{virtual_getevent}");
+        let after_profiles = parse_touchscreen_profiles(&after_getevent)?;
+
+        let detected = find_new_mirrored_touchscreen(&before_profiles, &after_profiles, &physical);
+        let detected_event_path = detected.map(|profile| profile.event_path);
+
+        if detected_event_path != Some(String::from("/dev/input/event4")) {
+            return Err(CliError::new(format!(
+                "new mirrored event node should be selected, got {detected_event_path:?}"
+            )));
+        }
+        Ok(())
     }
 
     proptest::proptest! {

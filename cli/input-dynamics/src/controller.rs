@@ -16,13 +16,17 @@ use serde_json::{Value, json};
 
 use crate::app::App;
 use crate::error::{CliError, CliResult};
-use crate::process::{StdinProcess, spawn_process_to_files, spawn_process_with_stdin_to_files};
+use crate::process::{
+    FailureMode, StdinProcess, spawn_process_to_files, spawn_process_with_stdin_to_files,
+};
 use crate::uinput::{self, TapSpec};
 
 const RUNTIME_DIR_ENV: &str = "INPUT_DYNAMICS_RUNTIME_DIR";
 const START_TIMEOUT: Duration = Duration::from_secs(8);
 const START_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const START_LOCK_STALE_MS: u128 = 120_000;
+const CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
+const CLEANUP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const STOP_TAIL_MS: u64 = 100;
 
 #[derive(Debug)]
@@ -213,8 +217,13 @@ pub(crate) fn stop(app: &App) -> CliResult<Value> {
         }));
     }
 
+    let virtual_event_path = before
+        .pointer("/state/virtual_touchscreen/profile/event_path")
+        .and_then(Value::as_str)
+        .map(String::from);
     let response = send_request(&paths.socket, &ControllerRequest::Stop)?;
     remove_stale_runtime(&paths)?;
+    let cleanup = cleanup_report(app, &paths, virtual_event_path.as_deref());
     Ok(json!({
         "ok": response.get("ok").and_then(Value::as_bool).unwrap_or(false),
         "active": false,
@@ -223,6 +232,7 @@ pub(crate) fn stop(app: &App) -> CliResult<Value> {
         "already_stopped": false,
         "before": before,
         "controller": response,
+        "cleanup": cleanup,
     }))
 }
 
@@ -252,7 +262,8 @@ pub(crate) fn tap(app: &App, spec: TapSpec) -> CliResult<Value> {
 pub(crate) fn run(app: &App, config: &RunConfig) -> CliResult<Value> {
     remove_file_if_exists(&config.socket)?;
     let listener = UnixListener::bind(&config.socket)?;
-    let profile = uinput::discover_touchscreen_profile(app)?;
+    let before_profiles = uinput::discover_touchscreen_profiles(app)?;
+    let profile = uinput::select_primary_touchscreen_profile(&before_profiles)?;
     let mut uinput_process = start_uinput_process(app, config)?;
     write_uinput_line(&mut uinput_process, &uinput::register_line(&profile)?)?;
     write_uinput_line(
@@ -262,7 +273,8 @@ pub(crate) fn run(app: &App, config: &RunConfig) -> CliResult<Value> {
     thread::sleep(Duration::from_millis(uinput::DEVICE_SETTLE_MS));
     ensure_uinput_alive(&mut uinput_process)?;
 
-    let state = controller_state(app, config, &profile)?;
+    let virtual_touchscreen = virtual_touchscreen_report(app, &profile, &before_profiles);
+    let state = controller_state(app, config, &profile, &virtual_touchscreen)?;
     write_json_file(&config.state, &state)?;
 
     let mut stopped = false;
@@ -457,6 +469,7 @@ fn controller_state(
     app: &App,
     config: &RunConfig,
     profile: &uinput::TouchscreenProfile,
+    virtual_touchscreen: &Value,
 ) -> CliResult<Value> {
     Ok(json!({
         "schema": "input_dynamics_controller_state.v1",
@@ -470,8 +483,402 @@ fn controller_state(
         "started_wall_ms": wall_time_ms(),
         "input_backend": "uinput",
         "input_device_command": uinput::input_device_command(),
+        "physical_touchscreen_profile_hash": uinput::profile_hash(profile)?,
         "physical_touchscreen": uinput::profile_summary(profile),
+        "virtual_touchscreen": virtual_touchscreen,
     }))
+}
+
+fn virtual_touchscreen_report(
+    app: &App,
+    physical: &uinput::TouchscreenProfile,
+    before_profiles: &[uinput::TouchscreenProfile],
+) -> Value {
+    let after_profiles = match uinput::discover_touchscreen_profiles(app) {
+        Ok(profiles) => profiles,
+        Err(error) => {
+            return json!({
+                "detected": false,
+                "error": error.to_string(),
+            });
+        }
+    };
+    let Some(virtual_profile) =
+        uinput::find_new_mirrored_touchscreen(before_profiles, &after_profiles, physical)
+    else {
+        return json!({
+            "detected": false,
+            "candidate_count": after_profiles.len().saturating_sub(before_profiles.len()),
+            "after_touchscreen_count": after_profiles.len(),
+        });
+    };
+    json!({
+        "detected": true,
+        "profile_hash": uinput::profile_hash(&virtual_profile).ok(),
+        "profile": uinput::profile_summary(&virtual_profile),
+        "framework": framework_input_device_report(app, virtual_profile.event_path()),
+    })
+}
+
+fn framework_input_device_report(app: &App, event_path: &str) -> Value {
+    let output = match app.adb_shell(
+        vec![String::from("dumpsys"), String::from("input")],
+        FailureMode::AllowFailure,
+    ) {
+        Ok(output) => output,
+        Err(error) => {
+            return json!({
+                "ok": false,
+                "event_path": event_path,
+                "error": error.to_string(),
+            });
+        }
+    };
+    if output.status_code != Some(0_i32) {
+        return json!({
+            "ok": false,
+            "event_path": event_path,
+            "process": output.json(),
+        });
+    }
+    let parsed = parse_dumpsys_input(output.stdout());
+    let Some(event_hub) = parsed
+        .event_hub_devices
+        .iter()
+        .find(|device| device.path.as_deref() == Some(event_path))
+    else {
+        return json!({
+            "ok": false,
+            "event_path": event_path,
+            "error": "event path was not found in dumpsys input",
+        });
+    };
+    let input_reader = parsed
+        .reader_devices
+        .iter()
+        .find(|device| device.event_hub_ids.contains(&event_hub.id));
+    json!({
+        "ok": true,
+        "event_path": event_path,
+        "event_hub": event_hub.to_json(),
+        "input_reader": input_reader.map(InputReaderDevice::to_json),
+    })
+}
+
+fn cleanup_report(app: &App, paths: &RuntimePaths, virtual_event_path: Option<&str>) -> Value {
+    json!({
+        "runtime": wait_for_runtime_cleanup(paths),
+        "virtual_touchscreen": wait_for_virtual_touchscreen_cleanup(app, virtual_event_path),
+    })
+}
+
+fn wait_for_runtime_cleanup(paths: &RuntimePaths) -> Value {
+    let start = Instant::now();
+    loop {
+        let socket_exists = paths.socket.exists();
+        let state_exists = paths.state.exists();
+        if !socket_exists && !state_exists {
+            return json!({
+                "ok": true,
+                "socket_exists": false,
+                "state_exists": false,
+                "elapsed_ms": millis_u64(start.elapsed()),
+            });
+        }
+        if start.elapsed() >= CLEANUP_TIMEOUT {
+            return json!({
+                "ok": false,
+                "socket_exists": socket_exists,
+                "state_exists": state_exists,
+                "elapsed_ms": millis_u64(start.elapsed()),
+                "timeout_ms": millis_u64(CLEANUP_TIMEOUT),
+            });
+        }
+        thread::sleep(CLEANUP_POLL_INTERVAL);
+    }
+}
+
+fn wait_for_virtual_touchscreen_cleanup(app: &App, maybe_event_path: Option<&str>) -> Value {
+    let Some(event_path) = maybe_event_path else {
+        return json!({
+            "ok": true,
+            "skipped": true,
+            "reason": "virtual event path was not detected",
+        });
+    };
+    let start = Instant::now();
+    loop {
+        match uinput::touchscreen_event_path_exists(app, event_path) {
+            Ok(false) => {
+                return json!({
+                    "ok": true,
+                    "event_path": event_path,
+                    "present": false,
+                    "elapsed_ms": millis_u64(start.elapsed()),
+                });
+            }
+            Ok(true) => {}
+            Err(error) => {
+                return json!({
+                    "ok": false,
+                    "event_path": event_path,
+                    "error": error.to_string(),
+                });
+            }
+        }
+        if start.elapsed() >= CLEANUP_TIMEOUT {
+            return json!({
+                "ok": false,
+                "event_path": event_path,
+                "present": true,
+                "elapsed_ms": millis_u64(start.elapsed()),
+                "timeout_ms": millis_u64(CLEANUP_TIMEOUT),
+            });
+        }
+        thread::sleep(CLEANUP_POLL_INTERVAL);
+    }
+}
+
+#[derive(Debug, Default)]
+struct ParsedInputDumpsys {
+    event_hub_devices: Vec<EventHubDevice>,
+    reader_devices: Vec<InputReaderDevice>,
+}
+
+#[derive(Debug, Default)]
+struct EventHubDevice {
+    id: i64,
+    name: String,
+    classes: Option<String>,
+    path: Option<String>,
+    enabled: Option<bool>,
+    descriptor: Option<String>,
+    location: Option<String>,
+    unique_id: Option<String>,
+    identifier: Option<String>,
+    video_device: Option<String>,
+    sysfs_device_path: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct InputReaderDevice {
+    id: i64,
+    name: String,
+    event_hub_ids: Vec<i64>,
+    is_virtual_device: Option<bool>,
+    sources: Option<String>,
+    sysfs_root_path: Option<String>,
+}
+
+impl EventHubDevice {
+    fn to_json(&self) -> Value {
+        json!({
+            "id": self.id,
+            "name": self.name,
+            "classes": self.classes,
+            "path": self.path,
+            "enabled": self.enabled,
+            "descriptor": self.descriptor,
+            "location": self.location,
+            "unique_id": self.unique_id,
+            "identifier": self.identifier,
+            "video_device": self.video_device,
+            "sysfs_device_path": self.sysfs_device_path,
+        })
+    }
+}
+
+impl InputReaderDevice {
+    fn to_json(&self) -> Value {
+        json!({
+            "id": self.id,
+            "name": self.name,
+            "event_hub_ids": self.event_hub_ids,
+            "is_virtual_device": self.is_virtual_device,
+            "sources": self.sources,
+            "sysfs_root_path": self.sysfs_root_path,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DumpsysSection {
+    None,
+    EventHub,
+    InputReader,
+}
+
+fn parse_dumpsys_input(text: &str) -> ParsedInputDumpsys {
+    let mut parsed = ParsedInputDumpsys::default();
+    let mut section = DumpsysSection::None;
+    let mut current_event_hub = None;
+    let mut current_reader = None;
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed == "Event Hub State:" {
+            push_current_event_hub(&mut parsed, &mut current_event_hub);
+            push_current_reader(&mut parsed, &mut current_reader);
+            section = DumpsysSection::EventHub;
+            continue;
+        }
+        if trimmed.starts_with("Input Reader State") {
+            push_current_event_hub(&mut parsed, &mut current_event_hub);
+            push_current_reader(&mut parsed, &mut current_reader);
+            section = DumpsysSection::InputReader;
+            continue;
+        }
+
+        match section {
+            DumpsysSection::EventHub => {
+                if let Some((id, name)) = parse_event_hub_header(line) {
+                    push_current_event_hub(&mut parsed, &mut current_event_hub);
+                    current_event_hub = Some(EventHubDevice {
+                        id,
+                        name,
+                        ..EventHubDevice::default()
+                    });
+                    continue;
+                }
+                if let Some(device) = current_event_hub.as_mut() {
+                    parse_event_hub_property(device, trimmed);
+                }
+            }
+            DumpsysSection::InputReader => {
+                if let Some((id, name)) = parse_input_reader_header(trimmed) {
+                    push_current_reader(&mut parsed, &mut current_reader);
+                    current_reader = Some(InputReaderDevice {
+                        id,
+                        name,
+                        ..InputReaderDevice::default()
+                    });
+                    continue;
+                }
+                if let Some(device) = current_reader.as_mut() {
+                    parse_input_reader_property(device, trimmed);
+                }
+            }
+            DumpsysSection::None => {}
+        }
+    }
+
+    push_current_event_hub(&mut parsed, &mut current_event_hub);
+    push_current_reader(&mut parsed, &mut current_reader);
+    parsed
+}
+
+fn push_current_event_hub(parsed: &mut ParsedInputDumpsys, current: &mut Option<EventHubDevice>) {
+    if let Some(device) = current.take() {
+        parsed.event_hub_devices.push(device);
+    }
+}
+
+fn push_current_reader(parsed: &mut ParsedInputDumpsys, current: &mut Option<InputReaderDevice>) {
+    if let Some(device) = current.take() {
+        parsed.reader_devices.push(device);
+    }
+}
+
+fn parse_event_hub_header(line: &str) -> Option<(i64, String)> {
+    if !line.starts_with("    ") || line.starts_with("      ") {
+        return None;
+    }
+    parse_id_name_header(line.trim())
+}
+
+fn parse_input_reader_header(trimmed: &str) -> Option<(i64, String)> {
+    let rest = trimmed.strip_prefix("Device ")?;
+    parse_id_name_header(rest)
+}
+
+fn parse_id_name_header(text: &str) -> Option<(i64, String)> {
+    let (id_text, name_text) = text.split_once(':')?;
+    let id = id_text.trim().parse::<i64>().ok()?;
+    let name = name_text.trim();
+    if name.is_empty() {
+        return None;
+    }
+    Some((id, String::from(name)))
+}
+
+fn parse_event_hub_property(device: &mut EventHubDevice, trimmed: &str) {
+    if let Some(value) = labeled_value(trimmed, "Classes") {
+        device.classes = Some(value);
+        return;
+    }
+    if let Some(value) = labeled_value(trimmed, "Path") {
+        device.path = Some(value);
+        return;
+    }
+    if let Some(value) = labeled_value(trimmed, "Enabled") {
+        device.enabled = parse_bool(&value);
+        return;
+    }
+    if let Some(value) = labeled_value(trimmed, "Descriptor") {
+        device.descriptor = Some(value);
+        return;
+    }
+    if let Some(value) = labeled_value(trimmed, "Location") {
+        device.location = Some(value);
+        return;
+    }
+    if let Some(value) = labeled_value(trimmed, "UniqueId") {
+        device.unique_id = Some(value);
+        return;
+    }
+    if let Some(value) = labeled_value(trimmed, "Identifier") {
+        device.identifier = Some(value);
+        return;
+    }
+    if let Some(value) = labeled_value(trimmed, "VideoDevice") {
+        device.video_device = Some(value);
+        return;
+    }
+    if let Some(value) = labeled_value(trimmed, "SysfsDevicePath") {
+        device.sysfs_device_path = Some(value);
+    }
+}
+
+fn parse_input_reader_property(device: &mut InputReaderDevice, trimmed: &str) {
+    if let Some(value) = labeled_value(trimmed, "EventHub Devices") {
+        device.event_hub_ids = parse_i64_list(&value);
+        return;
+    }
+    if let Some(value) = labeled_value(trimmed, "IsVirtualDevice") {
+        device.is_virtual_device = parse_bool(&value);
+        return;
+    }
+    if let Some(value) = labeled_value(trimmed, "Sources") {
+        device.sources = Some(value);
+        return;
+    }
+    if let Some(value) = labeled_value(trimmed, "SysfsRootPath") {
+        device.sysfs_root_path = Some(value);
+    }
+}
+
+fn labeled_value(trimmed: &str, label: &str) -> Option<String> {
+    trimmed
+        .strip_prefix(label)
+        .and_then(|value| value.strip_prefix(':'))
+        .map(str::trim)
+        .map(String::from)
+}
+
+fn parse_bool(value: &str) -> Option<bool> {
+    match value {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+fn parse_i64_list(value: &str) -> Vec<i64> {
+    value
+        .trim_matches(|character| matches!(character, '[' | ']'))
+        .split_whitespace()
+        .filter_map(|part| part.parse::<i64>().ok())
+        .collect()
 }
 
 fn write_json_file(path: &Path, value: &Value) -> CliResult<()> {
@@ -600,6 +1007,10 @@ fn wall_time_ms() -> u128 {
         .map_or(0_u128, |duration| duration.as_millis())
 }
 
+fn millis_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
 impl SessionStartLock {
     pub(crate) fn activate(&mut self, input_status: &Value) -> CliResult<()> {
         let active_lock = json!({
@@ -685,7 +1096,44 @@ mod tests {
 
     use proptest::strategy::Strategy;
 
-    use crate::controller::{RuntimePaths, sanitize_path_component};
+    use crate::controller::{
+        RuntimePaths, parse_dumpsys_input, parse_i64_list, sanitize_path_component,
+    };
+
+    const SAMPLE_DUMPSYS_INPUT: &str = r"
+Event Hub State:
+  Devices:
+    1: sec_touchscreen
+      Classes: KEYBOARD | TOUCH | TOUCH_MT
+      Path: /dev/input/event3
+      Enabled: true
+      Descriptor: 48ee483b8b70f8343840706d561e5b8d5cb64b8c
+      Location: sec_touchscreen/input1
+      UniqueId: google_touchscreen
+      Identifier: bus=0x001c, vendor=0x0000, product=0x0000, version=0x0000, bluetoothAddress=<not set>
+      VideoDevice: Video device sec_touchscreen (/dev/v4l-touch0) : height=39, width=18, fd=254, hasValidFd=true
+      SysfsDevicePath: /sys/devices/platform/mock-touch
+    5: sec_touchscreen
+      Classes: KEYBOARD | TOUCH | TOUCH_MT
+      Path: /dev/input/event4
+      Enabled: true
+      Descriptor: virtual-descriptor
+      Location: sec_touchscreen/input1
+      UniqueId: <not set>
+      Identifier: bus=0x001c, vendor=0x0000, product=0x0000, version=0x0000, bluetoothAddress=<not set>
+      SysfsDevicePath: /sys/devices/virtual/input/input42
+Input Reader State (Nums of device: 4):
+  Device 4: sec_touchscreen
+    EventHub Devices: [ 1 ]
+    IsVirtualDevice: false
+    Sources: KEYBOARD | TOUCHSCREEN
+    SysfsRootPath:     /sys/devices/platform/mock-touch
+  Device 7: sec_touchscreen
+    EventHub Devices: [ 5 ]
+    IsVirtualDevice: true
+    Sources: KEYBOARD | TOUCHSCREEN
+    SysfsRootPath:     /sys/devices/virtual/input/input42
+";
 
     #[test]
     fn runtime_paths_include_sanitized_package_and_serial() {
@@ -700,6 +1148,42 @@ mod tests {
                 .is_some_and(|name| name.contains("org.inputdynamics.ime_debug.device_123.sock")),
             "socket path should include sanitized package name and device serial"
         );
+    }
+
+    #[test]
+    fn parses_dumpsys_input_event_hub_and_input_reader_links() {
+        let parsed = parse_dumpsys_input(SAMPLE_DUMPSYS_INPUT);
+
+        let event_hub = parsed
+            .event_hub_devices
+            .iter()
+            .find(|device| device.path.as_deref() == Some("/dev/input/event4"));
+        assert!(
+            event_hub.is_some(),
+            "virtual event path should be parsed from Event Hub state"
+        );
+        let event_hub_id = event_hub.map_or(0_i64, |device| device.id);
+        assert_eq!(event_hub_id, 5, "Event Hub id should be parsed");
+
+        let reader = parsed
+            .reader_devices
+            .iter()
+            .find(|device| device.event_hub_ids.contains(&event_hub_id));
+        assert!(
+            reader.is_some(),
+            "Input Reader device should link back to Event Hub id"
+        );
+        assert_eq!(reader.map(|device| device.id), Some(7));
+        assert_eq!(
+            reader.and_then(|device| device.is_virtual_device),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn parses_framework_id_list() {
+        assert_eq!(parse_i64_list("[ 1 5 ]"), vec![1, 5]);
+        assert_eq!(parse_i64_list("[ ]"), Vec::<i64>::new());
     }
 
     proptest::proptest! {

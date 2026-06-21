@@ -19,6 +19,7 @@ default = []
 clap = { version = "4.5.40", default-features = false, features = ["derive", "error-context", "help", "std", "suggestions", "usage"] }
 serde = { version = "1.0.219", default-features = false, features = ["alloc", "derive"] }
 serde_json = { version = "1.0.140", default-features = false, features = ["std"] }
+sha2 = { version = "0.10.9", default-features = false }
 
 [dev-dependencies]
 proptest = { version = "1.6.0", default-features = false, features = ["std"] }
