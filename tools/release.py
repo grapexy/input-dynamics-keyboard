@@ -4,8 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
-import os
 import re
 import subprocess
 import sys
@@ -29,35 +27,6 @@ def run(args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[s
     )
 
 
-def repo_token() -> str | None:
-    token = os.environ.get("GH_TOKEN")
-    if token:
-        return token.strip()
-    token_file = ROOT / ".git" / "gh" / "token"
-    if token_file.is_file():
-        token = token_file.read_text().strip()
-        if token:
-            return token
-    return None
-
-
-def push(refspec: str) -> None:
-    token = repo_token()
-    if token is None:
-        run(["git", "push", "origin", refspec])
-        return
-
-    encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
-    run([
-        "git",
-        "-c",
-        f"http.https://github.com/.extraheader=AUTHORIZATION: basic {encoded}",
-        "push",
-        "origin",
-        refspec,
-    ])
-
-
 def require_clean_worktree() -> None:
     status = run(["git", "status", "--short"]).stdout.strip()
     if status:
@@ -78,7 +47,7 @@ def version_code(version: str) -> int:
     if major > 20 or minor > 999 or patch > 999:
         print("Version is too large for the release versionCode scheme.", file=sys.stderr)
         sys.exit(1)
-    return major * 1_000_000 + minor * 1_000 + patch
+    return 100_000 + major * 1_000_000 + minor * 1_000 + patch
 
 
 def update_gradle_version(version: str, upstream: str) -> None:
@@ -157,8 +126,8 @@ def main() -> None:
     print(f"Android versionCode: {version_code(args.version)}")
 
     if args.push:
-        push("main")
-        push(tag)
+        run(["git", "push", "origin", "main"])
+        run(["git", "push", "origin", tag])
         print(f"Pushed main and {tag}. GitHub Actions will publish the debug APK release.")
     else:
         print("Review the commit, then push with:")

@@ -52,8 +52,9 @@ GitHub Release APK assets include the same provenance:
 InputDynamicsKeyboard-v0.1.0-heli3.9-debug.apk
 ```
 
-`versionCode` is derived from SemVer as `major * 1000000 + minor * 1000 +
-patch`, so `0.1.0` becomes `1000`.
+`versionCode` is derived from SemVer as `100000 + major * 1000000 + minor *
+1000 + patch`, so `0.1.0` becomes `101000`. The offset keeps public fork APKs
+above earlier 3.9-based local debug builds.
 
 ## Release Verification
 
