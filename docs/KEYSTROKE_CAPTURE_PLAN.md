@@ -19,21 +19,23 @@ metadata. Treat millisecond event time as the primary comparable signal.
 
 ## Event Types
 
-Minimum useful set:
+Implemented base set:
 
 - `session_start`
 - `session_stop`
 - `field_enter`
 - `field_exit`
+- `pointer_sample`
 - `key_down`
 - `key_up`
+- `key_commit`
+- `key_repeat`
+- `key_long_press`
 - `key_cancel`
-- `pointer_move`
-- `commit`
-- `backspace`
-- `space`
-- `enter`
-- `suggestion_pick`
+
+Key records use `key_class` values such as `letter`, `digit`, `symbol`,
+`space`, `enter`, `delete`, `modifier`, `action`, and `function`; they do not
+store the raw key label, code point, output text, or surrounding field text.
 
 ## Fields
 
@@ -44,18 +46,20 @@ Recommended event fields:
 - `event`
 - `t_wall_ms`
 - `t_uptime_ms`
+- `t_event_uptime_ms`
 - `pointer_id`
-- `key_id`
 - `key_class`
 - `x_px`
 - `y_px`
-- `x_norm`
-- `y_norm`
+- `key_touch_x_ratio`
+- `key_touch_y_ratio`
+- `key_center_offset_x_px`
+- `key_center_offset_y_px`
 - `pressure`
 - `size`
-- `keyboard_layout`
+- `target_package`
 - `input_type_class`
-- `input_variation`
+- `input_type_variation`
 - `password_field`
 
 Avoid raw text. If text is needed for a controlled calibration task, use a
@@ -85,12 +89,15 @@ permission or broad storage permissions.
 Suggested path:
 
 ```text
+/sdcard/Android/data/org.typingresearch.ime/files/research_typing_logs/session-YYYYMMDD-HHMMSS.jsonl
 /sdcard/Android/data/org.typingresearch.ime.debug/files/research_typing_logs/session-YYYYMMDD-HHMMSS.jsonl
 ```
 
-Debug builds must be inspectable through direct ADB pull:
+Release and debug builds use distinct Android package IDs, so their direct
+ADB paths differ:
 
 ```bash
+adb pull /sdcard/Android/data/org.typingresearch.ime/files/research_typing_logs/ .
 adb pull /sdcard/Android/data/org.typingresearch.ime.debug/files/research_typing_logs/ .
 ```
 

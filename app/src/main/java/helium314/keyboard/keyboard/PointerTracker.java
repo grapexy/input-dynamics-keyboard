@@ -34,6 +34,7 @@ import helium314.keyboard.latin.common.Constants;
 import helium314.keyboard.latin.common.CoordinateUtils;
 import helium314.keyboard.latin.common.InputPointers;
 import helium314.keyboard.latin.define.DebugFlags;
+import helium314.keyboard.latin.research.ResearchSessionLogger;
 import helium314.keyboard.latin.settings.Settings;
 import helium314.keyboard.latin.settings.SettingsValues;
 import helium314.keyboard.latin.utils.KtxKt;
@@ -723,6 +724,7 @@ public final class PointerTracker implements PointerTrackerQueue.Element,
                 key = onDownKey(x, y + yOffset, eventTime);
             }
 
+            ResearchSessionLogger.logKeyEvent("key_down", mPointerId, x, y, eventTime, key);
             startRepeatKey(key);
             startLongPressTimer(key);
             setPressedKeyGraphics(key, eventTime);
@@ -1055,6 +1057,7 @@ public final class PointerTracker implements PointerTrackerQueue.Element,
         mCurrentKey = null;
         final int currentRepeatingKeyCode = mCurrentRepeatingKeyCode;
         mCurrentRepeatingKeyCode = Constants.NOT_A_CODE;
+        ResearchSessionLogger.logKeyEvent("key_up", mPointerId, x, y, eventTime, currentKey);
         // Release the last pressed key.
         setReleasedKeyGraphics(currentKey, true);
 
@@ -1131,6 +1134,8 @@ public final class PointerTracker implements PointerTrackerQueue.Element,
         if (key == null) {
             return;
         }
+        ResearchSessionLogger.logKeyEvent("key_long_press", mPointerId, mLastX, mLastY,
+                SystemClock.uptimeMillis(), key);
         sListener.onLongPressKey(key.getCode());
         if (key.hasNoPanelAutoPopupKey()) {
             cancelKeyTracking();
@@ -1192,6 +1197,8 @@ public final class PointerTracker implements PointerTrackerQueue.Element,
 
     private void onCancelEventInternal() {
         sTimerProxy.cancelKeyTimersOf(this);
+        ResearchSessionLogger.logKeyEvent("key_cancel", mPointerId, mLastX, mLastY,
+                SystemClock.uptimeMillis(), mCurrentKey);
         setReleasedKeyGraphics(mCurrentKey, true);
         resetKeySelectionByDraggingFinger();
         dismissPopupKeysPanel();
@@ -1273,6 +1280,7 @@ public final class PointerTracker implements PointerTrackerQueue.Element,
             return;
         }
 
+        ResearchSessionLogger.logKeyEvent("key_commit", mPointerId, x, y, eventTime, key);
         final int code = key.getCode();
         callListenerOnCodeInput(key, code, x, y, eventTime, false);
         callListenerOnRelease(key, code, false);
@@ -1303,7 +1311,9 @@ public final class PointerTracker implements PointerTrackerQueue.Element,
         final int nextRepeatCount = repeatCount + 1;
         startKeyRepeatTimer(nextRepeatCount);
         callListenerOnPressAndCheckKeyboardLayoutChange(key, repeatCount);
-        callListenerOnCodeInput(key, code, mKeyX, mKeyY, SystemClock.uptimeMillis(), true);
+        final long repeatTime = SystemClock.uptimeMillis();
+        ResearchSessionLogger.logKeyEvent("key_repeat", mPointerId, mKeyX, mKeyY, repeatTime, key);
+        callListenerOnCodeInput(key, code, mKeyX, mKeyY, repeatTime, true);
     }
 
     private void startKeyRepeatTimer(final int repeatCount) {

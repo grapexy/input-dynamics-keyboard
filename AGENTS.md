@@ -83,10 +83,11 @@ Minimum event fields:
 - `t_uptime_ms`
 - `t_wall_ms`
 - `pointer_id`
-- `key_id`
 - `key_class`
-- `x_norm`
-- `y_norm`
+- `key_touch_x_ratio`
+- `key_touch_y_ratio`
+- `key_center_offset_x_px`
+- `key_center_offset_y_px`
 - `pressure`
 - `size`
 - `password_field`
@@ -101,6 +102,8 @@ Avoid raw text unless a separate written protocol explicitly requires it.
 - Prefer additive research code over broad refactors.
 - Document every schema change in `docs/`.
 - Build and test the debug variant before installing on a device.
+- Expected release readback pattern:
+  `adb pull /sdcard/Android/data/org.typingresearch.ime/files/research_typing_logs/ .`
 - Expected debug readback pattern after the package rename:
   `adb pull /sdcard/Android/data/org.typingresearch.ime.debug/files/research_typing_logs/ .`
   Internal fallback files, if any, can still be inspected with

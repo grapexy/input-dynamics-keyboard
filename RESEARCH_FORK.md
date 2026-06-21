@@ -36,14 +36,14 @@ Primary measurements:
 
 ## Implementation Direction
 
-Start with a minimal instrumentation layer rather than broad refactors:
+The fork uses a minimal instrumentation layer rather than broad refactors:
 
-1. Add a research logging toggle and explicit session start/stop state.
-2. Hook touch events at the keyboard view / pointer tracking layer.
-3. Emit append-only JSONL records to app-specific external storage.
-4. Add a manual export action from settings.
-5. Add ADB readback documentation for direct `adb pull`.
-6. Add password-field checks from `EditorInfo.inputType` before logging.
+1. Research logging toggle and explicit session start/stop state.
+2. Raw touch samples from `MainKeyboardView`.
+3. Interpreted key timing from `PointerTracker`.
+4. Append-only JSONL records in app-specific external storage.
+5. Settings screen showing the exact log path and ADB pull command.
+6. Password-field checks from `InputAttributes` before logging.
 
 Candidate source areas:
 
@@ -62,7 +62,7 @@ versioned from the first implementation.
 Example:
 
 ```json
-{"schema":"typing_event.v1","session_id":"local-random-id","event":"key_down","t_uptime_ms":123456789,"key_id":"KEY_A","key_class":"letter","x_norm":0.52,"y_norm":0.44,"pressure":0.31,"size":0.04}
+{"schema":"typing_event.v1","session_id":"local-random-id","event":"key_down","t_uptime_ms":123456789,"t_event_uptime_ms":123456700,"key_class":"letter","key_touch_x_ratio":0.52,"key_touch_y_ratio":0.44}
 ```
 
 Do not include typed field contents unless a later experiment has a written
@@ -70,7 +70,13 @@ protocol and explicit consent for that exact collection mode.
 
 ## ADB Readback
 
-For debug builds, collected files should be pullable directly:
+For release builds:
+
+```bash
+adb pull /sdcard/Android/data/org.typingresearch.ime/files/research_typing_logs/ .
+```
+
+For debug builds:
 
 ```bash
 adb pull /sdcard/Android/data/org.typingresearch.ime.debug/files/research_typing_logs/ .
@@ -79,6 +85,7 @@ adb pull /sdcard/Android/data/org.typingresearch.ime.debug/files/research_typing
 Use app-specific external storage as the primary research log directory:
 
 ```text
+/sdcard/Android/data/org.typingresearch.ime/files/research_typing_logs/
 /sdcard/Android/data/org.typingresearch.ime.debug/files/research_typing_logs/
 ```
 
