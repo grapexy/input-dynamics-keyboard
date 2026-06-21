@@ -9,20 +9,24 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use serde_json::{Value, json};
 
 use crate::app::{App, LOG_DIR};
-use crate::args::{Commands, ControllerCommand, PressKey, SessionCommand, TouchCommand};
+use crate::args::{
+    Commands, ControllerCommand, EdgeSide, HideKeyboardMethod, PressKey, SessionCommand,
+    TouchCommand,
+};
 use crate::controller::{self, RunConfig, SessionStartPermit};
 use crate::error::{CliError, CliResult};
 use crate::layout::{json_number_to_shell_arg, key_matches};
 use crate::process::{FailureMode, run_process};
+use crate::ratio::{RatioPpm, SignedRatioPpm};
 use crate::record::{RecordConfig, record_run};
-use crate::uinput::{self, TapSpec};
+use crate::uinput::{self, PathSpec, TapSpec, TouchPoint};
 use crate::validate::validate_logs;
 
 const LAYOUT_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const LAYOUT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-pub(crate) fn run_command(app: &App, command: Commands) -> CliResult<Value> {
-    match command {
+pub(crate) fn run_command(app: &App, cli_command: Commands) -> CliResult<Value> {
+    match cli_command {
         Commands::Doctor => doctor(app),
         Commands::Install { apk, repo, dir } => install(app, apk.as_deref(), &repo, &dir),
         Commands::SelectIme => select_ime(app),
@@ -55,7 +59,9 @@ pub(crate) fn run_command(app: &App, command: Commands) -> CliResult<Value> {
             };
             layout(app, wait)
         }
-        Commands::HideKeyboard => hide_keyboard(app),
+        ref hide_command @ Commands::HideKeyboard { .. } => {
+            hide_keyboard_command(app, hide_command)
+        }
         Commands::ListLogs => app.broadcast("LIST_LOGS", Vec::new()),
         Commands::ClearLogs => app.broadcast("CLEAR_LOGS", Vec::new()),
         Commands::Pull { out } => pull_logs(app, &out),
@@ -392,34 +398,227 @@ fn layout(app: &App, wait: LayoutWait) -> CliResult<Value> {
     }
 }
 
-fn hide_keyboard(app: &App) -> CliResult<Value> {
+struct EdgeBackGestureConfig {
+    method: HideKeyboardMethod,
+    side: EdgeSide,
+    start_y_ratio: Option<RatioPpm>,
+    distance_ratio: Option<RatioPpm>,
+    end_y_drift_ratio: Option<SignedRatioPpm>,
+    edge_margin_ratio: Option<RatioPpm>,
+    duration_ms: Option<u64>,
+    steps: Option<u16>,
+}
+
+fn hide_keyboard_command(app: &App, command: &Commands) -> CliResult<Value> {
+    let &Commands::HideKeyboard {
+        method,
+        side,
+        start_y_ratio,
+        distance_ratio,
+        end_y_drift_ratio,
+        edge_margin_ratio,
+        duration_ms,
+        steps,
+    } = command
+    else {
+        return Err(CliError::new("expected hide-keyboard command"));
+    };
+    hide_keyboard(
+        app,
+        &EdgeBackGestureConfig {
+            method,
+            side,
+            start_y_ratio,
+            distance_ratio,
+            end_y_drift_ratio,
+            edge_margin_ratio,
+            duration_ms,
+            steps,
+        },
+    )
+}
+
+fn hide_keyboard(app: &App, config: &EdgeBackGestureConfig) -> CliResult<Value> {
     let before = app.broadcast("KEYBOARD_LAYOUT", Vec::new())?;
     if !layout_available(&before)? {
         return Ok(json!({
             "ok": true,
             "package_name": app.package(),
             "already_hidden": true,
+            "method": hide_keyboard_method_name(config.method),
+            "side": edge_side_name(config.side),
             "layout": before,
         }));
     }
 
-    let hide_output = app.adb_shell(
-        vec![
-            String::from("input"),
-            String::from("keyevent"),
-            String::from("KEYCODE_BACK"),
-        ],
-        FailureMode::RequireSuccess,
-    )?;
+    let gesture = edge_back_gesture(app, config)?;
+    let hide_output = controller::path(app, gesture.path.clone())?;
     let after = wait_for_layout(app, LayoutWait::Hidden)?;
+    let hidden = layout_is_hidden_result(&after);
 
     Ok(json!({
-        "ok": true,
+        "ok": hide_output.get("ok").and_then(Value::as_bool).unwrap_or(false) && hidden,
         "package_name": app.package(),
         "already_hidden": false,
-        "hide": hide_output.json(),
+        "method": hide_keyboard_method_name(config.method),
+        "side": edge_side_name(config.side),
+        "gesture": gesture.to_json(),
+        "hide": hide_output,
         "layout": after,
     }))
+}
+
+fn edge_back_gesture(app: &App, config: &EdgeBackGestureConfig) -> CliResult<EdgeBackGesture> {
+    match config.method {
+        HideKeyboardMethod::EdgeBack => edge_back_path(app, config),
+    }
+}
+
+fn edge_back_path(app: &App, config: &EdgeBackGestureConfig) -> CliResult<EdgeBackGesture> {
+    let profile = uinput::discover_touchscreen_profile(app)?;
+    let defaults = default_edge_back_profile(config.side);
+    let edge_margin = config
+        .edge_margin_ratio
+        .unwrap_or(defaults.edge_margin_ratio);
+    let start_y = config.start_y_ratio.unwrap_or(defaults.start_y_ratio);
+    let distance = config.distance_ratio.unwrap_or(defaults.distance_ratio);
+    let drift = config
+        .end_y_drift_ratio
+        .unwrap_or(defaults.end_y_drift_ratio);
+    let duration_ms = config.duration_ms.unwrap_or(defaults.duration_ms);
+    let steps = config.steps.unwrap_or(defaults.steps);
+    let start_x = edge_start_x_ratio(config.side, edge_margin)?;
+    let end_x = edge_end_x_ratio(config.side, start_x, distance)?;
+    let end_y = start_y.checked_add_signed(drift)?;
+    let start = TouchPoint::new(
+        uinput::x_coordinate_from_ratio(&profile, start_x)?,
+        uinput::y_coordinate_from_ratio(&profile, start_y)?,
+    );
+    let end = TouchPoint::new(
+        uinput::x_coordinate_from_ratio(&profile, end_x)?,
+        uinput::y_coordinate_from_ratio(&profile, end_y)?,
+    );
+    let path = uinput::swipe_path_spec(start, end, duration_ms, steps)?;
+    Ok(EdgeBackGesture {
+        side: config.side,
+        start_x_ratio: start_x,
+        start_y_ratio: start_y,
+        end_x_ratio: end_x,
+        end_y_ratio: end_y,
+        distance_ratio: distance,
+        end_y_drift_ratio: drift,
+        edge_margin_ratio: edge_margin,
+        duration_ms,
+        steps,
+        path,
+    })
+}
+
+#[derive(Clone)]
+struct EdgeBackGesture {
+    side: EdgeSide,
+    start_x_ratio: RatioPpm,
+    start_y_ratio: RatioPpm,
+    end_x_ratio: RatioPpm,
+    end_y_ratio: RatioPpm,
+    distance_ratio: RatioPpm,
+    end_y_drift_ratio: SignedRatioPpm,
+    edge_margin_ratio: RatioPpm,
+    duration_ms: u64,
+    steps: u16,
+    path: PathSpec,
+}
+
+impl EdgeBackGesture {
+    fn to_json(&self) -> Value {
+        json!({
+            "side": edge_side_name(self.side),
+            "start_x_ratio": ratio_json(self.start_x_ratio),
+            "start_y_ratio": ratio_json(self.start_y_ratio),
+            "end_x_ratio": ratio_json(self.end_x_ratio),
+            "end_y_ratio": ratio_json(self.end_y_ratio),
+            "distance_ratio": ratio_json(self.distance_ratio),
+            "end_y_drift_ratio": signed_ratio_json(self.end_y_drift_ratio),
+            "edge_margin_ratio": ratio_json(self.edge_margin_ratio),
+            "duration_ms": self.duration_ms,
+            "steps": self.steps,
+            "path": self.path,
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct EdgeBackDefaults {
+    start_y_ratio: RatioPpm,
+    distance_ratio: RatioPpm,
+    end_y_drift_ratio: SignedRatioPpm,
+    edge_margin_ratio: RatioPpm,
+    duration_ms: u64,
+    steps: u16,
+}
+
+const fn default_edge_back_profile(side: EdgeSide) -> EdgeBackDefaults {
+    match side {
+        EdgeSide::Left => EdgeBackDefaults {
+            start_y_ratio: RatioPpm::from_ppm(539_300),
+            distance_ratio: RatioPpm::from_ppm(281_000),
+            end_y_drift_ratio: SignedRatioPpm::from_ppm(21_500),
+            edge_margin_ratio: RatioPpm::from_ppm(2_000),
+            duration_ms: 110,
+            steps: 18,
+        },
+        EdgeSide::Right => EdgeBackDefaults {
+            start_y_ratio: RatioPpm::from_ppm(498_900),
+            distance_ratio: RatioPpm::from_ppm(398_000),
+            end_y_drift_ratio: SignedRatioPpm::from_ppm(52_900),
+            edge_margin_ratio: RatioPpm::from_ppm(2_000),
+            duration_ms: 75,
+            steps: 12,
+        },
+    }
+}
+
+fn edge_start_x_ratio(side: EdgeSide, edge_margin: RatioPpm) -> CliResult<RatioPpm> {
+    match side {
+        EdgeSide::Left => Ok(edge_margin),
+        EdgeSide::Right => RatioPpm::from_ppm(1_000_000).checked_subtract(edge_margin),
+    }
+}
+
+fn edge_end_x_ratio(side: EdgeSide, start_x: RatioPpm, distance: RatioPpm) -> CliResult<RatioPpm> {
+    match side {
+        EdgeSide::Left => start_x.checked_add(distance),
+        EdgeSide::Right => start_x.checked_subtract(distance),
+    }
+}
+
+const fn hide_keyboard_method_name(method: HideKeyboardMethod) -> &'static str {
+    match method {
+        HideKeyboardMethod::EdgeBack => "edge_back",
+    }
+}
+
+const fn edge_side_name(side: EdgeSide) -> &'static str {
+    match side {
+        EdgeSide::Left => "left",
+        EdgeSide::Right => "right",
+    }
+}
+
+fn ratio_json(ratio: RatioPpm) -> Value {
+    json!({
+        "ppm": ratio.ppm(),
+    })
+}
+
+fn signed_ratio_json(ratio: SignedRatioPpm) -> Value {
+    json!({
+        "ppm": ratio.ppm(),
+    })
+}
+
+fn layout_is_hidden_result(status: &Value) -> bool {
+    layout_matches(status, LayoutWait::Hidden).unwrap_or(false)
 }
 
 fn wait_for_layout(app: &App, wait: LayoutWait) -> CliResult<Value> {
@@ -483,7 +682,131 @@ fn touch(app: &App, command: &TouchCommand) -> CliResult<Value> {
     match *command {
         TouchCommand::Doctor => uinput::doctor(app),
         TouchCommand::Tap { x, y, hold_ms } => uinput::tap(app, TapSpec { x, y, hold_ms }),
+        TouchCommand::Swipe {
+            from_x,
+            from_y,
+            to_x,
+            to_y,
+            duration_ms,
+            steps,
+        } => {
+            let spec = uinput::swipe_path_spec(
+                TouchPoint::new(from_x, from_y),
+                TouchPoint::new(to_x, to_y),
+                duration_ms,
+                steps,
+            )?;
+            let result = controller::path(app, spec.clone())?;
+            Ok(json!({
+                "ok": result.get("ok").and_then(Value::as_bool).unwrap_or(false),
+                "input_backend": "uinput",
+                "touch": "swipe",
+                "path": spec,
+                "controller": result,
+            }))
+        }
+        TouchCommand::Path {
+            ref points_json,
+            ref points_file,
+            duration_ms,
+        } => {
+            let points = read_touch_path(points_json.as_deref(), points_file.as_deref())?;
+            let spec = PathSpec::new(points, duration_ms);
+            let result = controller::path(app, spec.clone())?;
+            Ok(json!({
+                "ok": result.get("ok").and_then(Value::as_bool).unwrap_or(false),
+                "input_backend": "uinput",
+                "touch": "path",
+                "path": spec,
+                "controller": result,
+            }))
+        }
     }
+}
+
+fn read_touch_path(
+    points_json: Option<&str>,
+    points_file: Option<&Path>,
+) -> CliResult<Vec<TouchPoint>> {
+    let text = match (points_json, points_file) {
+        (Some(json_text), None) => String::from(json_text),
+        (None, Some(path)) => fs::read_to_string(path)?,
+        (None, None) => {
+            return Err(CliError::new(
+                "touch path requires --points-json or --points-file",
+            ));
+        }
+        (Some(_), Some(_)) => {
+            return Err(CliError::new(
+                "touch path accepts either --points-json or --points-file, not both",
+            ));
+        }
+    };
+    parse_touch_points(&text)
+}
+
+fn parse_touch_points(text: &str) -> CliResult<Vec<TouchPoint>> {
+    let parsed: Value = serde_json::from_str(text)?;
+    let array = parsed
+        .as_array()
+        .ok_or_else(|| CliError::new("touch path JSON must be an array"))?;
+    if array.len() < 2 {
+        return Err(CliError::new("touch path requires at least two points"));
+    }
+    array
+        .iter()
+        .enumerate()
+        .map(|(index, value)| parse_touch_point(value, index))
+        .collect()
+}
+
+fn parse_touch_point(value: &Value, index: usize) -> CliResult<TouchPoint> {
+    if let Some(object) = value.as_object() {
+        let x = object
+            .get("x")
+            .ok_or_else(|| CliError::new(format!("touch point {index} is missing x")))
+            .and_then(|coordinate| parse_i32_json_coordinate(coordinate, index, "x"))?;
+        let y = object
+            .get("y")
+            .ok_or_else(|| CliError::new(format!("touch point {index} is missing y")))
+            .and_then(|coordinate| parse_i32_json_coordinate(coordinate, index, "y"))?;
+        return Ok(TouchPoint::new(x, y));
+    }
+
+    let Some(array) = value.as_array() else {
+        return Err(CliError::new(format!(
+            "touch point {index} must be an object or two-item array"
+        )));
+    };
+    if array.len() != 2 {
+        return Err(CliError::new(format!(
+            "touch point {index} array must contain exactly two coordinates"
+        )));
+    }
+    let mut coordinates = array.iter();
+    let x_value = coordinates
+        .next()
+        .ok_or_else(|| CliError::new(format!("touch point {index} is missing x")))?;
+    let y_value = coordinates
+        .next()
+        .ok_or_else(|| CliError::new(format!("touch point {index} is missing y")))?;
+    Ok(TouchPoint::new(
+        parse_i32_json_coordinate(x_value, index, "x")?,
+        parse_i32_json_coordinate(y_value, index, "y")?,
+    ))
+}
+
+fn parse_i32_json_coordinate(value: &Value, index: usize, label: &str) -> CliResult<i32> {
+    let coordinate = value.as_i64().ok_or_else(|| {
+        CliError::new(format!(
+            "touch point {index} coordinate {label} must be an integer"
+        ))
+    })?;
+    i32::try_from(coordinate).map_err(|error| {
+        CliError::new(format!(
+            "touch point {index} coordinate {label} is outside i32 range: {error}"
+        ))
+    })
 }
 
 const fn press_key_code(key: PressKey) -> i64 {

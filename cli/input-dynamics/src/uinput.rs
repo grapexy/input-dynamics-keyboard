@@ -1,12 +1,13 @@
 //! AOSP uinput command-stream support.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::app::App;
 use crate::error::{CliError, CliResult};
 use crate::process::{FailureMode, run_process_with_stdin};
+use crate::ratio::{RATIO_SCALE_PPM, RatioPpm};
 
 const UINPUT_COMMAND: &str = "/system/bin/uinput";
 const DEVICE_ID: i64 = 1;
@@ -17,6 +18,8 @@ const TRACKING_ID: i32 = 100;
 const DEFAULT_TOUCH_MAJOR: i32 = 120;
 const DEFAULT_TOUCH_MINOR: i32 = 80;
 const DEFAULT_PRESSURE: i32 = 30;
+const RATIO_SCALE_PPM_I64: i64 = 1_000_000;
+const RATIO_HALF_SCALE_PPM_I64: i64 = 500_000;
 
 const EV_SYN: i32 = 0;
 const EV_KEY: i32 = 1;
@@ -74,12 +77,39 @@ pub(crate) struct TapSpec {
     pub(crate) hold_ms: u64,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct TouchPoint {
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct PathSpec {
+    pub(crate) points: Vec<TouchPoint>,
+    pub(crate) duration_ms: u64,
+}
+
 impl TapSpec {
     pub(crate) const fn new(x: i32, y: i32) -> Self {
         Self {
             x,
             y,
             hold_ms: DEFAULT_HOLD_MS,
+        }
+    }
+}
+
+impl TouchPoint {
+    pub(crate) const fn new(x: i32, y: i32) -> Self {
+        Self { x, y }
+    }
+}
+
+impl PathSpec {
+    pub(crate) const fn new(points: Vec<TouchPoint>, duration_ms: u64) -> Self {
+        Self {
+            points,
+            duration_ms,
         }
     }
 }
@@ -309,14 +339,68 @@ fn labeled_number(text: &str, label: &str) -> CliResult<i32> {
 }
 
 pub(crate) fn tap_lines(profile: &TouchscreenProfile, spec: TapSpec) -> CliResult<Vec<String>> {
-    ensure_coordinate_in_range(profile, spec)?;
-    let press_events = down_events(profile, spec);
+    let point = TouchPoint::new(spec.x, spec.y);
+    ensure_point_in_range(profile, point)?;
+    let press_events = down_events(profile, point);
     let release_events = up_events();
     Ok(vec![
         inject_command_line(&press_events)?,
         delay_command_line(spec.hold_ms)?,
         inject_command_line(&release_events)?,
     ])
+}
+
+pub(crate) fn path_lines(profile: &TouchscreenProfile, spec: &PathSpec) -> CliResult<Vec<String>> {
+    let segment_count = path_segment_count(spec)?;
+    let segment_durations = segment_durations(spec.duration_ms, segment_count)?;
+    let mut points = spec.points.iter().copied();
+    let first_point = points
+        .next()
+        .ok_or_else(|| CliError::new("path requires at least two points"))?;
+    ensure_point_in_range(profile, first_point)?;
+
+    let mut lines = Vec::with_capacity(spec.points.len().saturating_mul(2).saturating_add(1));
+    lines.push(inject_command_line(&down_events(profile, first_point))?);
+    for (point, delay_ms) in points.zip(segment_durations) {
+        ensure_point_in_range(profile, point)?;
+        lines.push(delay_command_line(delay_ms)?);
+        lines.push(inject_command_line(&move_events(profile, point))?);
+    }
+    lines.push(inject_command_line(&up_events())?);
+    Ok(lines)
+}
+
+pub(crate) fn swipe_path_spec(
+    from: TouchPoint,
+    to: TouchPoint,
+    duration_ms: u64,
+    steps: u16,
+) -> CliResult<PathSpec> {
+    if steps == 0 {
+        return Err(CliError::new("swipe requires at least one generated step"));
+    }
+    let mut points = Vec::with_capacity(usize::from(steps).saturating_add(1));
+    for step in 0_u16..=steps {
+        points.push(TouchPoint::new(
+            interpolate_coordinate(from.x, to.x, step, steps)?,
+            interpolate_coordinate(from.y, to.y, step, steps)?,
+        ));
+    }
+    Ok(PathSpec::new(points, duration_ms))
+}
+
+pub(crate) fn x_coordinate_from_ratio(
+    profile: &TouchscreenProfile,
+    ratio: RatioPpm,
+) -> CliResult<i32> {
+    coordinate_from_ratio(profile, ABS_MT_POSITION_X, ratio, "x")
+}
+
+pub(crate) fn y_coordinate_from_ratio(
+    profile: &TouchscreenProfile,
+    ratio: RatioPpm,
+) -> CliResult<i32> {
+    coordinate_from_ratio(profile, ABS_MT_POSITION_Y, ratio, "y")
 }
 
 pub(crate) fn register_line(profile: &TouchscreenProfile) -> CliResult<String> {
@@ -411,7 +495,7 @@ fn register_command_line(profile: &TouchscreenProfile) -> CliResult<String> {
     Ok(serde_json::to_string(&command)?)
 }
 
-fn down_events(profile: &TouchscreenProfile, spec: TapSpec) -> Vec<i32> {
+fn down_events(profile: &TouchscreenProfile, point: TouchPoint) -> Vec<i32> {
     vec![
         EV_ABS,
         ABS_MT_SLOT,
@@ -421,10 +505,10 @@ fn down_events(profile: &TouchscreenProfile, spec: TapSpec) -> Vec<i32> {
         TRACKING_ID,
         EV_ABS,
         ABS_MT_POSITION_X,
-        spec.x,
+        point.x,
         EV_ABS,
         ABS_MT_POSITION_Y,
-        spec.y,
+        point.y,
         EV_ABS,
         ABS_MT_TOUCH_MAJOR,
         axis_value(profile, ABS_MT_TOUCH_MAJOR, DEFAULT_TOUCH_MAJOR),
@@ -439,10 +523,10 @@ fn down_events(profile: &TouchscreenProfile, spec: TapSpec) -> Vec<i32> {
         0,
         EV_ABS,
         ABS_X,
-        spec.x,
+        point.x,
         EV_ABS,
         ABS_Y,
-        spec.y,
+        point.y,
         EV_ABS,
         ABS_PRESSURE,
         axis_value(profile, ABS_PRESSURE, DEFAULT_PRESSURE),
@@ -452,6 +536,41 @@ fn down_events(profile: &TouchscreenProfile, spec: TapSpec) -> Vec<i32> {
         EV_KEY,
         BTN_TOOL_FINGER,
         1,
+        EV_SYN,
+        SYN_REPORT,
+        0,
+    ]
+}
+
+fn move_events(profile: &TouchscreenProfile, point: TouchPoint) -> Vec<i32> {
+    vec![
+        EV_ABS,
+        ABS_MT_SLOT,
+        0,
+        EV_ABS,
+        ABS_MT_POSITION_X,
+        point.x,
+        EV_ABS,
+        ABS_MT_POSITION_Y,
+        point.y,
+        EV_ABS,
+        ABS_MT_TOUCH_MAJOR,
+        axis_value(profile, ABS_MT_TOUCH_MAJOR, DEFAULT_TOUCH_MAJOR),
+        EV_ABS,
+        ABS_MT_TOUCH_MINOR,
+        axis_value(profile, ABS_MT_TOUCH_MINOR, DEFAULT_TOUCH_MINOR),
+        EV_ABS,
+        ABS_MT_PRESSURE,
+        axis_value(profile, ABS_MT_PRESSURE, DEFAULT_PRESSURE),
+        EV_ABS,
+        ABS_X,
+        point.x,
+        EV_ABS,
+        ABS_Y,
+        point.y,
+        EV_ABS,
+        ABS_PRESSURE,
+        axis_value(profile, ABS_PRESSURE, DEFAULT_PRESSURE),
         EV_SYN,
         SYN_REPORT,
         0,
@@ -670,8 +789,12 @@ fn axis_range_json(profile: &TouchscreenProfile, code: i32) -> Value {
 }
 
 fn ensure_coordinate_in_range(profile: &TouchscreenProfile, spec: TapSpec) -> CliResult<()> {
-    ensure_axis_coordinate(profile, ABS_MT_POSITION_X, spec.x, "x")?;
-    ensure_axis_coordinate(profile, ABS_MT_POSITION_Y, spec.y, "y")
+    ensure_point_in_range(profile, TouchPoint::new(spec.x, spec.y))
+}
+
+fn ensure_point_in_range(profile: &TouchscreenProfile, point: TouchPoint) -> CliResult<()> {
+    ensure_axis_coordinate(profile, ABS_MT_POSITION_X, point.x, "x")?;
+    ensure_axis_coordinate(profile, ABS_MT_POSITION_Y, point.y, "y")
 }
 
 fn ensure_axis_coordinate(
@@ -690,6 +813,94 @@ fn ensure_axis_coordinate(
         )));
     }
     Ok(())
+}
+
+fn coordinate_from_ratio(
+    profile: &TouchscreenProfile,
+    axis_code: i32,
+    ratio: RatioPpm,
+    label: &str,
+) -> CliResult<i32> {
+    if ratio.ppm() > RATIO_SCALE_PPM {
+        return Err(CliError::new(format!(
+            "{label} ratio {} ppm is outside 0..{RATIO_SCALE_PPM}",
+            ratio.ppm()
+        )));
+    }
+    let axis = profile
+        .axis(axis_code)
+        .ok_or_else(|| CliError::new(format!("touchscreen profile is missing {label} axis")))?;
+    let span = i64::from(axis.maximum)
+        .checked_sub(i64::from(axis.minimum))
+        .ok_or_else(|| CliError::new(format!("{label} axis range overflowed")))?;
+    let scaled = span
+        .checked_mul(i64::from(ratio.ppm()))
+        .ok_or_else(|| CliError::new(format!("{label} ratio multiplication overflowed")))?;
+    let rounded = scaled
+        .checked_add(RATIO_HALF_SCALE_PPM_I64)
+        .ok_or_else(|| CliError::new(format!("{label} ratio rounding overflowed")))?
+        .checked_div(RATIO_SCALE_PPM_I64)
+        .ok_or_else(|| CliError::new(format!("{label} ratio division failed")))?;
+    let coordinate = i64::from(axis.minimum)
+        .checked_add(rounded)
+        .ok_or_else(|| CliError::new(format!("{label} coordinate addition overflowed")))?;
+    i32::try_from(coordinate)
+        .map_err(|error| CliError::new(format!("{label} coordinate conversion failed: {error}")))
+}
+
+fn path_segment_count(spec: &PathSpec) -> CliResult<usize> {
+    let Some(segment_count) = spec.points.len().checked_sub(1) else {
+        return Err(CliError::new("path requires at least two points"));
+    };
+    if segment_count == 0 {
+        return Err(CliError::new("path requires at least two points"));
+    }
+    Ok(segment_count)
+}
+
+fn segment_durations(duration_ms: u64, segment_count: usize) -> CliResult<Vec<u64>> {
+    let segment_count_u64 = u64::try_from(segment_count).map_err(|error| {
+        CliError::new(format!(
+            "path segment count conversion failed for {segment_count}: {error}"
+        ))
+    })?;
+    let base = duration_ms
+        .checked_div(segment_count_u64)
+        .ok_or_else(|| CliError::new("path segment duration division failed"))?;
+    let remainder = duration_ms
+        .checked_rem(segment_count_u64)
+        .ok_or_else(|| CliError::new("path segment duration remainder failed"))?;
+    let mut durations = Vec::with_capacity(segment_count);
+    for index in 0_usize..segment_count {
+        let index_u64 = u64::try_from(index)
+            .map_err(|error| CliError::new(format!("path segment index overflowed: {error}")))?;
+        let extra = u64::from(index_u64 < remainder);
+        durations.push(
+            base.checked_add(extra)
+                .ok_or_else(|| CliError::new("path segment duration addition overflowed"))?,
+        );
+    }
+    Ok(durations)
+}
+
+fn interpolate_coordinate(start: i32, end: i32, step: u16, steps: u16) -> CliResult<i32> {
+    if steps == 0 {
+        return Err(CliError::new("coordinate interpolation requires steps > 0"));
+    }
+    let delta = i64::from(end)
+        .checked_sub(i64::from(start))
+        .ok_or_else(|| CliError::new("coordinate interpolation subtraction overflowed"))?;
+    let numerator = delta
+        .checked_mul(i64::from(step))
+        .ok_or_else(|| CliError::new("coordinate interpolation multiplication overflowed"))?;
+    let offset = numerator
+        .checked_div(i64::from(steps))
+        .ok_or_else(|| CliError::new("coordinate interpolation division failed"))?;
+    let value = i64::from(start)
+        .checked_add(offset)
+        .ok_or_else(|| CliError::new("coordinate interpolation addition overflowed"))?;
+    i32::try_from(value)
+        .map_err(|error| CliError::new(format!("coordinate interpolation failed: {error}")))
 }
 
 impl TouchscreenProfile {
@@ -894,8 +1105,9 @@ mod tests {
 
     use crate::error::{CliError, CliResult};
     use crate::uinput::{
-        ABS_MT_POSITION_X, ABS_MT_POSITION_Y, TapSpec, bus_name, find_new_mirrored_touchscreen,
-        parse_touchscreen_profile, parse_touchscreen_profiles, profile_hash, tap_stream,
+        ABS_MT_POSITION_X, ABS_MT_POSITION_Y, PathSpec, TapSpec, TouchPoint, bus_name,
+        find_new_mirrored_touchscreen, parse_touchscreen_profile, parse_touchscreen_profiles,
+        path_lines, profile_hash, swipe_path_spec, tap_stream,
     };
 
     const SAMPLE_GETEVENT: &str = r#"
@@ -1078,6 +1290,62 @@ add device 2: /dev/input/event2
                 label.is_ok(),
                 "known bus id should map to an AOSP uinput label"
             );
+        }
+
+        #[test]
+        fn generated_swipe_paths_preserve_endpoints(
+            from_x in 0_i32..=1439_i32,
+            from_y in 0_i32..=3119_i32,
+            to_x in 0_i32..=1439_i32,
+            to_y in 0_i32..=3119_i32,
+            duration_ms in 0_u64..=5_000_u64,
+            steps in 1_u16..=64_u16,
+        ) {
+            let from = TouchPoint::new(from_x, from_y);
+            let to = TouchPoint::new(to_x, to_y);
+            let spec = swipe_path_spec(from, to, duration_ms, steps);
+
+            proptest::prop_assert!(spec.is_ok(), "generated swipe should be valid");
+            if let Ok(parsed_spec) = spec {
+                proptest::prop_assert_eq!(parsed_spec.points.first().copied(), Some(from));
+                proptest::prop_assert_eq!(parsed_spec.points.last().copied(), Some(to));
+                proptest::prop_assert_eq!(
+                    parsed_spec.points.len(),
+                    usize::from(steps).saturating_add(1_usize)
+                );
+                proptest::prop_assert_eq!(parsed_spec.duration_ms, duration_ms);
+            }
+        }
+
+        #[test]
+        fn in_range_paths_render_to_uinput_stream(
+            from_x in 0_i32..=1439_i32,
+            from_y in 0_i32..=3119_i32,
+            to_x in 0_i32..=1439_i32,
+            to_y in 0_i32..=3119_i32,
+            duration_ms in 0_u64..=5_000_u64,
+        ) {
+            let profile = parse_touchscreen_profile(SAMPLE_GETEVENT);
+            proptest::prop_assert!(profile.is_ok(), "sample profile should parse");
+            if let Ok(parsed_profile) = profile {
+                let spec = PathSpec::new(
+                    vec![TouchPoint::new(from_x, from_y), TouchPoint::new(to_x, to_y)],
+                    duration_ms,
+                );
+                let rendered = path_lines(&parsed_profile, &spec);
+
+                proptest::prop_assert!(rendered.is_ok(), "in-range path should render");
+                if let Ok(lines) = rendered {
+                    proptest::prop_assert!(
+                        lines.iter().any(|line| line.contains("\"command\":\"inject\"")),
+                        "path stream should contain inject commands"
+                    );
+                    proptest::prop_assert!(
+                        lines.iter().any(|line| line.contains("\"command\":\"delay\"")),
+                        "path stream should contain delay commands"
+                    );
+                }
+            }
         }
     }
 

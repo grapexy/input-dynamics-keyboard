@@ -30,8 +30,8 @@ Use this keyboard only in consented, local research settings.
 - Request-correlated local ADB controls for session coordination.
 - Live keyboard layout snapshots for calibration and layout validation without
   screenshot-based coordinate discovery.
-- AOSP uinput-backed CLI touch commands for local agent-driven key presses and
-  absolute taps.
+- AOSP uinput-backed CLI touch commands for local agent-driven key presses,
+  absolute taps, gesture paths, and edge-back keyboard dismissal.
 - Single-owner stateful CLI sessions; competing starts return a non-destructive
   busy result.
 - Device-scoped CLI operation with `--serial` for multi-device hosts.

@@ -21,8 +21,9 @@ instrumentation surface. Keep workflows app-neutral, offline, and ADB-driven.
   fallback if the app reports that external storage is unavailable.
 - Do not rely on UiAutomator to inspect soft-keyboard keys. Use
   the CLI layout and press/tap commands when a non-screenshot path is needed.
-- Use the CLI's AOSP uinput-backed touch path for scripted key presses and
-  absolute taps. Do not use `adb shell input tap` for normal agent-driven input.
+- Use the CLI's AOSP uinput-backed touch path for scripted key presses,
+  absolute taps, and gestures. Do not use `adb shell input tap` for normal
+  agent-driven input.
 
 ## Defaults
 
@@ -116,6 +117,7 @@ idk layout --wait-visible
 idk tap --label a
 idk press space
 idk press delete
+idk hide-keyboard --method edge-back --side right
 idk session stop
 ```
 
@@ -166,14 +168,17 @@ idk tap --label a
 idk press space
 idk press delete
 idk press enter
-idk hide-keyboard
+idk hide-keyboard --method edge-back --side right
 idk session stop
 ```
 
 Use `tap --code=<code>` only when there is no semantic command. Use
-`touch tap --x <x> --y <y>` for diagnostic absolute screen coordinates. The CLI
-routes session input and `touch tap` through AOSP `/system/bin/uinput` and
-should fail rather than switch to another touch backend.
+`touch tap --x <x> --y <y>` for diagnostic absolute screen coordinates. Use
+`touch swipe` and `touch path` only when a protocol needs raw absolute gesture
+control; otherwise prefer semantic commands such as `press` and
+`hide-keyboard`. The CLI routes session input and `touch` commands through AOSP
+`/system/bin/uinput` and should fail rather than switch to another touch
+backend.
 
 ## Validation
 

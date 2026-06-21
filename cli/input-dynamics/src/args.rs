@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::app::{DEFAULT_PACKAGE, DEFAULT_REPO};
+use crate::ratio::{RatioPpm, SignedRatioPpm};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -80,7 +81,32 @@ pub(crate) enum Commands {
         wait_hidden: bool,
     },
     /// Hide the currently visible soft keyboard.
-    HideKeyboard,
+    HideKeyboard {
+        /// Dismissal method to attempt.
+        #[arg(long, value_enum, default_value = "edge-back")]
+        method: HideKeyboardMethod,
+        /// Screen edge to use for edge-back dismissal.
+        #[arg(long, value_enum, default_value = "right")]
+        side: EdgeSide,
+        /// Start Y coordinate as a display-height ratio, for example 0.54.
+        #[arg(long)]
+        start_y_ratio: Option<RatioPpm>,
+        /// Inward X travel as a display-width ratio, for example 0.28.
+        #[arg(long)]
+        distance_ratio: Option<RatioPpm>,
+        /// End Y drift as a signed display-height ratio, for example 0.02.
+        #[arg(long)]
+        end_y_drift_ratio: Option<SignedRatioPpm>,
+        /// Edge inset as a display-width ratio, for example 0.002.
+        #[arg(long)]
+        edge_margin_ratio: Option<RatioPpm>,
+        /// Gesture duration.
+        #[arg(long)]
+        duration_ms: Option<u64>,
+        /// Number of generated move intervals.
+        #[arg(long)]
+        steps: Option<u16>,
+    },
     /// List log files.
     ListLogs,
     /// Clear log files when no session is active.
@@ -162,7 +188,21 @@ pub(crate) enum PressKey {
     Space,
 }
 
-#[derive(Clone, Copy, Debug, Subcommand)]
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub(crate) enum HideKeyboardMethod {
+    /// Use a touchscreen edge-back gesture.
+    EdgeBack,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub(crate) enum EdgeSide {
+    /// Start at the left screen edge and move inward.
+    Left,
+    /// Start at the right screen edge and move inward.
+    Right,
+}
+
+#[derive(Debug, Subcommand)]
 pub(crate) enum TouchCommand {
     /// Check AOSP uinput availability and physical touchscreen profile.
     Doctor,
@@ -177,6 +217,39 @@ pub(crate) enum TouchCommand {
         /// Touch hold duration.
         #[arg(long, default_value_t = 70)]
         hold_ms: u64,
+    },
+    /// Swipe absolute screen coordinates through the active uinput session.
+    Swipe {
+        /// Start X coordinate.
+        #[arg(long)]
+        from_x: i32,
+        /// Start Y coordinate.
+        #[arg(long)]
+        from_y: i32,
+        /// End X coordinate.
+        #[arg(long)]
+        to_x: i32,
+        /// End Y coordinate.
+        #[arg(long)]
+        to_y: i32,
+        /// Gesture duration.
+        #[arg(long, default_value_t = 100)]
+        duration_ms: u64,
+        /// Number of generated move intervals.
+        #[arg(long, default_value_t = 12)]
+        steps: u16,
+    },
+    /// Send an absolute point path through the active uinput session.
+    Path {
+        /// JSON array of points, either [{"x":1,"y":2}] or [[1,2]].
+        #[arg(long, conflicts_with = "points_file")]
+        points_json: Option<String>,
+        /// File containing a JSON point array.
+        #[arg(long, conflicts_with = "points_json")]
+        points_file: Option<PathBuf>,
+        /// Gesture duration.
+        #[arg(long, default_value_t = 100)]
+        duration_ms: u64,
     },
 }
 

@@ -19,7 +19,7 @@ use crate::error::{CliError, CliResult};
 use crate::process::{
     FailureMode, StdinProcess, spawn_process_to_files, spawn_process_with_stdin_to_files,
 };
-use crate::uinput::{self, TapSpec};
+use crate::uinput::{self, PathSpec, TapSpec};
 
 const RUNTIME_DIR_ENV: &str = "INPUT_DYNAMICS_RUNTIME_DIR";
 const START_TIMEOUT: Duration = Duration::from_secs(8);
@@ -71,6 +71,7 @@ pub(crate) struct SessionStartLock {
 enum ControllerRequest {
     Status,
     Tap { x: i32, y: i32, hold_ms: u64 },
+    Path { spec: PathSpec },
     Stop,
 }
 
@@ -259,6 +260,22 @@ pub(crate) fn tap(app: &App, spec: TapSpec) -> CliResult<Value> {
     }))
 }
 
+pub(crate) fn path(app: &App, spec: PathSpec) -> CliResult<Value> {
+    let paths = RuntimePaths::for_app(app)?;
+    if !paths.socket.exists() {
+        return Err(CliError::new(
+            "no active input session; run `input-dynamics session start --run-id <id>`",
+        ));
+    }
+    let response = send_request(&paths.socket, &ControllerRequest::Path { spec })?;
+    Ok(json!({
+        "ok": response.get("ok").and_then(Value::as_bool).unwrap_or(false),
+        "input_backend": "uinput",
+        "device_serial": paths.device_serial.as_str(),
+        "controller": response,
+    }))
+}
+
 pub(crate) fn run(app: &App, config: &RunConfig) -> CliResult<Value> {
     remove_file_if_exists(&config.socket)?;
     let listener = UnixListener::bind(&config.socket)?;
@@ -397,6 +414,21 @@ fn handle_request(
                     "x": x,
                     "y": y,
                     "hold_ms": hold_ms,
+                },
+            }))
+        }
+        ControllerRequest::Path { ref spec } => {
+            for line in uinput::path_lines(profile, spec)? {
+                write_uinput_line(uinput_process, &line)?;
+            }
+            Ok(json!({
+                "ok": true,
+                "active": true,
+                "input_backend": "uinput",
+                "path": {
+                    "points": spec.points,
+                    "point_count": spec.points.len(),
+                    "duration_ms": spec.duration_ms,
                 },
             }))
         }

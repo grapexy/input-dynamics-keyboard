@@ -155,7 +155,9 @@ scraping human-oriented text.
 - `layout`: returns status including `keyboard_layout` when the IME is visible.
 - `layout --wait-visible` / `layout --wait-hidden`: waits for keyboard layout
   visibility state before returning.
-- `hide-keyboard`: dismisses the visible IME and waits for hidden layout state.
+- `hide-keyboard`: dismisses the visible IME with a stateful uinput edge-back
+  gesture and waits for hidden layout state. Options include
+  `--method edge-back`, `--side left|right`, and ratio-based geometry overrides.
 - `tap --label <label>` or `tap --code <code>`: taps a key from layout data
   through the active session controller.
 - `press delete`, `press enter`, `press space`: taps common keys by semantic
@@ -164,6 +166,11 @@ scraping human-oriented text.
   physical touchscreen profile used by the CLI.
 - `touch tap --x <x> --y <y> [--hold-ms <ms>]`: sends an absolute screen tap
   through AOSP uinput.
+- `touch swipe --from-x <x> --from-y <y> --to-x <x> --to-y <y>`: sends an
+  absolute swipe through the active session controller.
+- `touch path --points-json '<json>'` or `touch path --points-file <path>`:
+  sends an absolute point path through the active session controller. Points may
+  be `[{"x":1,"y":2}]` objects or `[[1,2]]` arrays.
 - `list-logs`: lists log files.
 - `clear-logs`: clears logs when no session is active.
 - `pull --out <dir>`: pulls app-specific external log storage.
@@ -174,12 +181,13 @@ scraping human-oriented text.
 
 Use semantic `press` commands for common non-letter keys. `tap --code=-7` still
 works for delete, and `tap --code -7` is also accepted, but semantic commands
-are easier for agents to generate correctly. `tap` and `press` require
-`session start`; use `touch tap` only for low-level diagnostic absolute taps.
+are easier for agents to generate correctly. `tap`, `press`, `hide-keyboard`,
+`touch swipe`, and `touch path` require `session start`; use `touch tap` only
+for low-level diagnostic absolute taps.
 
-`session` input and `touch tap` use AOSP `/system/bin/uinput` for touchscreen
-input. They fail if the device does not expose that command instead of falling
-back to a second touch implementation.
+`session` input and `touch` commands use AOSP `/system/bin/uinput` for
+touchscreen input. They fail if the device does not expose that command instead
+of falling back to a second touch implementation.
 
 ## Record Output
 
