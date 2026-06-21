@@ -4,6 +4,10 @@ The Rust `input-dynamics` CLI is the preferred host-side interface for agents
 and scripted local runs. It wraps the ADB control surface, emits JSON, and keeps
 raw broadcast command details out of normal workflows.
 
+For control commands, the CLI sends a unique `request_id` and waits until the
+app writes a matching command-result JSON file. Stale status files are rejected
+instead of being treated as fresh command output.
+
 Build it from a repository checkout:
 
 ```bash
@@ -48,8 +52,10 @@ cargo run --quiet -p input-dynamics -- install --apk "$APK"
 
 ## Machine Output
 
-Successful commands write JSON to stdout and return exit code 0. Handled
-failures write JSON to stderr and return a non-zero exit code:
+Commands write JSON to stdout when they receive a structured command result.
+`ok: true` returns exit code 0; `ok: false` returns a non-zero exit code.
+Local CLI errors, such as invalid arguments or failed host commands, write JSON
+or clap text to stderr:
 
 ```json
 {
@@ -67,15 +73,27 @@ scraping human-oriented text.
 - `install`: downloads or installs an APK.
 - `select-ime`: enables and selects the IME.
 - `enable-logging` / `disable-logging`: toggles logging.
-- `start --run-id <id>`: starts a session and records `external_run_id`.
+- `start --run-id <id>`: enables logging, starts a session, and records
+  `external_run_id`. Optional provenance flags are `--input-actor`,
+  `--input-controller`, and `--input-cadence-policy`; defaults are `human`,
+  null, and `manual`.
 - `stop`: stops the active session.
 - `status`: returns current control status.
 - `layout`: returns status including `keyboard_layout` when the IME is visible.
+- `layout --wait-visible` / `layout --wait-hidden`: waits for keyboard layout
+  visibility state before returning.
+- `hide-keyboard`: dismisses the visible IME and waits for hidden layout state.
 - `tap --label <label>` or `tap --code <code>`: taps a key from layout data.
+- `press delete`, `press enter`, `press space`: taps common keys by semantic
+  name.
 - `list-logs`: lists log files.
 - `clear-logs`: clears logs when no session is active.
 - `pull --out <dir>`: pulls app-specific external log storage.
 - `validate <path> --run-id <id>`: validates JSONL lifecycle and safety fields.
+
+Use semantic `press` commands for common non-letter keys. `tap --code=-7` still
+works for delete, and `tap --code -7` is also accepted, but semantic commands
+are easier for agents to generate correctly.
 
 Use [adb-control.md](adb-control.md) when debugging the lower-level broadcast
 surface directly.

@@ -11,6 +11,8 @@ Use this reference when validating logs or changing event fields.
 - Every record in a session includes caller-provided `external_run_id` when a
   run id was passed to `START`.
 - `session_start` and `session_stop` records bracket a normal session.
+- `session_start` includes session-level provenance: `input_actor`,
+  `input_controller`, and `input_cadence_policy`.
 - `target_package` identifies the active editor package reported to the IME.
 - `password_field: true` records should not appear in pulled non-password
   validation logs; password-class contexts are the hard suppression boundary.

@@ -20,7 +20,7 @@ instrumentation surface. Keep workflows app-neutral, offline, and ADB-driven.
 - Prefer app-specific external storage for logs; use internal storage only as a
   fallback if the app reports that external storage is unavailable.
 - Do not rely on UiAutomator to inspect soft-keyboard keys. Use
-  `KEYBOARD_LAYOUT` and ADB taps when a non-screenshot path is needed.
+  the CLI layout and press/tap commands when a non-screenshot path is needed.
 
 ## Defaults
 
@@ -106,15 +106,20 @@ command variants and fallbacks.
 ## Non-Screenshot Automation
 
 When the keyboard view is visible, use `KEYBOARD_LAYOUT` instead of screenshots.
-With the CLI, tap by key label or code:
+With the CLI, wait for layout state and press common keys by semantic name:
 
 ```bash
+idk layout --wait-visible
 idk tap --label a
-idk tap --code 97
+idk press space
+idk press delete
+idk press enter
+idk hide-keyboard
 ```
 
-Without the CLI, select key entries from `KEYBOARD_LAYOUT` by `key_label` or
-`key_code`, then tap their screen centers with `adb shell input tap`.
+Use `tap --code=<code>` only when there is no semantic command. Without the
+CLI, select key entries from `KEYBOARD_LAYOUT` by `key_label` or `key_code`,
+then tap their screen centers with `adb shell input tap`.
 
 ## Validation
 
@@ -125,6 +130,7 @@ idk validate "runs/$RUN_ID" --run-id "$RUN_ID"
 ```
 
 Expected validation includes `session_start`, `session_stop`,
-`external_run_id`, `target_package`, schema `input_dynamics_event.v1`, and no
-`password_field: true` records. Read `references/jsonl-schema.md` before
-changing schema, event names, status fields, or validation logic.
+`external_run_id`, session-level `input_actor`, `target_package`, schema
+`input_dynamics_event.v1`, and no `password_field: true` records. Read
+`references/jsonl-schema.md` before changing schema, event names, status
+fields, or validation logic.

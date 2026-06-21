@@ -2,6 +2,7 @@
 .idea
 .gradle
 .direnv
+.agents/
 .android
 .kotlin
 local.properties

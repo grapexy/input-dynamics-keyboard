@@ -4,16 +4,19 @@ use std::cmp::Reverse;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
 use crate::app::{App, LOG_DIR};
-use crate::args::Commands;
+use crate::args::{Commands, PressKey};
 use crate::error::{CliError, CliResult};
 use crate::layout::{json_number_to_shell_arg, key_matches};
 use crate::process::{FailureMode, run_process};
 use crate::validate::validate_logs;
+
+const LAYOUT_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+const LAYOUT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 pub(crate) fn run_command(app: &App, command: Commands) -> CliResult<Value> {
     match command {
@@ -22,15 +25,40 @@ pub(crate) fn run_command(app: &App, command: Commands) -> CliResult<Value> {
         Commands::SelectIme => select_ime(app),
         Commands::EnableLogging => app.broadcast("ENABLE", Vec::new()),
         Commands::DisableLogging => app.broadcast("DISABLE", Vec::new()),
-        Commands::Start { run_id } => start(app, &run_id),
+        Commands::Start {
+            run_id,
+            input_actor,
+            input_controller,
+            input_cadence_policy,
+        } => start(
+            app,
+            &run_id,
+            &input_actor,
+            input_controller.as_deref(),
+            &input_cadence_policy,
+        ),
         Commands::Stop => app.broadcast("STOP", Vec::new()),
         Commands::Status => app.broadcast("STATUS", Vec::new()),
-        Commands::Layout => app.broadcast("KEYBOARD_LAYOUT", Vec::new()),
+        Commands::Layout {
+            wait_visible,
+            wait_hidden,
+        } => {
+            let wait = if wait_visible {
+                LayoutWait::Visible
+            } else if wait_hidden {
+                LayoutWait::Hidden
+            } else {
+                LayoutWait::Current
+            };
+            layout(app, wait)
+        }
+        Commands::HideKeyboard => hide_keyboard(app),
         Commands::ListLogs => app.broadcast("LIST_LOGS", Vec::new()),
         Commands::ClearLogs => app.broadcast("CLEAR_LOGS", Vec::new()),
         Commands::Pull { out } => pull_logs(app, &out),
         Commands::Validate { path, run_id } => validate_logs(&path, run_id.as_deref()),
         Commands::Tap { label, code } => tap_key(app, label.as_deref(), code),
+        Commands::Press { key } => press_key(app, key),
     }
 }
 
@@ -133,25 +161,172 @@ fn select_ime(app: &App) -> CliResult<Value> {
     }))
 }
 
-fn start(app: &App, run_id: &str) -> CliResult<Value> {
-    let enable = app.broadcast("ENABLE", Vec::new())?;
-    let start = app.broadcast(
-        "START",
-        vec![
+fn start(
+    app: &App,
+    run_id: &str,
+    input_actor: &str,
+    input_controller: Option<&str>,
+    input_cadence_policy: &str,
+) -> CliResult<Value> {
+    let mut extras = vec![
+        String::from("--es"),
+        String::from("run_id"),
+        String::from(run_id),
+        String::from("--es"),
+        String::from("input_actor"),
+        String::from(input_actor),
+        String::from("--es"),
+        String::from("input_cadence_policy"),
+        String::from(input_cadence_policy),
+    ];
+    if let Some(controller) = input_controller {
+        extras.extend([
             String::from("--es"),
-            String::from("run_id"),
-            String::from(run_id),
+            String::from("input_controller"),
+            String::from(controller),
+        ]);
+    }
+    let enable = app.broadcast("ENABLE", Vec::new())?;
+    if enable.get("ok").and_then(Value::as_bool) == Some(false) {
+        return Ok(json!({
+            "ok": false,
+            "package_name": app.package(),
+            "error": "failed to enable logging before starting session",
+            "enable": enable,
+        }));
+    }
+    app.broadcast("START", extras)
+}
+
+fn layout(app: &App, wait: LayoutWait) -> CliResult<Value> {
+    match wait {
+        LayoutWait::Current => app.broadcast("KEYBOARD_LAYOUT", Vec::new()),
+        LayoutWait::Visible | LayoutWait::Hidden => wait_for_layout(app, wait),
+    }
+}
+
+fn hide_keyboard(app: &App) -> CliResult<Value> {
+    let before = app.broadcast("KEYBOARD_LAYOUT", Vec::new())?;
+    if !layout_available(&before)? {
+        return Ok(json!({
+            "ok": true,
+            "package_name": app.package(),
+            "already_hidden": true,
+            "layout": before,
+        }));
+    }
+
+    let hide_output = app.adb_shell(
+        vec![
+            String::from("input"),
+            String::from("keyevent"),
+            String::from("KEYCODE_BACK"),
         ],
+        FailureMode::RequireSuccess,
     )?;
-    let ok = json_ok(&enable) && json_ok(&start);
+    let after = wait_for_layout(app, LayoutWait::Hidden)?;
 
     Ok(json!({
-        "ok": ok,
+        "ok": true,
         "package_name": app.package(),
-        "external_run_id": run_id,
-        "enable": enable,
-        "start": start,
+        "already_hidden": false,
+        "hide": hide_output.json(),
+        "layout": after,
     }))
+}
+
+fn wait_for_layout(app: &App, wait: LayoutWait) -> CliResult<Value> {
+    let start = Instant::now();
+    loop {
+        let status = app.broadcast("KEYBOARD_LAYOUT", Vec::new())?;
+        if layout_matches(&status, wait)? {
+            return Ok(with_layout_wait_metadata(status, wait, start.elapsed()));
+        }
+        if start.elapsed() >= LAYOUT_WAIT_TIMEOUT {
+            return Ok(json!({
+                "ok": false,
+                "package_name": app.package(),
+                "error": format!("timed out waiting for keyboard layout to be {}", wait.description()),
+                "wait": wait.description(),
+                "timeout_ms": millis_u64(LAYOUT_WAIT_TIMEOUT),
+                "layout": status,
+            }));
+        }
+        std::thread::sleep(LAYOUT_POLL_INTERVAL);
+    }
+}
+
+fn with_layout_wait_metadata(mut status: Value, wait: LayoutWait, elapsed: Duration) -> Value {
+    if let Some(object) = status.as_object_mut() {
+        object.insert(String::from("wait"), json!(wait.description()));
+        object.insert(String::from("wait_elapsed_ms"), json!(millis_u64(elapsed)));
+    }
+    status
+}
+
+fn layout_matches(status: &Value, wait: LayoutWait) -> CliResult<bool> {
+    let available = layout_available(status)?;
+    Ok(match wait {
+        LayoutWait::Current => true,
+        LayoutWait::Visible => available,
+        LayoutWait::Hidden => !available,
+    })
+}
+
+fn layout_available(status: &Value) -> CliResult<bool> {
+    let layout = status
+        .get("keyboard_layout")
+        .ok_or_else(|| CliError::new("keyboard_layout was not present"))?;
+    Ok(layout
+        .get("available")
+        .and_then(Value::as_bool)
+        .unwrap_or(false))
+}
+
+fn press_key(app: &App, key: PressKey) -> CliResult<Value> {
+    let code = press_key_code(key);
+    let mut result = tap_key(app, None, Some(code))?;
+    if let Some(object) = result.as_object_mut() {
+        object.insert(String::from("pressed_key"), json!(press_key_name(key)));
+    }
+    Ok(result)
+}
+
+const fn press_key_code(key: PressKey) -> i64 {
+    match key {
+        PressKey::Delete => -7,
+        PressKey::Enter => 10,
+        PressKey::Space => 32,
+    }
+}
+
+const fn press_key_name(key: PressKey) -> &'static str {
+    match key {
+        PressKey::Delete => "delete",
+        PressKey::Enter => "enter",
+        PressKey::Space => "space",
+    }
+}
+
+#[derive(Clone, Copy)]
+enum LayoutWait {
+    Current,
+    Visible,
+    Hidden,
+}
+
+impl LayoutWait {
+    const fn description(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::Visible => "visible",
+            Self::Hidden => "hidden",
+        }
+    }
+}
+
+fn millis_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 fn pull_logs(app: &App, out: &Path) -> CliResult<Value> {
@@ -196,10 +371,7 @@ fn tap_key(app: &App, label: Option<&str>, code: Option<i64>) -> CliResult<Value
     }
 
     let layout_result = app.broadcast("KEYBOARD_LAYOUT", Vec::new())?;
-    let status = layout_result
-        .get("status")
-        .ok_or_else(|| CliError::new("layout status was not available"))?;
-    let layout = status
+    let layout = layout_result
         .get("keyboard_layout")
         .ok_or_else(|| CliError::new("keyboard_layout was not present"))?;
     let available = layout
@@ -379,10 +551,6 @@ fn ime_is_registered(ime_list_stdout: &str, ime_component: &str) -> bool {
     ime_list_stdout
         .lines()
         .any(|line| line.trim() == ime_component)
-}
-
-fn json_ok(value: &Value) -> bool {
-    value.get("ok").and_then(Value::as_bool) == Some(true)
 }
 
 #[cfg(test)]

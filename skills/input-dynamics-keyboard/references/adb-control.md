@@ -6,6 +6,10 @@ Keyboard control, status, layout inspection, log readback, or cleanup.
 Prefer the `input-dynamics` host CLI when it is available. Use this file when
 the CLI is unavailable or when debugging raw ADB behavior.
 
+The CLI adds a unique `request_id` to each broadcast and waits until
+`input_dynamics_control_status.json` reports the same id. If you use raw ADB
+for debugging, pass your own `request_id` when you need freshness checks.
+
 ## Packages
 
 ```bash
@@ -78,12 +82,24 @@ adb shell ime list -a | rg "$PKG|$IME"
 RUN_ID=run-YYYYMMDD-HHMMSS-local-android
 
 adb shell am broadcast -n "$PKG/$RECEIVER" -a "$ACTION_PREFIX.ENABLE"
-adb shell am broadcast -n "$PKG/$RECEIVER" -a "$ACTION_PREFIX.START" --es run_id "$RUN_ID"
+adb shell am broadcast -n "$PKG/$RECEIVER" -a "$ACTION_PREFIX.START" \
+  --es run_id "$RUN_ID" \
+  --es input_actor human \
+  --es input_cadence_policy manual
 adb shell am broadcast -n "$PKG/$RECEIVER" -a "$ACTION_PREFIX.STATUS"
 adb shell am broadcast -n "$PKG/$RECEIVER" -a "$ACTION_PREFIX.KEYBOARD_LAYOUT"
 adb shell am broadcast -n "$PKG/$RECEIVER" -a "$ACTION_PREFIX.LIST_LOGS"
 adb shell am broadcast -n "$PKG/$RECEIVER" -a "$ACTION_PREFIX.STOP"
 adb shell am broadcast -n "$PKG/$RECEIVER" -a "$ACTION_PREFIX.DISABLE"
+```
+
+Request-correlated status example:
+
+```bash
+REQUEST_ID=manual-$(date +%s)
+adb shell am broadcast -n "$PKG/$RECEIVER" -a "$ACTION_PREFIX.STATUS" \
+  --es request_id "$REQUEST_ID"
+adb shell cat "/sdcard/Android/data/$PKG/files/$LOG_DIR/$STATUS_FILE"
 ```
 
 Clear logs only when no session is active:
@@ -92,10 +108,9 @@ Clear logs only when no session is active:
 adb shell am broadcast -n "$PKG/$RECEIVER" -a "$ACTION_PREFIX.CLEAR_LOGS"
 ```
 
-## Status Fallback
+## Status File
 
-Ordered broadcast result data may print JSON to stdout. If stdout is missing or
-truncated, read the status file:
+Raw broadcasts write command results to the status file:
 
 ```bash
 adb shell cat "/sdcard/Android/data/$PKG/files/$LOG_DIR/$STATUS_FILE"
@@ -104,6 +119,7 @@ adb shell cat "/sdcard/Android/data/$PKG/files/$LOG_DIR/$STATUS_FILE"
 Expected status fields include:
 
 - `package_name`
+- `request_id`
 - `version_name`
 - `version_code`
 - `build_variant`
@@ -112,7 +128,10 @@ Expected status fields include:
 - `current_session_id`
 - `last_session_id`
 - `external_run_id`
-- `log_directory_path`
+- `input_actor`
+- `input_controller`
+- `input_cadence_policy`
+- `log_directory`
 - `current_log_file_path`
 - `last_log_file_path`
 - `log_file_count`

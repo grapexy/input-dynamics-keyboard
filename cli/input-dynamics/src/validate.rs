@@ -45,10 +45,12 @@ pub(crate) fn validate_logs(path: &Path, run_id: Option<&str>) -> CliResult<Valu
         "selected_record_count": counts.selected_count,
         "session_start_count": counts.session_start_count,
         "session_stop_count": counts.session_stop_count,
+        "session_start_provenance_count": counts.session_start_provenance_count,
         "target_package_seen": counts.target_package_seen,
         "invalid_schema_count": counts.invalid_schema_count,
         "missing_required_field_count": counts.missing_required_field_count,
         "invalid_required_field_count": counts.invalid_required_field_count,
+        "invalid_provenance_count": counts.invalid_provenance_count,
         "session_id_mismatch_count": counts.session_id_mismatch_count,
         "event_order_violation_count": counts.event_order_violation_count,
         "password_record_count": counts.password_record_count,
@@ -82,10 +84,12 @@ struct ValidationCounts {
     selected_count: u64,
     session_start_count: u64,
     session_stop_count: u64,
+    session_start_provenance_count: u64,
     target_package_seen: bool,
     invalid_schema_count: u64,
     missing_required_field_count: u64,
     invalid_required_field_count: u64,
+    invalid_provenance_count: u64,
     session_id_mismatch_count: u64,
     event_order_violation_count: u64,
     password_record_count: u64,
@@ -104,7 +108,10 @@ impl ValidationCounts {
             increment(&mut self.invalid_schema_count)?;
         }
         match value.get("event").and_then(Value::as_str) {
-            Some("session_start") => increment(&mut self.session_start_count)?,
+            Some("session_start") => {
+                increment(&mut self.session_start_count)?;
+                self.validate_session_start_provenance(value)?;
+            }
             Some("session_stop") => increment(&mut self.session_stop_count)?,
             Some(_) | None => {}
         }
@@ -121,10 +128,12 @@ impl ValidationCounts {
         self.selected_count > 0
             && self.session_start_count > 0
             && self.session_stop_count > 0
+            && self.session_start_provenance_count == self.session_start_count
             && self.target_package_seen
             && self.invalid_schema_count == 0
             && self.missing_required_field_count == 0
             && self.invalid_required_field_count == 0
+            && self.invalid_provenance_count == 0
             && self.session_id_mismatch_count == 0
             && self.event_order_violation_count == 0
             && self.password_record_count == 0
@@ -148,6 +157,23 @@ impl ValidationCounts {
             }
         }
 
+        Ok(())
+    }
+
+    fn validate_session_start_provenance(&mut self, value: &Value) -> CliResult<()> {
+        let actor_valid = value.get("input_actor").is_some_and(is_non_empty_string);
+        let cadence_valid = value
+            .get("input_cadence_policy")
+            .is_some_and(is_non_empty_string);
+        let controller_valid = value
+            .get("input_controller")
+            .is_some_and(|controller| controller.is_null() || is_non_empty_string(controller));
+
+        if actor_valid && cadence_valid && controller_valid {
+            increment(&mut self.session_start_provenance_count)?;
+        } else {
+            increment(&mut self.invalid_provenance_count)?;
+        }
         Ok(())
     }
 
@@ -250,6 +276,9 @@ mod tests {
             "event": "session_start",
             "t_wall_ms": 1_u64,
             "t_uptime_ms": 1_u64,
+            "input_actor": "human",
+            "input_controller": null,
+            "input_cadence_policy": "manual",
             "target_package": "org.example.input",
             "password_field": false
         });
@@ -280,6 +309,35 @@ mod tests {
         assert!(key_result.is_ok(), "key event should update counts");
         assert!(stop_result.is_ok(), "session_stop should update counts");
         assert!(counts.is_valid(), "normal session should validate");
+    }
+
+    #[test]
+    fn validation_counts_reject_session_start_without_provenance() {
+        let mut counts = ValidationCounts::default();
+        let start_record = json!({
+            "schema": "input_dynamics_event.v1",
+            "session_id": "session-1",
+            "event": "session_start",
+            "t_wall_ms": 1_u64,
+            "t_uptime_ms": 1_u64,
+            "target_package": "org.example.input",
+            "password_field": false
+        });
+
+        let update_result = counts.update(&start_record);
+
+        assert!(
+            update_result.is_ok(),
+            "session_start should update counts even when provenance is missing"
+        );
+        assert!(
+            !counts.is_valid(),
+            "missing provenance should fail validation"
+        );
+        assert_eq!(
+            counts.invalid_provenance_count, 1,
+            "invalid provenance count should increment"
+        );
     }
 
     #[test]

@@ -24,9 +24,10 @@ Use this keyboard only in consented, local research settings.
 - Explicit session start/stop state.
 - JSONL event logs with `schema: input_dynamics_event.v1`.
 - Optional caller-provided `external_run_id` on every record in a session.
+- Session-level input provenance on `session_start`.
 - Touch and key timing records from real soft-keyboard use.
 - Password-field suppression.
-- Local ADB controls for session coordination.
+- Request-correlated local ADB controls for session coordination.
 - Live keyboard layout snapshots for calibration and layout validation without
   screenshot-based coordinate discovery.
 

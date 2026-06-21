@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::app::{DEFAULT_PACKAGE, DEFAULT_REPO};
 
@@ -52,13 +52,31 @@ pub(crate) enum Commands {
         /// External run id to write into each session record.
         #[arg(long)]
         run_id: String,
+        /// Session-level input actor provenance.
+        #[arg(long, default_value = "human")]
+        input_actor: String,
+        /// Session-level controller provenance.
+        #[arg(long)]
+        input_controller: Option<String>,
+        /// Session-level cadence provenance.
+        #[arg(long, default_value = "manual")]
+        input_cadence_policy: String,
     },
     /// Stop the active logging session.
     Stop,
     /// Read current status.
     Status,
     /// Read keyboard layout status.
-    Layout,
+    Layout {
+        /// Wait until the keyboard layout is visible.
+        #[arg(long, conflicts_with = "wait_hidden")]
+        wait_visible: bool,
+        /// Wait until the keyboard layout is hidden.
+        #[arg(long, conflicts_with = "wait_visible")]
+        wait_hidden: bool,
+    },
+    /// Hide the currently visible soft keyboard.
+    HideKeyboard,
     /// List log files.
     ListLogs,
     /// Clear log files when no session is active.
@@ -83,7 +101,22 @@ pub(crate) enum Commands {
         #[arg(long, conflicts_with = "code")]
         label: Option<String>,
         /// Key code to tap.
-        #[arg(long, conflicts_with = "label")]
+        #[arg(long, conflicts_with = "label", allow_hyphen_values = true)]
         code: Option<i64>,
     },
+    /// Press a common semantic key from the current layout.
+    Press {
+        /// Semantic key to press.
+        key: PressKey,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub(crate) enum PressKey {
+    /// Delete/backspace.
+    Delete,
+    /// Enter/action.
+    Enter,
+    /// Space.
+    Space,
 }

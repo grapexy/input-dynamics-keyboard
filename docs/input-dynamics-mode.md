@@ -119,6 +119,15 @@ debugging, and should be treated as sensitive context in exports.
 `external_run_id` is optional caller-provided metadata for coordinating local
 runs; when present, it is copied to every JSONL record in that session.
 
+`session_start` records also include session-level input provenance:
+
+- `input_actor`, default `human`
+- `input_controller`, default null
+- `input_cadence_policy`, default `manual`
+
+These fields let later analysis compare human-observed sessions with other
+locally controlled sessions without changing the per-key timing schema.
+
 Example record:
 
 ```json

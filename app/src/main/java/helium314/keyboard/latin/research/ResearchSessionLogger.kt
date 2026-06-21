@@ -4,6 +4,7 @@ package helium314.keyboard.latin.research
 import android.content.Context
 import android.os.Build
 import android.os.SystemClock
+import android.system.Os
 import android.text.InputType
 import android.view.MotionEvent
 import androidx.core.content.edit
@@ -31,9 +32,14 @@ object ResearchSessionLogger {
     private const val PREF_ACTIVE = "input_dynamics_logging_session_active"
     private const val PREF_SESSION_ID = "input_dynamics_logging_session_id"
     private const val PREF_EXTERNAL_RUN_ID = "input_dynamics_logging_external_run_id"
+    private const val PREF_INPUT_ACTOR = "input_dynamics_logging_input_actor"
+    private const val PREF_INPUT_CONTROLLER = "input_dynamics_logging_input_controller"
+    private const val PREF_INPUT_CADENCE_POLICY = "input_dynamics_logging_input_cadence_policy"
     private const val LOG_DIR_NAME = "input_dynamics_logs"
     private const val CONTROL_STATUS_FILE_NAME = "input_dynamics_control_status.json"
     private const val SCHEMA = "input_dynamics_event.v1"
+    private const val DEFAULT_INPUT_ACTOR = "human"
+    private const val DEFAULT_INPUT_CADENCE_POLICY = "manual"
     private const val CHEAP_RECORD_COUNT_MAX_BYTES = 10L * 1024L * 1024L
 
     private val ioExecutor = Executors.newSingleThreadExecutor()
@@ -67,24 +73,73 @@ object ResearchSessionLogger {
         context.prefs().getString(PREF_EXTERNAL_RUN_ID, null)
 
     @JvmStatic
+    fun currentInputActor(context: Context): String =
+        context.prefs().getString(PREF_INPUT_ACTOR, null)
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: DEFAULT_INPUT_ACTOR
+
+    @JvmStatic
+    fun currentInputController(context: Context): String? =
+        context.prefs().getString(PREF_INPUT_CONTROLLER, null)
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+
+    @JvmStatic
+    fun currentInputCadencePolicy(context: Context): String =
+        context.prefs().getString(PREF_INPUT_CADENCE_POLICY, null)
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: DEFAULT_INPUT_CADENCE_POLICY
+
+    @JvmStatic
     @JvmOverloads
-    fun startSession(context: Context, externalRunId: String? = null): String {
+    fun startSession(
+        context: Context,
+        externalRunId: String? = null,
+        inputActor: String? = null,
+        inputController: String? = null,
+        inputCadencePolicy: String? = null
+    ): String {
         val appContext = rememberContext(context)
         if (isSessionActive(appContext)) {
             stopSession(appContext)
         }
         val sessionId = newSessionId()
         val normalizedExternalRunId = externalRunId?.trim()?.takeIf { it.isNotEmpty() }
+        val normalizedInputActor = inputActor?.trim()?.takeIf { it.isNotEmpty() } ?: DEFAULT_INPUT_ACTOR
+        val normalizedInputController = inputController?.trim()?.takeIf { it.isNotEmpty() }
+        val normalizedInputCadencePolicy = inputCadencePolicy
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: DEFAULT_INPUT_CADENCE_POLICY
         appContext.prefs().edit(commit = true) {
             putBoolean(PREF_ACTIVE, true)
             putString(PREF_SESSION_ID, sessionId)
+            putString(PREF_INPUT_ACTOR, normalizedInputActor)
+            putString(PREF_INPUT_CADENCE_POLICY, normalizedInputCadencePolicy)
             if (normalizedExternalRunId == null) {
                 remove(PREF_EXTERNAL_RUN_ID)
             } else {
                 putString(PREF_EXTERNAL_RUN_ID, normalizedExternalRunId)
             }
+            if (normalizedInputController == null) {
+                remove(PREF_INPUT_CONTROLLER)
+            } else {
+                putString(PREF_INPUT_CONTROLLER, normalizedInputController)
+            }
         }
-        appendLifecycleEvent(appContext, SessionSnapshot(sessionId, normalizedExternalRunId), "session_start")
+        appendLifecycleEvent(
+            appContext,
+            SessionSnapshot(
+                sessionId,
+                normalizedExternalRunId,
+                normalizedInputActor,
+                normalizedInputController,
+                normalizedInputCadencePolicy
+            ),
+            "session_start"
+        )
         return sessionId
     }
 
@@ -292,6 +347,7 @@ object ResearchSessionLogger {
 
     fun controlStatusJson(
         context: Context,
+        requestId: String? = null,
         command: String? = null,
         ok: Boolean = true,
         message: String? = null,
@@ -319,6 +375,7 @@ object ResearchSessionLogger {
         val statusFile = File(logDirectory, CONTROL_STATUS_FILE_NAME)
         val json = JSONObject()
             .put("package_name", appContext.packageName)
+            .put("request_id", jsonValue(requestId))
             .put("version_name", packageInfo.versionName ?: BuildConfig.VERSION_NAME)
             .put("version_code", versionCode)
             .put("build_variant", BuildConfig.BUILD_TYPE)
@@ -328,6 +385,9 @@ object ResearchSessionLogger {
             .put("current_session_id", jsonValue(if (active) lastSessionId else null))
             .put("last_session_id", jsonValue(lastSessionId))
             .put("external_run_id", jsonValue(externalRunId))
+            .put("input_actor", currentInputActor(appContext))
+            .put("input_controller", jsonValue(currentInputController(appContext)))
+            .put("input_cadence_policy", currentInputCadencePolicy(appContext))
             .put("log_directory", logDirectory.absolutePath)
             .put("current_log_file_path", jsonValue(currentLogFile?.absolutePath))
             .put("last_log_file_path", jsonValue(lastLogFile?.absolutePath))
@@ -349,17 +409,37 @@ object ResearchSessionLogger {
         return json
     }
 
+    @Synchronized
     fun writeControlStatusJson(context: Context, status: JSONObject): File {
         val file = File(logDirectory(context), CONTROL_STATUS_FILE_NAME)
-        FileOutputStream(file, false).use { output ->
+        val tempFile = File(file.parentFile, "$CONTROL_STATUS_FILE_NAME.tmp")
+        FileOutputStream(tempFile, false).use { output ->
             output.write(status.toString(2).toByteArray(Charsets.UTF_8))
             output.write('\n'.code)
+            output.fd.sync()
+        }
+        runCatching {
+            Os.rename(tempFile.absolutePath, file.absolutePath)
+        }.getOrElse {
+            if (!tempFile.renameTo(file)) {
+                tempFile.copyTo(file, overwrite = true)
+                tempFile.delete()
+            }
         }
         return file
     }
 
     private fun appendLifecycleEvent(context: Context, session: SessionSnapshot, event: String) {
-        appendEvent(context, session, event, emptyMap(), includeFieldState = false)
+        val fields = if (event == "session_start") {
+            mapOf(
+                "input_actor" to session.inputActor,
+                "input_controller" to session.inputController,
+                "input_cadence_policy" to session.inputCadencePolicy
+            )
+        } else {
+            emptyMap()
+        }
+        appendEvent(context, session, event, fields, includeFieldState = false)
     }
 
     private fun appendEvent(
@@ -520,7 +600,13 @@ object ResearchSessionLogger {
 
     private fun currentSessionSnapshot(context: Context): SessionSnapshot? {
         val sessionId = currentSessionId(context) ?: return null
-        return SessionSnapshot(sessionId, currentExternalRunId(context))
+        return SessionSnapshot(
+            sessionId,
+            currentExternalRunId(context),
+            currentInputActor(context),
+            currentInputController(context),
+            currentInputCadencePolicy(context)
+        )
     }
 
     private fun fieldSnapshot(): FieldSnapshot? {
@@ -662,7 +748,10 @@ object ResearchSessionLogger {
 
     private data class SessionSnapshot(
         val sessionId: String,
-        val externalRunId: String?
+        val externalRunId: String?,
+        val inputActor: String,
+        val inputController: String?,
+        val inputCadencePolicy: String
     )
 
     private data class PendingEvent(

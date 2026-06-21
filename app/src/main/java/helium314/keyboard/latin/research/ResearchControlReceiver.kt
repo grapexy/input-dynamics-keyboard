@@ -13,10 +13,14 @@ open class ResearchControlReceiver : BroadcastReceiver() {
         val appContext = context.applicationContext
         val action = intent.action.orEmpty()
         val command = action.substringAfterLast('.', action).lowercase()
+        val requestId = intent.getStringExtra(EXTRA_REQUEST_ID)
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
         val result = handleCommand(appContext, action, intent)
         ResearchSessionLogger.waitForPendingWrites()
         val status = ResearchSessionLogger.controlStatusJson(
             appContext,
+            requestId = requestId,
             command = command,
             ok = result.ok,
             message = result.message,
@@ -61,7 +65,16 @@ open class ResearchControlReceiver : BroadcastReceiver() {
                     val externalRunId = intent.getStringExtra(EXTRA_RUN_ID)
                         ?.trim()
                         ?.takeIf { it.isNotEmpty() }
-                    val sessionId = ResearchSessionLogger.startSession(context, externalRunId)
+                    val inputActor = intent.getStringExtra(EXTRA_INPUT_ACTOR)
+                    val inputController = intent.getStringExtra(EXTRA_INPUT_CONTROLLER)
+                    val inputCadencePolicy = intent.getStringExtra(EXTRA_INPUT_CADENCE_POLICY)
+                    val sessionId = ResearchSessionLogger.startSession(
+                        context,
+                        externalRunId,
+                        inputActor,
+                        inputController,
+                        inputCadencePolicy
+                    )
                     CommandResult(
                         message = "input dynamics session started",
                         extraFields = mapOf(
@@ -144,7 +157,11 @@ open class ResearchControlReceiver : BroadcastReceiver() {
         const val ACTION_KEYBOARD_LAYOUT = "org.inputdynamics.ime.action.KEYBOARD_LAYOUT"
         const val ACTION_LIST_LOGS = "org.inputdynamics.ime.action.LIST_LOGS"
         const val ACTION_CLEAR_LOGS = "org.inputdynamics.ime.action.CLEAR_LOGS"
+        const val EXTRA_REQUEST_ID = "request_id"
         const val EXTRA_RUN_ID = "run_id"
+        const val EXTRA_INPUT_ACTOR = "input_actor"
+        const val EXTRA_INPUT_CONTROLLER = "input_controller"
+        const val EXTRA_INPUT_CADENCE_POLICY = "input_cadence_policy"
         const val EXTRA_STATUS_JSON = "status_json"
     }
 }

@@ -5,7 +5,9 @@ research runs. It uses an explicit broadcast receiver and writes command status
 to `input_dynamics_control_status.json` next to the JSONL logs.
 
 For normal agent and scripted operation, prefer the host CLI in [cli.md](cli.md).
-Use this page as the raw protocol reference and fallback path.
+Use this page as the raw protocol reference and fallback path. The CLI adds a
+unique `request_id` to each broadcast and waits until this status file reports
+the same `request_id`.
 
 ## Build Artifacts
 
@@ -76,12 +78,25 @@ adb shell ime enable "$PKG/$IME"
 adb shell ime set "$PKG/$IME"
 
 adb shell am broadcast -n "$PKG/.control.InputDynamicsControlReceiver" -a org.inputdynamics.ime.action.ENABLE
-adb shell am broadcast -n "$PKG/.control.InputDynamicsControlReceiver" -a org.inputdynamics.ime.action.START --es run_id "$RUN_ID"
+adb shell am broadcast -n "$PKG/.control.InputDynamicsControlReceiver" -a org.inputdynamics.ime.action.START \
+  --es run_id "$RUN_ID" \
+  --es input_actor human \
+  --es input_cadence_policy manual
 adb shell am broadcast -n "$PKG/.control.InputDynamicsControlReceiver" -a org.inputdynamics.ime.action.STATUS
 adb shell am broadcast -n "$PKG/.control.InputDynamicsControlReceiver" -a org.inputdynamics.ime.action.KEYBOARD_LAYOUT
 adb shell am broadcast -n "$PKG/.control.InputDynamicsControlReceiver" -a org.inputdynamics.ime.action.LIST_LOGS
 adb shell am broadcast -n "$PKG/.control.InputDynamicsControlReceiver" -a org.inputdynamics.ime.action.STOP
 adb shell am broadcast -n "$PKG/.control.InputDynamicsControlReceiver" -a org.inputdynamics.ime.action.DISABLE
+```
+
+For request-correlated raw debugging, pass a unique `request_id`:
+
+```bash
+REQUEST_ID=manual-$(date +%s)
+adb shell am broadcast -n "$PKG/.control.InputDynamicsControlReceiver" \
+  -a org.inputdynamics.ime.action.STATUS \
+  --es request_id "$REQUEST_ID"
+adb shell cat "/sdcard/Android/data/$PKG/files/input_dynamics_logs/input_dynamics_control_status.json"
 ```
 
 Use `PKG=org.inputdynamics.ime` only for installed release builds.
@@ -103,18 +118,20 @@ input_dynamics_control_status.json
 Status includes:
 
 - package name
+- request id, when the caller supplied one
 - version name and code
 - build variant
 - enabled/active state
 - current and last session ids
 - external run id
+- input actor, controller, and cadence policy
 - log directory
 - current or last log file path
 - log file count
 - cheap record count when available
 
-Ordered broadcast result data may also print the same JSON to stdout on some
-Android builds.
+Ordered broadcast result data may also print JSON to stdout on some Android
+builds. Treat the status file as the raw command-result source.
 
 ## Keyboard Layout Snapshot
 
