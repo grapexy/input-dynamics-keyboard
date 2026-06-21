@@ -40,7 +40,7 @@ SPDX-License-Identifier: Apache-2.0 AND GPL-3.0-only
         </service>
 
         <service android:name=".spellcheck.AndroidSpellCheckerService"
-                 android:label="@string/spell_checker_service_name"
+                 android:label="@string/research_spell_checker_service_name"
                  android:permission="android.permission.BIND_TEXT_SERVICE"
                  android:exported="true">
             <intent-filter>
@@ -79,7 +79,7 @@ SPDX-License-Identifier: Apache-2.0 AND GPL-3.0-only
 
         <activity android:name=".spellcheck.SpellCheckerSettingsActivity"
                 android:theme="@style/platformActivityTheme"
-                android:label="@string/spell_checker_service_name"
+                android:label="@string/research_spell_checker_service_name"
                 android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

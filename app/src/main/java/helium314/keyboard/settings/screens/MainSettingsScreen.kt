@@ -46,7 +46,7 @@ fun MainSettingsScreen(
 ) {
     SearchSettingsScreen(
         onClickBack = onClickBack,
-        title = stringResource(R.string.ime_settings),
+        title = stringResource(R.string.research_ime_settings),
         settings = emptyList(),
     ) {
         val enabledSubtypes = SubtypeSettings.getEnabledSubtypes(true)
