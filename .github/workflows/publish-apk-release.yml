@@ -1,0 +1,157 @@
+name: Publish APK release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: Existing git tag to publish, for example v0.1.0
+        required: true
+        type: string
+      prerelease:
+        description: Mark the GitHub release as a prerelease
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      INPUT_TAG_NAME: ${{ inputs.tag_name }}
+      INPUT_PRERELEASE: ${{ inputs.prerelease }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            tag_name="$INPUT_TAG_NAME"
+            prerelease="$INPUT_PRERELEASE"
+          else
+            tag_name="$GITHUB_REF_NAME"
+            prerelease="true"
+          fi
+
+          if ! git rev-parse -q --verify "refs/tags/$tag_name" >/dev/null; then
+            echo "::error::Tag $tag_name does not exist"
+            exit 1
+          fi
+
+          git checkout --detach "refs/tags/$tag_name"
+          echo "tag_name=$tag_name" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - uses: gradle/actions/setup-gradle@v3
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Test and build debug APK
+        run: ./gradlew :app:testDebugUnitTest :app:assembleDebug
+
+      - name: Verify and package release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag_name="${{ steps.release.outputs.tag_name }}"
+          mkdir -p release-assets
+
+          debug_apk="$(find app/build/outputs/apk/debug -name '*-debug.apk' | sort | head -n 1)"
+          if [ -z "$debug_apk" ]; then
+            echo "::error::Expected debug APK was not produced"
+            exit 1
+          fi
+
+          aapt_bin="$(find "$ANDROID_HOME/build-tools" -name aapt | sort -V | tail -n 1)"
+          if [ -z "$aapt_bin" ]; then
+            echo "::error::Android build-tools are missing aapt"
+            exit 1
+          fi
+
+          debug_asset="release-assets/InputDynamicsKeyboard-${tag_name}-debug.apk"
+          cp "$debug_apk" "$debug_asset"
+
+          "$aapt_bin" dump permissions "$debug_asset" | tee release-assets/APK_PERMISSIONS.txt
+          if "$aapt_bin" dump permissions "$debug_asset" | grep -q 'android.permission.INTERNET'; then
+            echo "::error::Debug APK unexpectedly requests INTERNET permission"
+            exit 1
+          fi
+
+          sha256sum release-assets/*.apk > release-assets/SHA256SUMS.txt
+
+          cat > release-assets/RELEASE_NOTES.md <<EOF
+          ## Input Dynamics Keyboard $tag_name
+
+          APK assets:
+
+          - \`InputDynamicsKeyboard-${tag_name}-debug.apk\`: debug package \`org.inputdynamics.ime.debug\`
+          - \`SHA256SUMS.txt\`: SHA-256 checksums for APK assets
+          - \`APK_PERMISSIONS.txt\`: permissions dumped from the debug APK
+
+          Verification:
+
+          - Unit tests passed in CI.
+          - Debug APK was built from tag \`$tag_name\`.
+          - Debug APK was checked for absence of \`android.permission.INTERNET\`.
+
+          Local control surface:
+
+          - ADB receiver: \`.control.InputDynamicsControlReceiver\`
+          - Action prefix: \`org.inputdynamics.ime.action\`
+          - Log directory: \`input_dynamics_logs\`
+          - Status file: \`input_dynamics_control_status.json\`
+          - JSONL schema: \`input_dynamics_event.v1\`
+          EOF
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag_name="${{ steps.release.outputs.tag_name }}"
+          title="Input Dynamics Keyboard $tag_name"
+
+          prerelease_args=()
+          if [ "${{ steps.release.outputs.prerelease }}" = "true" ]; then
+            prerelease_args+=(--prerelease)
+          fi
+
+          if gh release view "$tag_name" >/dev/null 2>&1; then
+            gh release edit "$tag_name" --title "$title" --notes-file release-assets/RELEASE_NOTES.md "${prerelease_args[@]}"
+            gh release upload "$tag_name" release-assets/*.apk release-assets/SHA256SUMS.txt release-assets/APK_PERMISSIONS.txt --clobber
+          else
+            gh release create "$tag_name" \
+              release-assets/*.apk \
+              release-assets/SHA256SUMS.txt \
+              release-assets/APK_PERMISSIONS.txt \
+              --title "$title" \
+              --notes-file release-assets/RELEASE_NOTES.md \
+              "${prerelease_args[@]}"
+          fi
+
+      - name: Archive reports for failed job
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports
+          path: '*/build/reports'
+        if: ${{ failure() }}

@@ -37,8 +37,10 @@ Build and install the debug APK:
 ```bash
 ./gradlew :app:testDebugUnitTest :app:assembleDebug
 adb install -r app/build/outputs/apk/debug/InputDynamicsKeyboard_3.9-debug.apk
-adb shell ime enable org.inputdynamics.ime.debug/helium314.keyboard.latin.LatinIME
-adb shell ime set org.inputdynamics.ime.debug/helium314.keyboard.latin.LatinIME
+PKG=org.inputdynamics.ime.debug
+IME_SERVICE="$(adb shell ime list -s | grep "^$PKG/" | head -n 1)"
+adb shell ime enable "$IME_SERVICE"
+adb shell ime set "$IME_SERVICE"
 ```
 
 Start and stop a local run:
@@ -61,13 +63,31 @@ adb pull /sdcard/Android/data/org.inputdynamics.ime.debug/files/input_dynamics_l
 
 Full command reference: [docs/adb-control.md](docs/adb-control.md).
 
+## APK Releases
+
+Public APKs are distributed as GitHub Release assets, not committed binaries.
+Release assets include the debug APK, SHA-256 checksums, and a permissions dump.
+See [docs/releases.md](docs/releases.md).
+
 ## Documentation
 
 - [Documentation index](docs/README.md)
 - [Input dynamics mode, privacy boundary, and schema](docs/input-dynamics-mode.md)
 - [ADB control and validation](docs/adb-control.md)
+- [APK release process](docs/releases.md)
 - [Contribution guidelines](CONTRIBUTING.md)
 - [Security and sensitive data reporting](SECURITY.md)
+
+## Agent Skill
+
+This repo includes a publishable agent skill for local ADB-driven operation:
+[skills/input-dynamics-keyboard](skills/input-dynamics-keyboard/SKILL.md).
+
+After publishing the repo to GitHub, install it with:
+
+```bash
+npx skills add grapexy/input-dynamics-keyboard --skill input-dynamics-keyboard
+```
 
 ## Git Hygiene
 

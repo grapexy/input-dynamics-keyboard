@@ -26,8 +26,9 @@ app/build/outputs/apk/debugNoMinify/InputDynamicsKeyboard_3.9-debugNoMinify.apk
 app/build/outputs/apk/release/InputDynamicsKeyboard_3.9-release-unsigned.apk
 ```
 
-The release APK is unsigned and must be signed before installation or
-distribution.
+The GitHub Release workflow currently publishes the debug APK. The local release
+APK is unsigned and is not distributed unless a signed release process is added
+later.
 
 ## Package IDs
 
@@ -79,7 +80,8 @@ adb shell am broadcast -n "$PKG/.control.InputDynamicsControlReceiver" -a org.in
 adb shell am broadcast -n "$PKG/.control.InputDynamicsControlReceiver" -a org.inputdynamics.ime.action.DISABLE
 ```
 
-Use `PKG=org.inputdynamics.ime` for signed release builds.
+Use `PKG=org.inputdynamics.ime` only for locally installed signed release
+builds.
 
 Optional clear command, only when no session is active:
 

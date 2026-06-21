@@ -55,6 +55,7 @@
           default = pkgs.mkShell {
             packages = [
               androidSdk
+              pkgs.gh
               pkgs.git
               pkgs.jdk17
               pkgs.unzip
@@ -69,11 +70,13 @@
 
             shellHook = ''
               export ANDROID_USER_HOME="$PWD/.android"
+              export GH_CONFIG_DIR="$PWD/.git/gh"
               export PATH="${androidHome}/platform-tools:${buildTools}:${ndkHome}:$PATH"
 
               echo "Android SDK: $ANDROID_HOME"
               echo "Android NDK: $ANDROID_NDK_HOME"
               echo "Java: $JAVA_HOME"
+              echo "GitHub CLI config: $GH_CONFIG_DIR"
               echo "Build with: ./gradlew :app:assembleDebugNoMinify"
             '';
           };
