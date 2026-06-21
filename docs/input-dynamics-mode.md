@@ -141,9 +141,16 @@ runs; when present, it is copied to every JSONL record in that session.
 - `input_actor`, default `human`
 - `input_controller`, default null
 - `input_cadence_policy`, default `manual`
+- `input_profile_source`
+- `input_profile_id`
+- `input_profile_schema`
+- `input_profile_hash`
+- `input_profile_seed`
 
 These fields let later analysis compare human-observed sessions with other
 locally controlled sessions without changing the per-key timing schema.
+Profile fields identify the controller-side input generator configuration; the
+IME records provenance only and does not implement profile sampling.
 
 Lifecycle and dismissal-evidence records use the same non-password field
 boundary as key/touch records. They preserve the latest non-password field

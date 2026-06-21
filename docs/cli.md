@@ -66,6 +66,21 @@ with `ok: false` and `busy: true` before changing IME or logging state. Agents
 should treat that as a hard ownership conflict, inspect `session status`, and
 wait for the active run to stop.
 
+Stateful sessions use the bundled `profiles/baseline-v1.json` input profile by
+default for controller-driven input. To bind a local profile to the whole
+session:
+
+```bash
+cargo run --quiet -p input-dynamics -- session start \
+  --run-id "$RUN_ID" \
+  --input-profile ./profiles/custom.json \
+  --input-profile-seed 12345
+```
+
+The IME JSONL `session_start` record and controller state include
+`input_profile_source`, `input_profile_id`, `input_profile_schema`,
+`input_profile_hash`, and `input_profile_seed`.
+
 For a complete bounded experiment capture, use `record`. It starts IME logging,
 captures a concurrent ADB touchscreen event stream with `getevent`, stops the
 session, pulls IME logs, writes `manifest.json`, and writes `validation.json`:
@@ -158,13 +173,19 @@ scraping human-oriented text.
 - `stop`: stops the active session.
 - `status`: returns current control status.
 - `session start --run-id <id>`: enables/selects the IME, enables logging,
-  starts an IME session, and starts a persistent local uinput controller. If
-  another stateful session is active or starting, it returns `busy: true`
-  without changing the active run.
+  starts an IME session, starts a persistent local uinput controller, and binds
+  an input profile. If another stateful session is active or starting, it
+  returns `busy: true` without changing the active run.
+  Defaults are `--input-actor agent_adb`,
+  `--input-controller input-dynamics-cli`, and
+  `--input-cadence-policy input_profile`.
+  - `--input-profile <path>`: local profile JSON for the whole session.
+  - `--input-profile-seed <u64>`: explicit seed for reproducible sampled input.
 - `session status`: returns IME status plus local input-controller status. When
   the uinput controller is active, `input.state` includes the physical
-  touchscreen profile hash, mirrored virtual touchscreen event path, Event Hub
-  device metadata, and Input Reader device metadata when Android exposes them.
+  touchscreen profile hash, input profile summary, mirrored virtual touchscreen
+  event path, Event Hub device metadata, and Input Reader device metadata when
+  Android exposes them.
 - `session stop`: stops the local input controller, verifies normal runtime
   cleanup, verifies that the mirrored virtual touchscreen event path has
   disappeared when it was detected, then stops IME logging. If a previous
@@ -182,8 +203,10 @@ scraping human-oriented text.
   name through the active session controller.
 - `type <text>`: types text through visible layout keys in the active session.
   The command plans the full string before pressing any key; unsupported
-  characters fail without partial typing. It uses a deterministic
-  `--inter-key-delay-ms` delay, default `40`.
+  characters fail without partial typing. The active input profile can sample
+  key-local landing ratios, hold duration, contact fields, and inter-key delay.
+  `--inter-key-delay-ms`, default `40`, is used when the active controller does
+  not provide an inter-key delay sample.
 - `touch doctor`: checks AOSP uinput availability and reports the mirrored
   physical touchscreen profile used by the CLI.
 - `touch tap --x <x> --y <y> [--hold-ms <ms>]`: sends an absolute screen tap
@@ -235,6 +258,7 @@ When `record` is run with `--with-input-controller`, `manifest.json` includes:
 
 - `input_controller_runtime.summary.input_backend`
 - `input_controller_runtime.summary.input_device_command`
+- `input_controller_runtime.summary.input_profile`
 - `input_controller_runtime.summary.physical_touchscreen_profile_hash`
 - `input_controller_runtime.summary.physical_touchscreen`
 - `input_controller_runtime.summary.virtual_touchscreen`

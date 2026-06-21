@@ -26,6 +26,7 @@ input_dynamics_logs/
 session-*.jsonl
 *.jsonl
 input_dynamics_control_status.json
+input_dynamics_control_result_*.json
 
 # Packaged Android artifacts and signing material.
 *.apk

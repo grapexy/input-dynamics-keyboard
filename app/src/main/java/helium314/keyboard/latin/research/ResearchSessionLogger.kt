@@ -2,6 +2,7 @@
 package helium314.keyboard.latin.research
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.os.Build
 import android.os.SystemClock
 import android.system.Os
@@ -37,8 +38,15 @@ object ResearchSessionLogger {
     private const val PREF_INPUT_ACTOR = "input_dynamics_logging_input_actor"
     private const val PREF_INPUT_CONTROLLER = "input_dynamics_logging_input_controller"
     private const val PREF_INPUT_CADENCE_POLICY = "input_dynamics_logging_input_cadence_policy"
+    private const val PREF_INPUT_PROFILE_SOURCE = "input_dynamics_logging_input_profile_source"
+    private const val PREF_INPUT_PROFILE_ID = "input_dynamics_logging_input_profile_id"
+    private const val PREF_INPUT_PROFILE_SCHEMA = "input_dynamics_logging_input_profile_schema"
+    private const val PREF_INPUT_PROFILE_HASH = "input_dynamics_logging_input_profile_hash"
+    private const val PREF_INPUT_PROFILE_SEED = "input_dynamics_logging_input_profile_seed"
     private const val LOG_DIR_NAME = "input_dynamics_logs"
     private const val CONTROL_STATUS_FILE_NAME = "input_dynamics_control_status.json"
+    private const val CONTROL_RESULT_FILE_PREFIX = "input_dynamics_control_result_"
+    private const val CONTROL_RESULT_FILE_SUFFIX = ".json"
     private const val SCHEMA = "input_dynamics_event.v1"
     private const val DEFAULT_INPUT_ACTOR = "human"
     private const val DEFAULT_INPUT_CADENCE_POLICY = "manual"
@@ -98,13 +106,38 @@ object ResearchSessionLogger {
             ?: DEFAULT_INPUT_CADENCE_POLICY
 
     @JvmStatic
+    fun currentInputProfileSource(context: Context): String? =
+        currentOptionalString(context, PREF_INPUT_PROFILE_SOURCE)
+
+    @JvmStatic
+    fun currentInputProfileId(context: Context): String? =
+        currentOptionalString(context, PREF_INPUT_PROFILE_ID)
+
+    @JvmStatic
+    fun currentInputProfileSchema(context: Context): String? =
+        currentOptionalString(context, PREF_INPUT_PROFILE_SCHEMA)
+
+    @JvmStatic
+    fun currentInputProfileHash(context: Context): String? =
+        currentOptionalString(context, PREF_INPUT_PROFILE_HASH)
+
+    @JvmStatic
+    fun currentInputProfileSeed(context: Context): String? =
+        currentOptionalString(context, PREF_INPUT_PROFILE_SEED)
+
+    @JvmStatic
     @JvmOverloads
     fun startSession(
         context: Context,
         externalRunId: String? = null,
         inputActor: String? = null,
         inputController: String? = null,
-        inputCadencePolicy: String? = null
+        inputCadencePolicy: String? = null,
+        inputProfileSource: String? = null,
+        inputProfileId: String? = null,
+        inputProfileSchema: String? = null,
+        inputProfileHash: String? = null,
+        inputProfileSeed: String? = null
     ): String {
         val appContext = rememberContext(context)
         if (isSessionActive(appContext)) {
@@ -118,6 +151,11 @@ object ResearchSessionLogger {
             ?.trim()
             ?.takeIf { it.isNotEmpty() }
             ?: DEFAULT_INPUT_CADENCE_POLICY
+        val normalizedInputProfileSource = inputProfileSource?.trim()?.takeIf { it.isNotEmpty() }
+        val normalizedInputProfileId = inputProfileId?.trim()?.takeIf { it.isNotEmpty() }
+        val normalizedInputProfileSchema = inputProfileSchema?.trim()?.takeIf { it.isNotEmpty() }
+        val normalizedInputProfileHash = inputProfileHash?.trim()?.takeIf { it.isNotEmpty() }
+        val normalizedInputProfileSeed = inputProfileSeed?.trim()?.takeIf { it.isNotEmpty() }
         pressIdCounter.set(0)
         pointerPressIds.clear()
         lifecycleFieldSnapshot = fieldSnapshot()
@@ -136,6 +174,11 @@ object ResearchSessionLogger {
             } else {
                 putString(PREF_INPUT_CONTROLLER, normalizedInputController)
             }
+            putOptionalString(PREF_INPUT_PROFILE_SOURCE, normalizedInputProfileSource)
+            putOptionalString(PREF_INPUT_PROFILE_ID, normalizedInputProfileId)
+            putOptionalString(PREF_INPUT_PROFILE_SCHEMA, normalizedInputProfileSchema)
+            putOptionalString(PREF_INPUT_PROFILE_HASH, normalizedInputProfileHash)
+            putOptionalString(PREF_INPUT_PROFILE_SEED, normalizedInputProfileSeed)
         }
         appendLifecycleEvent(
             appContext,
@@ -144,7 +187,12 @@ object ResearchSessionLogger {
                 normalizedExternalRunId,
                 normalizedInputActor,
                 normalizedInputController,
-                normalizedInputCadencePolicy
+                normalizedInputCadencePolicy,
+                normalizedInputProfileSource,
+                normalizedInputProfileId,
+                normalizedInputProfileSchema,
+                normalizedInputProfileHash,
+                normalizedInputProfileSeed
             ),
             "session_start"
         )
@@ -515,6 +563,9 @@ object ResearchSessionLogger {
             packageInfo.versionCode.toLong()
         }
         val statusFile = File(logDirectory, CONTROL_STATUS_FILE_NAME)
+        val resultFile = requestId?.let {
+            File(logDirectory, controlResultFileName(it))
+        }
         val json = JSONObject()
             .put("package_name", appContext.packageName)
             .put("request_id", jsonValue(requestId))
@@ -531,11 +582,17 @@ object ResearchSessionLogger {
             .put("input_actor", currentInputActor(appContext))
             .put("input_controller", jsonValue(currentInputController(appContext)))
             .put("input_cadence_policy", currentInputCadencePolicy(appContext))
+            .put("input_profile_source", jsonValue(currentInputProfileSource(appContext)))
+            .put("input_profile_id", jsonValue(currentInputProfileId(appContext)))
+            .put("input_profile_schema", jsonValue(currentInputProfileSchema(appContext)))
+            .put("input_profile_hash", jsonValue(currentInputProfileHash(appContext)))
+            .put("input_profile_seed", jsonValue(currentInputProfileSeed(appContext)))
             .put("log_directory", logDirectory.absolutePath)
             .put("current_log_file_path", jsonValue(currentLogFile?.absolutePath))
             .put("last_log_file_path", jsonValue(lastLogFile?.absolutePath))
             .put("record_count", jsonValue(recordCountIfCheap(lastLogFile)))
             .put("status_file_path", statusFile.absolutePath)
+            .put("result_file_path", jsonValue(resultFile?.absolutePath))
             .put("log_file_count", listLogFiles(appContext).size)
             .put("t_wall_ms", System.currentTimeMillis())
             .put("t_uptime_ms", SystemClock.uptimeMillis())
@@ -555,7 +612,21 @@ object ResearchSessionLogger {
     @Synchronized
     fun writeControlStatusJson(context: Context, status: JSONObject): File {
         val file = File(logDirectory(context), CONTROL_STATUS_FILE_NAME)
-        val tempFile = File(file.parentFile, "$CONTROL_STATUS_FILE_NAME.tmp")
+        writeJsonFile(file, CONTROL_STATUS_FILE_NAME, status)
+        return file
+    }
+
+    @Synchronized
+    fun writeControlResultJson(context: Context, requestId: String?, status: JSONObject): File? {
+        val normalizedRequestId = requestId?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val fileName = controlResultFileName(normalizedRequestId)
+        val file = File(logDirectory(context), fileName)
+        writeJsonFile(file, fileName, status)
+        return file
+    }
+
+    private fun writeJsonFile(file: File, tempNamePrefix: String, status: JSONObject) {
+        val tempFile = File(file.parentFile, "$tempNamePrefix.tmp")
         FileOutputStream(tempFile, false).use { output ->
             output.write(status.toString(2).toByteArray(Charsets.UTF_8))
             output.write('\n'.code)
@@ -569,7 +640,23 @@ object ResearchSessionLogger {
                 tempFile.delete()
             }
         }
-        return file
+    }
+
+    private fun controlResultFileName(requestId: String): String {
+        val safeRequestId = requestId.map { char ->
+            if (
+                char in 'a'..'z' ||
+                char in 'A'..'Z' ||
+                char in '0'..'9' ||
+                char == '-' ||
+                char == '_'
+            ) {
+                char
+            } else {
+                '_'
+            }
+        }.joinToString("")
+        return "$CONTROL_RESULT_FILE_PREFIX$safeRequestId$CONTROL_RESULT_FILE_SUFFIX"
     }
 
     private fun appendLifecycleEvent(context: Context, session: SessionSnapshot, event: String) {
@@ -577,7 +664,12 @@ object ResearchSessionLogger {
             mapOf(
                 "input_actor" to session.inputActor,
                 "input_controller" to session.inputController,
-                "input_cadence_policy" to session.inputCadencePolicy
+                "input_cadence_policy" to session.inputCadencePolicy,
+                "input_profile_source" to session.inputProfileSource,
+                "input_profile_id" to session.inputProfileId,
+                "input_profile_schema" to session.inputProfileSchema,
+                "input_profile_hash" to session.inputProfileHash,
+                "input_profile_seed" to session.inputProfileSeed
             )
         } else {
             emptyMap()
@@ -793,7 +885,12 @@ object ResearchSessionLogger {
             currentExternalRunId(context),
             currentInputActor(context),
             currentInputController(context),
-            currentInputCadencePolicy(context)
+            currentInputCadencePolicy(context),
+            currentInputProfileSource(context),
+            currentInputProfileId(context),
+            currentInputProfileSchema(context),
+            currentInputProfileHash(context),
+            currentInputProfileSeed(context)
         )
     }
 
@@ -937,6 +1034,19 @@ object ResearchSessionLogger {
         return formatter.format(Date()) + "-" + UUID.randomUUID().toString().take(8)
     }
 
+    private fun currentOptionalString(context: Context, key: String): String? =
+        context.prefs().getString(key, null)
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+
+    private fun SharedPreferences.Editor.putOptionalString(key: String, value: String?) {
+        if (value == null) {
+            remove(key)
+        } else {
+            putString(key, value)
+        }
+    }
+
     private data class LogDirectory(
         val directory: File,
         val external: Boolean
@@ -947,7 +1057,12 @@ object ResearchSessionLogger {
         val externalRunId: String?,
         val inputActor: String,
         val inputController: String?,
-        val inputCadencePolicy: String
+        val inputCadencePolicy: String,
+        val inputProfileSource: String?,
+        val inputProfileId: String?,
+        val inputProfileSchema: String?,
+        val inputProfileHash: String?,
+        val inputProfileSeed: String?
     )
 
     private data class PendingEvent(

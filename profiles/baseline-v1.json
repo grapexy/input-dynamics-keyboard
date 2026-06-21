@@ -1,0 +1,62 @@
+{
+  "schema": "input_dynamics_profile.v1",
+  "id": "baseline-v1",
+  "parameters": {
+    "timing.inter_key_delay_ms": {
+      "dist": "integer_uniform",
+      "min": 35,
+      "max": 85
+    },
+    "timing.hold_ms": {
+      "dist": "integer_uniform",
+      "min": 45,
+      "max": 95
+    },
+    "tap.x_ratio_ppm": {
+      "dist": "normal_with_bounds",
+      "mean": 500000,
+      "stddev": 40000,
+      "min": 380000,
+      "max": 620000
+    },
+    "tap.y_ratio_ppm": {
+      "dist": "normal_with_bounds",
+      "mean": 520000,
+      "stddev": 45000,
+      "min": 380000,
+      "max": 680000
+    },
+    "contact.pressure": {
+      "dist": "integer_uniform",
+      "min": 24,
+      "max": 48
+    },
+    "contact.touch_major_px": {
+      "dist": "integer_uniform",
+      "min": 100,
+      "max": 180
+    },
+    "contact.touch_minor_px": {
+      "dist": "integer_uniform",
+      "min": 70,
+      "max": 130
+    },
+    "contact.orientation": {
+      "dist": "fixed",
+      "value": 0
+    },
+    "movement.samples_per_press": {
+      "dist": "fixed",
+      "value": 0
+    },
+    "movement.max_drift_px": {
+      "dist": "fixed",
+      "value": 0
+    },
+    "gesture.edge_back.duration_ms": {
+      "dist": "integer_uniform",
+      "min": 75,
+      "max": 120
+    }
+  }
+}

@@ -278,8 +278,14 @@ pub(crate) enum SessionCommand {
         #[arg(long, default_value = "input-dynamics-cli")]
         input_controller: String,
         /// Session-level cadence provenance.
-        #[arg(long, default_value = "manual")]
+        #[arg(long, default_value = "input_profile")]
         input_cadence_policy: String,
+        /// Local input profile JSON file. If omitted, agent-controlled sessions use the bundled baseline profile.
+        #[arg(long)]
+        input_profile: Option<PathBuf>,
+        /// Explicit input profile seed for reproducible sampled input.
+        #[arg(long)]
+        input_profile_seed: Option<u64>,
     },
     /// Read IME and local input-controller status.
     Status,
@@ -306,5 +312,8 @@ pub(crate) enum ControllerCommand {
         /// External run id for runtime provenance.
         #[arg(long)]
         run_id: String,
+        /// Serialized input profile runtime configuration.
+        #[arg(long)]
+        input_profile_runtime_json: Option<String>,
     },
 }

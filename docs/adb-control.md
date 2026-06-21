@@ -2,12 +2,14 @@
 
 Input Dynamics Keyboard has a local ADB control surface for coordinated
 research runs. It uses an explicit broadcast receiver and writes command status
-to `input_dynamics_control_status.json` next to the JSONL logs.
+to JSON files next to the JSONL logs.
 
 For normal agent and scripted operation, prefer the host CLI in [cli.md](cli.md).
 Use this page as the raw protocol reference and fallback path. The CLI adds a
-unique `request_id` to each broadcast and waits until this status file reports
-the same `request_id`.
+unique `request_id` to each broadcast and waits for the matching
+`input_dynamics_control_result_<request_id>.json` file. The latest
+`input_dynamics_control_status.json` file is still written for inspection and
+compatibility.
 
 ## Build Artifacts
 
@@ -96,7 +98,7 @@ REQUEST_ID=manual-$(date +%s)
 adb shell am broadcast -n "$PKG/.control.InputDynamicsControlReceiver" \
   -a org.inputdynamics.ime.action.STATUS \
   --es request_id "$REQUEST_ID"
-adb shell cat "/sdcard/Android/data/$PKG/files/input_dynamics_logs/input_dynamics_control_status.json"
+adb shell cat "/sdcard/Android/data/$PKG/files/input_dynamics_logs/input_dynamics_control_result_${REQUEST_ID}.json"
 ```
 
 Use `PKG=org.inputdynamics.ime` only for installed release builds.
@@ -109,10 +111,17 @@ adb shell am broadcast -n "$PKG/.control.InputDynamicsControlReceiver" -a org.in
 
 ## Status Output
 
-Every command writes:
+Every command writes the latest status file:
 
 ```text
 input_dynamics_control_status.json
+```
+
+When the caller supplies `request_id`, the app also writes an exact command
+result file:
+
+```text
+input_dynamics_control_result_<request_id>.json
 ```
 
 Status includes:
@@ -127,11 +136,14 @@ Status includes:
 - input actor, controller, and cadence policy
 - log directory
 - current or last log file path
+- latest status file path
+- exact result file path, when `request_id` was supplied
 - log file count
 - cheap record count when available
 
 Ordered broadcast result data may also print JSON to stdout on some Android
-builds. Treat the status file as the raw command-result source.
+builds. Treat the exact result file as the raw command-result source when a
+`request_id` was supplied.
 
 ## Keyboard Layout Snapshot
 

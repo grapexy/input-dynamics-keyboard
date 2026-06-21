@@ -19,6 +19,9 @@ use crate::error::{CliError, CliResult};
 use crate::process::{
     FailureMode, StdinProcess, spawn_process_to_files, spawn_process_with_stdin_to_files,
 };
+use crate::profile::{
+    self, InterKeyDelaySampling, KeyProfileContext, ProfileGenerator, RuntimeProfile,
+};
 use crate::uinput::{self, PathSpec, TapSpec};
 
 const RUNTIME_DIR_ENV: &str = "INPUT_DYNAMICS_RUNTIME_DIR";
@@ -36,6 +39,14 @@ pub(crate) struct RunConfig {
     pub(crate) uinput_stdout: PathBuf,
     pub(crate) uinput_stderr: PathBuf,
     pub(crate) run_id: String,
+    pub(crate) input_profile: Option<RuntimeProfile>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ControllerTapSpec {
+    pub(crate) fallback: TapSpec,
+    pub(crate) key_context: Option<KeyProfileContext>,
+    pub(crate) inter_key_delay_sampling: InterKeyDelaySampling,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -70,8 +81,14 @@ pub(crate) struct SessionStartLock {
 #[serde(tag = "command", rename_all = "snake_case")]
 enum ControllerRequest {
     Status,
-    Tap { x: i32, y: i32, hold_ms: u64 },
-    Path { spec: PathSpec },
+    Tap {
+        fallback: TapSpec,
+        key_context: Option<KeyProfileContext>,
+        inter_key_delay_sampling: InterKeyDelaySampling,
+    },
+    Path {
+        spec: PathSpec,
+    },
     Stop,
 }
 
@@ -138,7 +155,25 @@ pub(crate) fn clear_session_lock(app: &App) -> CliResult<()> {
     remove_file_if_exists(&RuntimePaths::for_app(app)?.session_lock)
 }
 
-pub(crate) fn start(app: &App, run_id: &str) -> CliResult<Value> {
+impl ControllerTapSpec {
+    pub(crate) const fn profiled_key(
+        fallback: TapSpec,
+        key_context: KeyProfileContext,
+        inter_key_delay_sampling: InterKeyDelaySampling,
+    ) -> Self {
+        Self {
+            fallback,
+            key_context: Some(key_context),
+            inter_key_delay_sampling,
+        }
+    }
+}
+
+pub(crate) fn start(
+    app: &App,
+    run_id: &str,
+    input_profile: Option<&RuntimeProfile>,
+) -> CliResult<Value> {
     let paths = RuntimePaths::for_app(app)?;
     fs::create_dir_all(&paths.dir)?;
     remove_stale_runtime(&paths)?;
@@ -160,7 +195,7 @@ pub(crate) fn start(app: &App, run_id: &str) -> CliResult<Value> {
 
     let executable = env::current_exe()?;
     let executable_text = path_string(&executable)?;
-    let args = controller_args(app, &paths, run_id)?;
+    let args = controller_args(app, &paths, run_id, input_profile)?;
     let child = spawn_process_to_files(
         &executable_text,
         &args,
@@ -236,7 +271,7 @@ pub(crate) fn stop(app: &App) -> CliResult<Value> {
     }))
 }
 
-pub(crate) fn tap(app: &App, spec: TapSpec) -> CliResult<Value> {
+pub(crate) fn tap(app: &App, spec: ControllerTapSpec) -> CliResult<Value> {
     let paths = RuntimePaths::for_app(app)?;
     if !paths.socket.exists() {
         return Err(CliError::new(
@@ -246,9 +281,9 @@ pub(crate) fn tap(app: &App, spec: TapSpec) -> CliResult<Value> {
     let response = send_request(
         &paths.socket,
         &ControllerRequest::Tap {
-            x: spec.x,
-            y: spec.y,
-            hold_ms: spec.hold_ms,
+            fallback: spec.fallback,
+            key_context: spec.key_context,
+            inter_key_delay_sampling: spec.inter_key_delay_sampling,
         },
     )?;
     Ok(json!({
@@ -294,9 +329,10 @@ pub(crate) fn run(app: &App, config: &RunConfig) -> CliResult<Value> {
     write_json_file(&config.state, &state)?;
 
     let mut stopped = false;
+    let mut generator = config.input_profile.clone().map(ProfileGenerator::new);
     for stream_result in listener.incoming() {
         let stream = stream_result?;
-        if handle_stream(stream, &mut uinput_process, &profile)? {
+        if handle_stream(stream, &mut uinput_process, &profile, generator.as_mut())? {
             stopped = true;
             break;
         }
@@ -314,8 +350,13 @@ pub(crate) fn run(app: &App, config: &RunConfig) -> CliResult<Value> {
     }))
 }
 
-fn controller_args(app: &App, paths: &RuntimePaths, run_id: &str) -> CliResult<Vec<String>> {
-    Ok(vec![
+fn controller_args(
+    app: &App,
+    paths: &RuntimePaths,
+    run_id: &str,
+    input_profile: Option<&RuntimeProfile>,
+) -> CliResult<Vec<String>> {
+    let mut args = vec![
         String::from("--adb"),
         String::from(app.adb_program()),
         String::from("--package"),
@@ -334,7 +375,14 @@ fn controller_args(app: &App, paths: &RuntimePaths, run_id: &str) -> CliResult<V
         path_string(&paths.uinput_stderr)?,
         String::from("--run-id"),
         String::from(run_id),
-    ])
+    ];
+    if let Some(runtime_profile) = input_profile {
+        args.extend([
+            String::from("--input-profile-runtime-json"),
+            profile::runtime_json(runtime_profile)?,
+        ]);
+    }
+    Ok(args)
 }
 
 fn wait_until_active(app: &App, paths: &RuntimePaths, run_id: &str) -> CliResult<Value> {
@@ -376,11 +424,12 @@ fn handle_stream(
     mut stream: UnixStream,
     uinput_process: &mut StdinProcess,
     profile: &uinput::TouchscreenProfile,
+    generator: Option<&mut ProfileGenerator>,
 ) -> CliResult<bool> {
     let mut request_text = String::new();
     stream.read_to_string(&mut request_text)?;
     let request: ControllerRequest = serde_json::from_str(request_text.trim())?;
-    let response = handle_request(&request, uinput_process, profile)?;
+    let response = handle_request(&request, uinput_process, profile, generator)?;
     serde_json::to_writer(&mut stream, &response)?;
     stream.write_all(b"\n")?;
     stream.flush()?;
@@ -391,6 +440,7 @@ fn handle_request(
     request: &ControllerRequest,
     uinput_process: &mut StdinProcess,
     profile: &uinput::TouchscreenProfile,
+    generator: Option<&mut ProfileGenerator>,
 ) -> CliResult<Value> {
     ensure_uinput_alive(uinput_process)?;
     match *request {
@@ -399,10 +449,23 @@ fn handle_request(
             "active": true,
             "input_backend": "uinput",
             "input_device_command": uinput::input_device_command(),
+            "input_profile": generator.as_ref().map(|active| active.summary_json()),
         })),
-        ControllerRequest::Tap { x, y, hold_ms } => {
-            let spec = TapSpec { x, y, hold_ms };
-            for line in uinput::tap_lines(profile, spec)? {
+        ControllerRequest::Tap {
+            fallback,
+            key_context,
+            inter_key_delay_sampling,
+        } => {
+            let sampled = if let Some(active_generator) = generator {
+                active_generator.sample_tap(fallback, key_context, inter_key_delay_sampling)?
+            } else {
+                profile::SampledTap {
+                    spec: fallback,
+                    sample: None,
+                    inter_key_delay_ms: None,
+                }
+            };
+            for line in uinput::tap_lines(profile, sampled.spec)? {
                 write_uinput_line(uinput_process, &line)?;
             }
             Ok(json!({
@@ -410,10 +473,16 @@ fn handle_request(
                 "active": true,
                 "input_backend": "uinput",
                 "tap": {
-                    "x": x,
-                    "y": y,
-                    "hold_ms": hold_ms,
+                    "x": sampled.spec.x,
+                    "y": sampled.spec.y,
+                    "hold_ms": sampled.spec.hold_ms,
+                    "pressure": sampled.spec.pressure,
+                    "touch_major_px": sampled.spec.touch_major_px,
+                    "touch_minor_px": sampled.spec.touch_minor_px,
+                    "orientation": sampled.spec.orientation,
                 },
+                "input_profile_sample": sampled.sample.map(profile::ProfileTapSample::json),
+                "inter_key_delay_ms": sampled.inter_key_delay_ms,
             }))
         }
         ControllerRequest::Path { ref spec } => {
@@ -514,6 +583,10 @@ fn controller_state(
         "started_wall_ms": wall_time_ms(),
         "input_backend": "uinput",
         "input_device_command": uinput::input_device_command(),
+        "input_profile": config
+            .input_profile
+            .as_ref()
+            .map(RuntimeProfile::summary_json),
         "physical_touchscreen_profile_hash": uinput::profile_hash(profile)?,
         "physical_touchscreen": uinput::profile_summary(profile),
         "virtual_touchscreen": virtual_touchscreen,

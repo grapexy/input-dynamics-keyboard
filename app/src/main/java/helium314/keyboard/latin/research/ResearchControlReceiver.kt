@@ -28,6 +28,7 @@ open class ResearchControlReceiver : BroadcastReceiver() {
             extraFields = result.extraFields,
         )
         ResearchSessionLogger.writeControlStatusJson(appContext, status)
+        ResearchSessionLogger.writeControlResultJson(appContext, requestId, status)
         publishResult(status, result.ok)
     }
 
@@ -68,12 +69,22 @@ open class ResearchControlReceiver : BroadcastReceiver() {
                     val inputActor = intent.getStringExtra(EXTRA_INPUT_ACTOR)
                     val inputController = intent.getStringExtra(EXTRA_INPUT_CONTROLLER)
                     val inputCadencePolicy = intent.getStringExtra(EXTRA_INPUT_CADENCE_POLICY)
+                    val inputProfileSource = intent.getStringExtra(EXTRA_INPUT_PROFILE_SOURCE)
+                    val inputProfileId = intent.getStringExtra(EXTRA_INPUT_PROFILE_ID)
+                    val inputProfileSchema = intent.getStringExtra(EXTRA_INPUT_PROFILE_SCHEMA)
+                    val inputProfileHash = intent.getStringExtra(EXTRA_INPUT_PROFILE_HASH)
+                    val inputProfileSeed = intent.getStringExtra(EXTRA_INPUT_PROFILE_SEED)
                     val sessionId = ResearchSessionLogger.startSession(
                         context,
                         externalRunId,
                         inputActor,
                         inputController,
-                        inputCadencePolicy
+                        inputCadencePolicy,
+                        inputProfileSource,
+                        inputProfileId,
+                        inputProfileSchema,
+                        inputProfileHash,
+                        inputProfileSeed
                     )
                     CommandResult(
                         message = "input dynamics session started",
@@ -162,6 +173,11 @@ open class ResearchControlReceiver : BroadcastReceiver() {
         const val EXTRA_INPUT_ACTOR = "input_actor"
         const val EXTRA_INPUT_CONTROLLER = "input_controller"
         const val EXTRA_INPUT_CADENCE_POLICY = "input_cadence_policy"
+        const val EXTRA_INPUT_PROFILE_SOURCE = "input_profile_source"
+        const val EXTRA_INPUT_PROFILE_ID = "input_profile_id"
+        const val EXTRA_INPUT_PROFILE_SCHEMA = "input_profile_schema"
+        const val EXTRA_INPUT_PROFILE_HASH = "input_profile_hash"
+        const val EXTRA_INPUT_PROFILE_SEED = "input_profile_seed"
         const val EXTRA_STATUS_JSON = "status_json"
     }
 }

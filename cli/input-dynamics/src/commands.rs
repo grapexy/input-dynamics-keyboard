@@ -17,6 +17,9 @@ use crate::controller::{self, RunConfig, SessionStartPermit};
 use crate::error::{CliError, CliResult};
 use crate::layout::{json_number_to_shell_arg, key_matches};
 use crate::process::{FailureMode, run_process};
+use crate::profile::{
+    self, InterKeyDelaySampling, KeyProfileContext, ProfileProvenance, RuntimeProfile,
+};
 use crate::ratio::{RatioPpm, SignedRatioPpm};
 use crate::record::{RecordConfig, record_run};
 use crate::uinput::{self, PathSpec, TapSpec, TouchPoint};
@@ -24,6 +27,23 @@ use crate::validate::validate_logs;
 
 const LAYOUT_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const LAYOUT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+struct LoggingStartConfig<'a> {
+    run_id: &'a str,
+    input_actor: &'a str,
+    input_controller: Option<&'a str>,
+    input_cadence_policy: &'a str,
+    input_profile: Option<&'a ProfileProvenance>,
+}
+
+struct SessionStartConfig<'a> {
+    run_id: &'a str,
+    input_actor: &'a str,
+    input_controller: &'a str,
+    input_cadence_policy: &'a str,
+    input_profile_path: Option<&'a Path>,
+    input_profile_seed: Option<u64>,
+}
 
 pub(crate) fn run_command(app: &App, cli_command: Commands) -> CliResult<Value> {
     match cli_command {
@@ -39,10 +59,13 @@ pub(crate) fn run_command(app: &App, cli_command: Commands) -> CliResult<Value> 
             input_cadence_policy,
         } => start(
             app,
-            &run_id,
-            &input_actor,
-            input_controller.as_deref(),
-            &input_cadence_policy,
+            &LoggingStartConfig {
+                run_id: &run_id,
+                input_actor: &input_actor,
+                input_controller: input_controller.as_deref(),
+                input_cadence_policy: &input_cadence_policy,
+                input_profile: None,
+            },
         ),
         Commands::Stop => app.broadcast("STOP", Vec::new()),
         Commands::Status => app.broadcast("STATUS", Vec::new()),
@@ -229,30 +252,27 @@ fn select_ime(app: &App) -> CliResult<Value> {
     }))
 }
 
-fn start(
-    app: &App,
-    run_id: &str,
-    input_actor: &str,
-    input_controller: Option<&str>,
-    input_cadence_policy: &str,
-) -> CliResult<Value> {
+fn start(app: &App, config: &LoggingStartConfig<'_>) -> CliResult<Value> {
     let mut extras = vec![
         String::from("--es"),
         String::from("run_id"),
-        String::from(run_id),
+        String::from(config.run_id),
         String::from("--es"),
         String::from("input_actor"),
-        String::from(input_actor),
+        String::from(config.input_actor),
         String::from("--es"),
         String::from("input_cadence_policy"),
-        String::from(input_cadence_policy),
+        String::from(config.input_cadence_policy),
     ];
-    if let Some(controller) = input_controller {
+    if let Some(controller) = config.input_controller {
         extras.extend([
             String::from("--es"),
             String::from("input_controller"),
             String::from(controller),
         ]);
+    }
+    if let Some(provenance) = config.input_profile {
+        extras.extend(provenance.broadcast_extras());
     }
     let enable = app.broadcast("ENABLE", Vec::new())?;
     if enable.get("ok").and_then(Value::as_bool) == Some(false) {
@@ -273,36 +293,46 @@ fn session(app: &App, command: SessionCommand) -> CliResult<Value> {
             input_actor,
             input_controller,
             input_cadence_policy,
+            input_profile,
+            input_profile_seed,
         } => session_start(
             app,
-            &run_id,
-            &input_actor,
-            &input_controller,
-            &input_cadence_policy,
+            &SessionStartConfig {
+                run_id: &run_id,
+                input_actor: &input_actor,
+                input_controller: &input_controller,
+                input_cadence_policy: &input_cadence_policy,
+                input_profile_path: input_profile.as_deref(),
+                input_profile_seed,
+            },
         ),
         SessionCommand::Status => session_status(app),
         SessionCommand::Stop => session_stop(app),
     }
 }
 
-fn session_start(
-    app: &App,
-    run_id: &str,
-    input_actor: &str,
-    input_controller: &str,
-    input_cadence_policy: &str,
-) -> CliResult<Value> {
-    let mut session_lock = match controller::acquire_session_start(app, run_id)? {
+fn session_start(app: &App, config: &SessionStartConfig<'_>) -> CliResult<Value> {
+    let mut session_lock = match controller::acquire_session_start(app, config.run_id)? {
         SessionStartPermit::Acquired(session_lock) => session_lock,
         SessionStartPermit::Busy(status) => return Ok(status),
     };
+    let input_profile = profile::load_for_session(
+        config.input_actor,
+        config.input_controller,
+        config.input_profile_path,
+        config.input_profile_seed,
+    )?;
+    let profile_provenance = input_profile.as_ref().map(RuntimeProfile::provenance);
     let select = select_ime(app)?;
     let ime = start(
         app,
-        run_id,
-        input_actor,
-        Some(input_controller),
-        input_cadence_policy,
+        &LoggingStartConfig {
+            run_id: config.run_id,
+            input_actor: config.input_actor,
+            input_controller: Some(config.input_controller),
+            input_cadence_policy: config.input_cadence_policy,
+            input_profile: profile_provenance.as_ref(),
+        },
     )?;
     if ime.get("ok").and_then(Value::as_bool) == Some(false) {
         return Ok(json!({
@@ -314,7 +344,7 @@ fn session_start(
         }));
     }
 
-    match controller::start(app, run_id) {
+    match controller::start(app, config.run_id, input_profile.as_ref()) {
         Ok(mut input) => {
             let input_ok = input.get("ok").and_then(Value::as_bool).unwrap_or(false);
             let stop_after_input_failure = if input_ok {
@@ -332,7 +362,7 @@ fn session_start(
             Ok(json!({
                 "ok": input_ok,
                 "package_name": app.package(),
-                "run_id": run_id,
+                "run_id": config.run_id,
                 "select_ime": select,
                 "ime": ime,
                 "input": input,
@@ -384,13 +414,19 @@ fn run_controller_command(app: &App, command: ControllerCommand) -> CliResult<Va
             uinput_stdout,
             uinput_stderr,
             run_id,
+            input_profile_runtime_json,
         } => {
+            let input_profile = input_profile_runtime_json
+                .as_deref()
+                .map(profile::parse_runtime_json)
+                .transpose()?;
             let config = RunConfig {
                 socket,
                 state,
                 uinput_stdout,
                 uinput_stderr,
                 run_id,
+                input_profile,
             };
             controller::run(app, &config)
         }
@@ -701,7 +737,14 @@ fn type_text(app: &App, text: &str, inter_key_delay_ms: u64) -> CliResult<Value>
     let total_steps = plan.steps.len();
     let mut typed = Vec::with_capacity(total_steps);
     for (step_index, step) in plan.steps.iter().enumerate() {
-        let touch_output = controller::tap(app, TapSpec::new(step.x, step.y))?;
+        let touch_output = controller::tap(
+            app,
+            controller::ControllerTapSpec::profiled_key(
+                TapSpec::new(step.x, step.y),
+                step.key_context(),
+                InterKeyDelaySampling::Sample,
+            ),
+        )?;
         let touch_ok = touch_output
             .get("ok")
             .and_then(Value::as_bool)
@@ -721,8 +764,15 @@ fn type_text(app: &App, text: &str, inter_key_delay_ms: u64) -> CliResult<Value>
                 "typed": typed,
             }));
         }
-        if step_index < total_steps.saturating_sub(1) && inter_key_delay_ms > 0 {
-            std::thread::sleep(Duration::from_millis(inter_key_delay_ms));
+        if step_index < total_steps.saturating_sub(1) {
+            let delay_ms = touch_output
+                .get("controller")
+                .and_then(|controller| controller.get("inter_key_delay_ms"))
+                .and_then(Value::as_u64)
+                .unwrap_or(inter_key_delay_ms);
+            if delay_ms > 0 {
+                std::thread::sleep(Duration::from_millis(delay_ms));
+            }
         }
     }
 
@@ -733,7 +783,7 @@ fn type_text(app: &App, text: &str, inter_key_delay_ms: u64) -> CliResult<Value>
         "text_char_count": total_steps,
         "typed_count": typed.len(),
         "inter_key_delay_ms": inter_key_delay_ms,
-        "input_cadence_policy": "fixed_inter_key_delay",
+        "input_cadence_policy": "input_profile_or_fixed_inter_key_delay",
         "layout_refresh_count": plan.layout_refresh_count,
         "typed": typed,
     }))
@@ -742,7 +792,11 @@ fn type_text(app: &App, text: &str, inter_key_delay_ms: u64) -> CliResult<Value>
 fn touch(app: &App, command: &TouchCommand) -> CliResult<Value> {
     match *command {
         TouchCommand::Doctor => uinput::doctor(app),
-        TouchCommand::Tap { x, y, hold_ms } => uinput::tap(app, TapSpec { x, y, hold_ms }),
+        TouchCommand::Tap { x, y, hold_ms } => {
+            let mut spec = TapSpec::new(x, y);
+            spec.hold_ms = hold_ms;
+            uinput::tap(app, spec)
+        }
         TouchCommand::Swipe {
             from_x,
             from_y,
@@ -905,6 +959,8 @@ struct PlannedTypeStep {
     target: TypeKeyTarget,
     x: i32,
     y: i32,
+    key_width_px: i32,
+    key_height_px: i32,
     key_code: Option<i64>,
     key_class: Option<String>,
 }
@@ -976,8 +1032,16 @@ fn tap_key(app: &App, label: Option<&str>, code: Option<i64>) -> CliResult<Value
     let key = resolve_layout_key(layout, label, code)?;
     let x = key_tap_coordinate(key, "x")?;
     let y = key_tap_coordinate(key, "y")?;
+    let key_context = key_profile_context(key)?;
 
-    let touch_output = controller::tap(app, TapSpec::new(x, y))?;
+    let touch_output = controller::tap(
+        app,
+        controller::ControllerTapSpec::profiled_key(
+            TapSpec::new(x, y),
+            key_context,
+            InterKeyDelaySampling::Skip,
+        ),
+    )?;
     let touch_ok = touch_output
         .get("ok")
         .and_then(Value::as_bool)
@@ -1047,6 +1111,8 @@ fn planned_type_step(
         target,
         x: key_tap_coordinate(key, "x")?,
         y: key_tap_coordinate(key, "y")?,
+        key_width_px: key_i32(key, "key_width_px")?,
+        key_height_px: key_i32(key, "key_height_px")?,
         key_code: key.get("key_code").and_then(Value::as_i64),
         key_class: key
             .get("key_class")
@@ -1109,12 +1175,35 @@ fn key_tap_coordinate(key: &Value, axis: &str) -> CliResult<i32> {
     parse_tap_coordinate(&coordinate, axis)
 }
 
+fn key_profile_context(key: &Value) -> CliResult<KeyProfileContext> {
+    Ok(KeyProfileContext {
+        key_width_px: key_i32(key, "key_width_px")?,
+        key_height_px: key_i32(key, "key_height_px")?,
+    })
+}
+
+fn key_i32(key: &Value, field: &str) -> CliResult<i32> {
+    let value = key
+        .get(field)
+        .and_then(Value::as_i64)
+        .ok_or_else(|| CliError::new(format!("key is missing {field}")))?;
+    i32::try_from(value)
+        .map_err(|error| CliError::new(format!("key {field} is outside i32 range: {error}")))
+}
+
 fn character_description(character: char) -> String {
     let escaped = character.escape_default().collect::<String>();
     format!("'{escaped}' (U+{:04X})", u32::from(character))
 }
 
 impl PlannedTypeStep {
+    const fn key_context(&self) -> KeyProfileContext {
+        KeyProfileContext {
+            key_width_px: self.key_width_px,
+            key_height_px: self.key_height_px,
+        }
+    }
+
     fn to_json(&self, touch_output: &Value) -> Value {
         json!({
             "char_index": self.char_index,
@@ -1410,6 +1499,8 @@ mod tests {
                         "key_label": "a",
                         "key_code": 97,
                         "key_class": "letter",
+                        "key_width_px": 100,
+                        "key_height_px": 80,
                         "tap_center_screen_x_px": 10.0,
                         "tap_center_screen_y_px": 20
                     },
@@ -1417,6 +1508,8 @@ mod tests {
                         "key_label": null,
                         "key_code": 32,
                         "key_class": "space",
+                        "key_width_px": 300,
+                        "key_height_px": 80,
                         "tap_center_screen_x_px": 50,
                         "tap_center_screen_y_px": 60
                     }

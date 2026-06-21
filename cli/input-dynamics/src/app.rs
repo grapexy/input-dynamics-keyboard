@@ -16,6 +16,8 @@ const IME_CLASS: &str = "helium314.keyboard.latin.LatinIME";
 pub(crate) const LOG_DIR: &str = "input_dynamics_logs";
 const RECEIVER: &str = ".control.InputDynamicsControlReceiver";
 const STATUS_FILE: &str = "input_dynamics_control_status.json";
+const RESULT_FILE_PREFIX: &str = "input_dynamics_control_result_";
+const RESULT_FILE_SUFFIX: &str = ".json";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_POLL_INTERVAL: Duration = Duration::from_millis(50);
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -145,12 +147,25 @@ impl App {
         format!("{}/{}", self.remote_log_dir(), STATUS_FILE)
     }
 
+    fn remote_result_file(&self, request_id: &str) -> String {
+        format!(
+            "{}/{}",
+            self.remote_log_dir(),
+            control_result_file_name(request_id)
+        )
+    }
+
     fn wait_for_request_status(&self, request_id: &str, timeout: Duration) -> CliResult<Value> {
         let start = Instant::now();
         let mut last_seen_request_id = None;
         let mut last_error = None;
         loop {
-            for status_result in [self.read_external_status(), self.read_internal_status()] {
+            for status_result in [
+                self.read_external_request_result(request_id),
+                self.read_internal_request_result(request_id),
+                self.read_external_status(),
+                self.read_internal_status(),
+            ] {
                 match status_result {
                     Ok(status) => {
                         let status_request_id = status.get("request_id").and_then(Value::as_str);
@@ -174,6 +189,33 @@ impl App {
             }
             thread::sleep(REQUEST_POLL_INTERVAL);
         }
+    }
+
+    fn read_external_request_result(&self, request_id: &str) -> CliResult<Value> {
+        let output = self.adb_shell(
+            vec![String::from("cat"), self.remote_result_file(request_id)],
+            FailureMode::RequireSuccess,
+        )?;
+        let status = serde_json::from_str(output.stdout().trim())?;
+        Ok(status)
+    }
+
+    fn read_internal_request_result(&self, request_id: &str) -> CliResult<Value> {
+        let output = self.adb_shell(
+            vec![
+                String::from("run-as"),
+                String::from(self.package()),
+                String::from("cat"),
+                format!(
+                    "{}/{}",
+                    Self::internal_log_dir(),
+                    control_result_file_name(request_id)
+                ),
+            ],
+            FailureMode::RequireSuccess,
+        )?;
+        let status = serde_json::from_str(output.stdout().trim())?;
+        Ok(status)
     }
 
     fn read_external_status(&self) -> CliResult<Value> {
@@ -306,11 +348,27 @@ fn request_id(action_suffix: &str) -> String {
     )
 }
 
+fn control_result_file_name(request_id: &str) -> String {
+    let safe_request_id = request_id
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    format!("{RESULT_FILE_PREFIX}{safe_request_id}{RESULT_FILE_SUFFIX}")
+}
+
 #[cfg(test)]
 mod tests {
     use proptest::strategy::Strategy;
 
-    use crate::app::{App, parse_adb_devices, request_id, scoped_adb_args_for_serial};
+    use crate::app::{
+        App, control_result_file_name, parse_adb_devices, request_id, scoped_adb_args_for_serial,
+    };
 
     #[test]
     fn receiver_component_uses_package_slash_shorthand() {
@@ -333,6 +391,14 @@ mod tests {
         assert!(
             generated.contains("keyboard_layout"),
             "request id should keep a readable action hint"
+        );
+    }
+
+    #[test]
+    fn control_result_file_name_sanitizes_path_chars() {
+        assert_eq!(
+            control_result_file_name("id/with space:and.dots"),
+            "input_dynamics_control_result_id_with_space_and_dots.json"
         );
     }
 

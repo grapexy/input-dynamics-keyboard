@@ -6,9 +6,10 @@ Keyboard control, status, layout inspection, log readback, or cleanup.
 Prefer the `input-dynamics` host CLI when it is available. Use this file when
 the CLI is unavailable or when debugging raw ADB behavior.
 
-The CLI adds a unique `request_id` to each broadcast and waits until
-`input_dynamics_control_status.json` reports the same id. If you use raw ADB
-for debugging, pass your own `request_id` when you need freshness checks.
+The CLI adds a unique `request_id` to each broadcast and waits for
+`input_dynamics_control_result_<request_id>.json`. If you use raw ADB for
+debugging, pass your own `request_id` when you need freshness checks. The app
+also writes `input_dynamics_control_status.json` as the latest status snapshot.
 
 ## Packages
 
@@ -99,7 +100,7 @@ Request-correlated status example:
 REQUEST_ID=manual-$(date +%s)
 adb shell am broadcast -n "$PKG/$RECEIVER" -a "$ACTION_PREFIX.STATUS" \
   --es request_id "$REQUEST_ID"
-adb shell cat "/sdcard/Android/data/$PKG/files/$LOG_DIR/$STATUS_FILE"
+adb shell cat "/sdcard/Android/data/$PKG/files/$LOG_DIR/input_dynamics_control_result_${REQUEST_ID}.json"
 ```
 
 Clear logs only when no session is active:
@@ -110,10 +111,16 @@ adb shell am broadcast -n "$PKG/$RECEIVER" -a "$ACTION_PREFIX.CLEAR_LOGS"
 
 ## Status File
 
-Raw broadcasts write command results to the status file:
+Raw broadcasts write the latest status snapshot:
 
 ```bash
 adb shell cat "/sdcard/Android/data/$PKG/files/$LOG_DIR/$STATUS_FILE"
+```
+
+When `request_id` is supplied, raw broadcasts also write an exact result file:
+
+```bash
+adb shell cat "/sdcard/Android/data/$PKG/files/$LOG_DIR/input_dynamics_control_result_${REQUEST_ID}.json"
 ```
 
 Expected status fields include:
@@ -135,6 +142,8 @@ Expected status fields include:
 - `log_directory`
 - `current_log_file_path`
 - `last_log_file_path`
+- `status_file_path`
+- `result_file_path`
 - `log_file_count`
 - `record_count`
 

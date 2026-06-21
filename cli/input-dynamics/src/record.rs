@@ -133,7 +133,7 @@ impl<'a> InputControllerCapture<'a> {
                 )));
             }
         };
-        let start = controller::start(app, &config.run_id)?;
+        let start = controller::start(app, &config.run_id, None)?;
         ensure_command_ok(&start, "start record input controller")?;
         session_lock.activate(&start)?;
         let status_after_start = controller::status(app)?;
@@ -550,6 +550,10 @@ fn input_controller_summary(status_after_start: &Value, stop: &Value) -> Value {
             .unwrap_or(Value::Null),
         "input_device_command": state
             .get("input_device_command")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "input_profile": state
+            .get("input_profile")
             .cloned()
             .unwrap_or(Value::Null),
         "physical_touchscreen_profile_hash": state

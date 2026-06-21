@@ -105,6 +105,20 @@ RUN_ID=run-YYYYMMDD-HHMMSS-local-android
 idk session start --run-id "$RUN_ID"
 ```
 
+`session start` uses the bundled `profiles/baseline-v1.json` input profile by
+default for controller-driven sessions. Its default session provenance is
+`input_actor=agent_adb`, `input_controller=input-dynamics-cli`, and
+`input_cadence_policy=input_profile`. To bind a local profile to the whole
+session, pass `--input-profile <path>` and optionally
+`--input-profile-seed <u64>` for reproducible sampling:
+
+```bash
+idk session start \
+  --run-id "$RUN_ID" \
+  --input-profile ./profiles/custom.json \
+  --input-profile-seed 12345
+```
+
 Only one stateful session can be active for a package/device runtime. If
 `session start` returns `ok: false` with `busy: true`, do not retry with
 lower-level commands; inspect `idk session status` and wait for the active run
@@ -157,6 +171,7 @@ idk record \
 The resulting manifest should include
 `input_controller_runtime.summary.input_backend`,
 `input_controller_runtime.summary.input_device_command`,
+`input_controller_runtime.summary.input_profile`,
 `input_controller_runtime.summary.physical_touchscreen_profile_hash`,
 `input_controller_runtime.summary.virtual_touchscreen_event_path`, and
 `input_controller_runtime.summary.cleanup`.
@@ -203,7 +218,9 @@ key and fails on unsupported characters without partial typing. Use
 `touch path` only when a protocol needs raw absolute gesture control; otherwise
 prefer semantic commands such as `type`, `press`, and `hide-keyboard`. The CLI
 routes session input and `touch` commands through AOSP `/system/bin/uinput` and
-should fail rather than switch to another touch backend.
+should fail rather than switch to another touch backend. The active input
+profile can sample key-local landing ratios, hold duration, contact fields, and
+inter-key delay.
 
 ## Validation
 
@@ -214,7 +231,8 @@ idk validate "runs/$RUN_ID" --run-id "$RUN_ID"
 ```
 
 Expected validation includes `session_start`, `session_stop`,
-`external_run_id`, session-level `input_actor`, `target_package`, schema
+`external_run_id`, session-level `input_actor`, optional `input_profile_*`
+fields for controller-driven sessions, `target_package`, schema
 `input_dynamics_event.v1`, and no `password_field: true` records. Read
 `references/jsonl-schema.md` before changing schema, event names, status
 fields, or validation logic.

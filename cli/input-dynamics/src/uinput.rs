@@ -70,11 +70,15 @@ struct AbsAxis {
     resolution: i32,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct TapSpec {
     pub(crate) x: i32,
     pub(crate) y: i32,
     pub(crate) hold_ms: u64,
+    pub(crate) pressure: i32,
+    pub(crate) touch_major_px: i32,
+    pub(crate) touch_minor_px: i32,
+    pub(crate) orientation: i32,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -95,6 +99,10 @@ impl TapSpec {
             x,
             y,
             hold_ms: DEFAULT_HOLD_MS,
+            pressure: DEFAULT_PRESSURE,
+            touch_major_px: DEFAULT_TOUCH_MAJOR,
+            touch_minor_px: DEFAULT_TOUCH_MINOR,
+            orientation: 0,
         }
     }
 }
@@ -341,7 +349,7 @@ fn labeled_number(text: &str, label: &str) -> CliResult<i32> {
 pub(crate) fn tap_lines(profile: &TouchscreenProfile, spec: TapSpec) -> CliResult<Vec<String>> {
     let point = TouchPoint::new(spec.x, spec.y);
     ensure_point_in_range(profile, point)?;
-    let press_events = down_events(profile, point);
+    let press_events = down_events(profile, spec);
     let release_events = up_events();
     Ok(vec![
         inject_command_line(&press_events)?,
@@ -358,13 +366,16 @@ pub(crate) fn path_lines(profile: &TouchscreenProfile, spec: &PathSpec) -> CliRe
         .next()
         .ok_or_else(|| CliError::new("path requires at least two points"))?;
     ensure_point_in_range(profile, first_point)?;
+    let first_spec = TapSpec::new(first_point.x, first_point.y);
 
     let mut lines = Vec::with_capacity(spec.points.len().saturating_mul(2).saturating_add(1));
-    lines.push(inject_command_line(&down_events(profile, first_point))?);
+    lines.push(inject_command_line(&down_events(profile, first_spec))?);
     for (point, delay_ms) in points.zip(segment_durations) {
         ensure_point_in_range(profile, point)?;
         lines.push(delay_command_line(delay_ms)?);
-        lines.push(inject_command_line(&move_events(profile, point))?);
+        lines.push(inject_command_line(&move_events(
+            profile, point, first_spec,
+        ))?);
     }
     lines.push(inject_command_line(&up_events())?);
     Ok(lines)
@@ -495,7 +506,8 @@ fn register_command_line(profile: &TouchscreenProfile) -> CliResult<String> {
     Ok(serde_json::to_string(&command)?)
 }
 
-fn down_events(profile: &TouchscreenProfile, point: TouchPoint) -> Vec<i32> {
+fn down_events(profile: &TouchscreenProfile, spec: TapSpec) -> Vec<i32> {
+    let point = TouchPoint::new(spec.x, spec.y);
     vec![
         EV_ABS,
         ABS_MT_SLOT,
@@ -511,16 +523,16 @@ fn down_events(profile: &TouchscreenProfile, point: TouchPoint) -> Vec<i32> {
         point.y,
         EV_ABS,
         ABS_MT_TOUCH_MAJOR,
-        axis_value(profile, ABS_MT_TOUCH_MAJOR, DEFAULT_TOUCH_MAJOR),
+        axis_value(profile, ABS_MT_TOUCH_MAJOR, spec.touch_major_px),
         EV_ABS,
         ABS_MT_TOUCH_MINOR,
-        axis_value(profile, ABS_MT_TOUCH_MINOR, DEFAULT_TOUCH_MINOR),
+        axis_value(profile, ABS_MT_TOUCH_MINOR, spec.touch_minor_px),
         EV_ABS,
         ABS_MT_PRESSURE,
-        axis_value(profile, ABS_MT_PRESSURE, DEFAULT_PRESSURE),
+        axis_value(profile, ABS_MT_PRESSURE, spec.pressure),
         EV_ABS,
         ABS_MT_ORIENTATION,
-        0,
+        axis_value(profile, ABS_MT_ORIENTATION, spec.orientation),
         EV_ABS,
         ABS_X,
         point.x,
@@ -529,7 +541,7 @@ fn down_events(profile: &TouchscreenProfile, point: TouchPoint) -> Vec<i32> {
         point.y,
         EV_ABS,
         ABS_PRESSURE,
-        axis_value(profile, ABS_PRESSURE, DEFAULT_PRESSURE),
+        axis_value(profile, ABS_PRESSURE, spec.pressure),
         EV_KEY,
         BTN_TOUCH,
         1,
@@ -542,7 +554,7 @@ fn down_events(profile: &TouchscreenProfile, point: TouchPoint) -> Vec<i32> {
     ]
 }
 
-fn move_events(profile: &TouchscreenProfile, point: TouchPoint) -> Vec<i32> {
+fn move_events(profile: &TouchscreenProfile, point: TouchPoint, spec: TapSpec) -> Vec<i32> {
     vec![
         EV_ABS,
         ABS_MT_SLOT,
@@ -555,13 +567,13 @@ fn move_events(profile: &TouchscreenProfile, point: TouchPoint) -> Vec<i32> {
         point.y,
         EV_ABS,
         ABS_MT_TOUCH_MAJOR,
-        axis_value(profile, ABS_MT_TOUCH_MAJOR, DEFAULT_TOUCH_MAJOR),
+        axis_value(profile, ABS_MT_TOUCH_MAJOR, spec.touch_major_px),
         EV_ABS,
         ABS_MT_TOUCH_MINOR,
-        axis_value(profile, ABS_MT_TOUCH_MINOR, DEFAULT_TOUCH_MINOR),
+        axis_value(profile, ABS_MT_TOUCH_MINOR, spec.touch_minor_px),
         EV_ABS,
         ABS_MT_PRESSURE,
-        axis_value(profile, ABS_MT_PRESSURE, DEFAULT_PRESSURE),
+        axis_value(profile, ABS_MT_PRESSURE, spec.pressure),
         EV_ABS,
         ABS_X,
         point.x,
@@ -570,7 +582,7 @@ fn move_events(profile: &TouchscreenProfile, point: TouchPoint) -> Vec<i32> {
         point.y,
         EV_ABS,
         ABS_PRESSURE,
-        axis_value(profile, ABS_PRESSURE, DEFAULT_PRESSURE),
+        axis_value(profile, ABS_PRESSURE, spec.pressure),
         EV_SYN,
         SYN_REPORT,
         0,

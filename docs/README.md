@@ -6,6 +6,8 @@ Public documentation for Input Dynamics Keyboard is split by purpose:
   JSONL schema.
 - [Input Dynamics CLI](cli.md): preferred host-side CLI for agents and local
   scripted runs.
+- [Input profiles](input-profiles.md): bundled baseline and local profile JSON
+  schema for stateful controller-driven input.
 - [ADB control and validation](adb-control.md): raw local control commands, log
   pull paths, and validation checks.
 - [APK releases](releases.md): GitHub Release assets and release verification.

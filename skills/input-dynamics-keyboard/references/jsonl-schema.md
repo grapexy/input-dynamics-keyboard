@@ -12,7 +12,8 @@ Use this reference when validating logs or changing event fields.
   run id was passed to `START`.
 - `session_start` and `session_stop` records bracket a normal session.
 - `session_start` includes session-level provenance: `input_actor`,
-  `input_controller`, and `input_cadence_policy`.
+  `input_controller`, `input_cadence_policy`, and optional `input_profile_*`
+  fields.
 - Key and pointer records include `press_id` when they belong to a touch
   sequence. `gesture_id` currently matches `press_id` for ordinary key touches.
 - Lifecycle events include `input_view_start`, `input_view_finish`,

@@ -117,6 +117,7 @@ Do not commit:
 - pulled `input_dynamics_logs/` directories
 - `*.jsonl` files
 - `input_dynamics_control_status.json`
+- `input_dynamics_control_result_*.json`
 - built APK/AAB artifacts
 - signing keys or local SDK configuration
 
