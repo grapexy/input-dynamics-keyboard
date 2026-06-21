@@ -38,6 +38,7 @@ RUN_ID=run-YYYYMMDD-HHMMSS-human-android
 cargo run --quiet -p input-dynamics -- doctor
 cargo run --quiet -p input-dynamics -- install
 cargo run --quiet -p input-dynamics -- select-ime
+cargo run --quiet -p input-dynamics -- touch doctor
 cargo run --quiet -p input-dynamics -- record --run-id "$RUN_ID" --out ".agents/experiments/$RUN_ID"
 ```
 
@@ -52,6 +53,7 @@ RUN_ID=run-YYYYMMDD-HHMMSS-local-android
 cargo run --quiet -p input-dynamics -- doctor
 cargo run --quiet -p input-dynamics -- install
 cargo run --quiet -p input-dynamics -- select-ime
+cargo run --quiet -p input-dynamics -- touch doctor
 cargo run --quiet -p input-dynamics -- start --run-id "$RUN_ID"
 cargo run --quiet -p input-dynamics -- status
 cargo run --quiet -p input-dynamics -- layout
@@ -104,6 +106,10 @@ scraping human-oriented text.
 - `tap --label <label>` or `tap --code <code>`: taps a key from layout data.
 - `press delete`, `press enter`, `press space`: taps common keys by semantic
   name.
+- `touch doctor`: checks AOSP uinput availability and reports the mirrored
+  physical touchscreen profile used by the CLI.
+- `touch tap --x <x> --y <y> [--hold-ms <ms>]`: sends an absolute screen tap
+  through AOSP uinput.
 - `list-logs`: lists log files.
 - `clear-logs`: clears logs when no session is active.
 - `pull --out <dir>`: pulls app-specific external log storage.
@@ -115,6 +121,10 @@ scraping human-oriented text.
 Use semantic `press` commands for common non-letter keys. `tap --code=-7` still
 works for delete, and `tap --code -7` is also accepted, but semantic commands
 are easier for agents to generate correctly.
+
+`tap`, `press`, and `touch tap` use AOSP `/system/bin/uinput` for touchscreen
+input. They fail if the device does not expose that command instead of falling
+back to a second touch implementation.
 
 ## Record Output
 

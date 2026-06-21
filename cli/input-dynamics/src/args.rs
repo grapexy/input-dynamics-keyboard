@@ -130,6 +130,11 @@ pub(crate) enum Commands {
         /// Semantic key to press.
         key: PressKey,
     },
+    /// Send touchscreen input through AOSP uinput.
+    Touch {
+        #[command(subcommand)]
+        command: TouchCommand,
+    },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -140,4 +145,22 @@ pub(crate) enum PressKey {
     Enter,
     /// Space.
     Space,
+}
+
+#[derive(Clone, Copy, Debug, Subcommand)]
+pub(crate) enum TouchCommand {
+    /// Check AOSP uinput availability and physical touchscreen profile.
+    Doctor,
+    /// Tap absolute screen coordinates through AOSP uinput.
+    Tap {
+        /// Absolute screen X coordinate.
+        #[arg(long)]
+        x: i32,
+        /// Absolute screen Y coordinate.
+        #[arg(long)]
+        y: i32,
+        /// Touch hold duration.
+        #[arg(long, default_value_t = 70)]
+        hold_ms: u64,
+    },
 }

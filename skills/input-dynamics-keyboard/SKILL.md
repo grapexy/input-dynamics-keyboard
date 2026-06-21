@@ -21,6 +21,8 @@ instrumentation surface. Keep workflows app-neutral, offline, and ADB-driven.
   fallback if the app reports that external storage is unavailable.
 - Do not rely on UiAutomator to inspect soft-keyboard keys. Use
   the CLI layout and press/tap commands when a non-screenshot path is needed.
+- Use the CLI's AOSP uinput-backed touch path for scripted key presses and
+  absolute taps. Do not use `adb shell input tap` for normal agent-driven input.
 
 ## Defaults
 
@@ -56,6 +58,12 @@ idk() {
 
 ```bash
 idk doctor
+```
+
+Check the local touchscreen input backend:
+
+```bash
+idk touch doctor
 ```
 
 2. Install the latest published debug APK:
@@ -118,6 +126,7 @@ With the CLI, wait for layout state and press common keys by semantic name:
 
 ```bash
 idk layout --wait-visible
+idk touch doctor
 idk tap --label a
 idk press space
 idk press delete
@@ -125,9 +134,10 @@ idk press enter
 idk hide-keyboard
 ```
 
-Use `tap --code=<code>` only when there is no semantic command. Without the
-CLI, select key entries from `KEYBOARD_LAYOUT` by `key_label` or `key_code`,
-then tap their screen centers with `adb shell input tap`.
+Use `tap --code=<code>` only when there is no semantic command. Use
+`touch tap --x <x> --y <y>` for absolute screen coordinates. The CLI routes
+`tap`, `press`, and `touch tap` through AOSP `/system/bin/uinput` and should
+fail rather than switch to another touch backend.
 
 ## Validation
 

@@ -9,11 +9,12 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use serde_json::{Value, json};
 
 use crate::app::{App, LOG_DIR};
-use crate::args::{Commands, PressKey};
+use crate::args::{Commands, PressKey, TouchCommand};
 use crate::error::{CliError, CliResult};
 use crate::layout::{json_number_to_shell_arg, key_matches};
 use crate::process::{FailureMode, run_process};
 use crate::record::{RecordConfig, record_run};
+use crate::uinput::{self, TapSpec};
 use crate::validate::validate_logs;
 
 const LAYOUT_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -78,6 +79,9 @@ pub(crate) fn run_command(app: &App, command: Commands) -> CliResult<Value> {
         }
         Commands::Tap { label, code } => tap_key(app, label.as_deref(), code),
         Commands::Press { key } => press_key(app, key),
+        Commands::Touch {
+            command: touch_command,
+        } => touch(app, &touch_command),
     }
 }
 
@@ -311,6 +315,13 @@ fn press_key(app: &App, key: PressKey) -> CliResult<Value> {
     Ok(result)
 }
 
+fn touch(app: &App, command: &TouchCommand) -> CliResult<Value> {
+    match *command {
+        TouchCommand::Doctor => uinput::doctor(app),
+        TouchCommand::Tap { x, y, hold_ms } => uinput::tap(app, TapSpec { x, y, hold_ms }),
+    }
+}
+
 const fn press_key_code(key: PressKey) -> i64 {
     match key {
         PressKey::Delete => -7,
@@ -409,26 +420,34 @@ fn tap_key(app: &App, label: Option<&str>, code: Option<i64>) -> CliResult<Value
         .iter()
         .find(|candidate| key_matches(candidate, label, code))
         .ok_or_else(|| CliError::new("requested key was not found in keyboard layout"))?;
-    let x = key
+    let x_arg = key
         .get("tap_center_screen_x_px")
         .and_then(json_number_to_shell_arg)
         .ok_or_else(|| CliError::new("key is missing tap_center_screen_x_px"))?;
-    let y = key
+    let y_arg = key
         .get("tap_center_screen_y_px")
         .and_then(json_number_to_shell_arg)
         .ok_or_else(|| CliError::new("key is missing tap_center_screen_y_px"))?;
+    let x = parse_tap_coordinate(&x_arg, "x")?;
+    let y = parse_tap_coordinate(&y_arg, "y")?;
 
-    let tap_output = app.adb_shell(
-        vec![String::from("input"), String::from("tap"), x, y],
-        FailureMode::RequireSuccess,
-    )?;
+    let touch_output = uinput::tap(app, TapSpec::new(x, y))?;
 
     Ok(json!({
         "ok": true,
         "package_name": app.package(),
+        "input_backend": "uinput",
         "key": key,
-        "tap": tap_output.json(),
+        "touch": touch_output,
     }))
+}
+
+fn parse_tap_coordinate(value: &str, axis: &str) -> CliResult<i32> {
+    value.parse::<i32>().map_err(|error| {
+        CliError::new(format!(
+            "invalid {axis} tap coordinate from keyboard layout: {value}: {error}"
+        ))
+    })
 }
 
 fn pull_internal_logs(app: &App, out: &Path) -> CliResult<Value> {
