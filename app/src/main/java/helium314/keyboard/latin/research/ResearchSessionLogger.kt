@@ -2,15 +2,18 @@
 package helium314.keyboard.latin.research
 
 import android.content.Context
+import android.os.Build
 import android.os.SystemClock
 import android.text.InputType
 import android.view.MotionEvent
 import androidx.core.content.edit
 import helium314.keyboard.keyboard.Key
+import helium314.keyboard.keyboard.internal.PopupKeySpec
 import helium314.keyboard.keyboard.internal.keyboard_parser.floris.KeyCode
 import helium314.keyboard.latin.InputAttributes
 import helium314.keyboard.latin.common.Constants
 import helium314.keyboard.latin.utils.prefs
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -163,23 +166,67 @@ object ResearchSessionLogger {
             "key_present" to (key != null)
         )
         if (key != null) {
+            val code = key.code
             val keyX = key.x
             val keyY = key.y
             val keyWidth = key.width
             val keyHeight = key.height
+            val hitBox = key.hitBox
+            val popupKeys = key.popupKeys
             fields += mapOf(
+                "key_code" to code,
+                "key_code_printable" to Constants.printableCode(code),
+                "key_label" to key.label,
+                "key_hint_label" to key.hintLabel,
+                "key_preview_label" to key.previewLabel,
+                "key_output_text" to key.outputText,
+                "key_icon_name" to key.iconName,
+                "key_alt_code" to key.altCode,
+                "key_short_string" to key.toShortString(),
+                "key_long_string" to key.toLongString(),
                 "key_class" to keyClass(key),
                 "key_background" to keyBackground(key.backgroundType),
+                "key_background_type" to key.backgroundType,
                 "key_x_px" to keyX,
                 "key_y_px" to keyY,
                 "key_width_px" to keyWidth,
                 "key_height_px" to keyHeight,
+                "key_draw_x_px" to key.drawX,
+                "key_draw_width_px" to key.drawWidth,
+                "key_horizontal_gap_px" to key.horizontalGap,
+                "key_vertical_gap_px" to key.verticalGap,
+                "key_hitbox_left_px" to hitBox.left,
+                "key_hitbox_top_px" to hitBox.top,
+                "key_hitbox_right_px" to hitBox.right,
+                "key_hitbox_bottom_px" to hitBox.bottom,
                 "key_center_offset_x_px" to (x - (keyX + keyWidth / 2.0)),
                 "key_center_offset_y_px" to (y - (keyY + keyHeight / 2.0)),
                 "key_touch_x_ratio" to ratio(x - keyX, keyWidth),
                 "key_touch_y_ratio" to ratio(y - keyY, keyHeight),
                 "key_modifier" to key.isModifier,
-                "key_repeatable" to key.isRepeatable
+                "key_shift" to key.isShift,
+                "key_spacer" to key.isSpacer,
+                "key_enabled" to key.isEnabled,
+                "key_repeatable" to key.isRepeatable,
+                "key_preview_enabled" to key.hasPreview(),
+                "key_long_press_enabled" to key.isLongPressEnabled,
+                "key_alt_code_while_typing" to key.altCodeWhileTyping(),
+                "key_has_action_background" to key.hasActionKeyBackground(),
+                "key_has_functional_background" to key.hasFunctionalBackground(),
+                "key_has_popup_hint" to key.hasPopupHint(),
+                "key_has_shifted_letter_hint" to key.hasShiftedLetterHint(),
+                "key_has_hint_label" to key.hasHintLabel(),
+                "key_has_custom_action_label" to key.hasCustomActionLabel(),
+                "key_has_no_panel_auto_popup_key" to key.hasNoPanelAutoPopupKey(),
+                "key_has_action_key_popups" to (popupKeys != null && key.hasActionKeyPopups()),
+                "key_popup_count" to (popupKeys?.size ?: 0),
+                "key_popup_keys_column_number" to key.popupKeysColumnNumber,
+                "key_popup_keys_fixed_column" to key.isPopupKeysFixedColumn,
+                "key_popup_keys_fixed_order" to key.isPopupKeysFixedOrder,
+                "key_popup_keys_have_labels" to key.hasLabelsInPopupKeys(),
+                "key_popup_keys_need_dividers" to key.needsDividersInPopupKeys(),
+                "key_popup_key_label_flags" to key.popupKeyLabelFlags,
+                "key_popup_keys" to popupKeysJson(popupKeys)
             )
         }
         appendEvent(appContext, sessionId, event, fields, includeFieldState = true)
@@ -306,21 +353,61 @@ object ResearchSessionLogger {
         } else {
             event.getHistoricalSize(pointerIndex, historyIndex)
         }
+        val touchMajor = if (historyIndex == null) {
+            event.getTouchMajor(pointerIndex)
+        } else {
+            event.getHistoricalTouchMajor(pointerIndex, historyIndex)
+        }
+        val touchMinor = if (historyIndex == null) {
+            event.getTouchMinor(pointerIndex)
+        } else {
+            event.getHistoricalTouchMinor(pointerIndex, historyIndex)
+        }
+        val toolMajor = if (historyIndex == null) {
+            event.getToolMajor(pointerIndex)
+        } else {
+            event.getHistoricalToolMajor(pointerIndex, historyIndex)
+        }
+        val toolMinor = if (historyIndex == null) {
+            event.getToolMinor(pointerIndex)
+        } else {
+            event.getHistoricalToolMinor(pointerIndex, historyIndex)
+        }
+        val orientation = if (historyIndex == null) {
+            event.getOrientation(pointerIndex)
+        } else {
+            event.getHistoricalOrientation(pointerIndex, historyIndex)
+        }
         val fields = mutableMapOf<String, Any?>(
             "sample_kind" to sampleKind,
             "action" to actionMasked,
             "action_name" to actionName,
             "action_index" to actionIndex,
+            "device_id" to event.deviceId,
+            "source" to event.source,
+            "button_state" to event.buttonState,
+            "meta_state" to event.metaState,
+            "edge_flags" to event.edgeFlags,
+            "motion_flags" to event.flags,
             "pointer_count" to event.pointerCount,
             "pointer_id" to event.getPointerId(pointerIndex),
             "pointer_index" to pointerIndex,
+            "tool_type" to event.getToolType(pointerIndex),
             "t_event_uptime_ms" to eventTime,
             "t_down_uptime_ms" to event.downTime,
             "x_px" to x,
             "y_px" to y,
             "pressure" to pressure,
-            "size" to size
+            "size" to size,
+            "touch_major_px" to touchMajor,
+            "touch_minor_px" to touchMinor,
+            "tool_major_px" to toolMajor,
+            "tool_minor_px" to toolMinor,
+            "orientation" to orientation
         )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            fields["classification"] = event.classification
+        }
         if (historyIndex != null) {
             fields["history_index"] = historyIndex
         }
@@ -352,7 +439,7 @@ object ResearchSessionLogger {
     private fun jsonValue(value: Any?): Any =
         when (value) {
             null -> JSONObject.NULL
-            is Boolean, is Number, is String -> value
+            is Boolean, is Number, is String, is JSONObject, is JSONArray -> value
             else -> value.toString()
         }
 
@@ -411,6 +498,23 @@ object ResearchSessionLogger {
 
     private fun ratio(numerator: Number, denominator: Int): Double? =
         if (denominator == 0) null else numerator.toDouble() / denominator.toDouble()
+
+    private fun popupKeysJson(popupKeys: Array<PopupKeySpec>?): JSONArray? {
+        if (popupKeys == null) return null
+        val array = JSONArray()
+        popupKeys.forEachIndexed { index, popupKey ->
+            array.put(
+                JSONObject()
+                    .put("index", index)
+                    .put("code", popupKey.mCode)
+                    .put("code_printable", Constants.printableCode(popupKey.mCode))
+                    .put("label", jsonValue(popupKey.mLabel))
+                    .put("output_text", jsonValue(popupKey.mOutputText))
+                    .put("icon_name", jsonValue(popupKey.mIconName))
+            )
+        }
+        return array
+    }
 
     private fun newSessionId(): String {
         val formatter = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US)

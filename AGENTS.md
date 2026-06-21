@@ -34,8 +34,9 @@ Do not use names tied to a particular service, product, or website.
 
 ## Privacy Requirements
 
-- Do not log raw typed text by default.
-- Prefer key ids, key classes, timing, and normalized touch geometry.
+- Log as much keyboard interaction data as possible for non-password fields,
+  including key codes, key labels, output text, popup key metadata, timing, and
+  touch geometry.
 - Disable logging only in password-class fields, including visible password,
   web password, and number password variations.
 - Do not exclude OTP, email, phone, URI, number, no-suggestions,
@@ -83,6 +84,9 @@ Minimum event fields:
 - `t_uptime_ms`
 - `t_wall_ms`
 - `pointer_id`
+- `key_code`
+- `key_label`
+- `key_output_text`
 - `key_class`
 - `key_touch_x_ratio`
 - `key_touch_y_ratio`
@@ -92,7 +96,8 @@ Minimum event fields:
 - `size`
 - `password_field`
 
-Avoid raw text unless a separate written protocol explicitly requires it.
+Raw key identity/content is expected for non-password fields. Password-class
+fields are the automatic suppression boundary.
 
 ## Development Notes
 

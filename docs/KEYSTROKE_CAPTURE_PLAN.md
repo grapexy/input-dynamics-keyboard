@@ -34,8 +34,9 @@ Implemented base set:
 - `key_cancel`
 
 Key records use `key_class` values such as `letter`, `digit`, `symbol`,
-`space`, `enter`, `delete`, `modifier`, `action`, and `function`; they do not
-store the raw key label, code point, output text, or surrounding field text.
+`space`, `enter`, `delete`, `modifier`, `action`, and `function`; for
+non-password fields they also store raw key identity/content such as key code,
+label, output text, hint labels, preview labels, icon names, and popup keys.
 
 ## Fields
 
@@ -48,6 +49,15 @@ Recommended event fields:
 - `t_uptime_ms`
 - `t_event_uptime_ms`
 - `pointer_id`
+- `key_code`
+- `key_code_printable`
+- `key_label`
+- `key_hint_label`
+- `key_preview_label`
+- `key_output_text`
+- `key_icon_name`
+- `key_alt_code`
+- `key_popup_keys`
 - `key_class`
 - `x_px`
 - `y_px`
@@ -62,8 +72,8 @@ Recommended event fields:
 - `input_type_variation`
 - `password_field`
 
-Avoid raw text. If text is needed for a controlled calibration task, use a
-separate explicit mode and store that fact in the schema.
+Raw key identity/content is expected for non-password fields. The only automatic
+content suppression is the password-class field gate.
 
 ## Safety Gate
 

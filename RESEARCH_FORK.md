@@ -22,8 +22,9 @@ Primary measurements:
 
 ## Privacy Constraints
 
-- Do not log raw text by default.
-- Log key classes or stable key ids instead of typed contents.
+- Log as much keyboard interaction data as possible for non-password fields,
+  including key codes, key labels, output text, popup key metadata, timing, and
+  touch geometry.
 - Disable logging only in password-class fields, including visible password,
   web password, and number password variations.
 - Keep OTP, email, phone, URI, number, and other ordinary non-password field
@@ -62,11 +63,11 @@ versioned from the first implementation.
 Example:
 
 ```json
-{"schema":"typing_event.v1","session_id":"local-random-id","event":"key_down","t_uptime_ms":123456789,"t_event_uptime_ms":123456700,"key_class":"letter","key_touch_x_ratio":0.52,"key_touch_y_ratio":0.44}
+{"schema":"typing_event.v1","session_id":"local-random-id","event":"key_down","t_uptime_ms":123456789,"t_event_uptime_ms":123456700,"key_code":97,"key_label":"a","key_output_text":null,"key_class":"letter","key_touch_x_ratio":0.52,"key_touch_y_ratio":0.44}
 ```
 
-Do not include typed field contents unless a later experiment has a written
-protocol and explicit consent for that exact collection mode.
+Non-password key identity/content is in scope. Password-class fields remain the
+automatic suppression boundary.
 
 ## ADB Readback
 
