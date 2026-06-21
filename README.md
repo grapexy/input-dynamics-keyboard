@@ -40,7 +40,7 @@ cargo build -p input-dynamics
 ```
 
 Install the latest published debug APK, select the IME, and run a local
-session:
+experiment capture:
 
 ```bash
 RUN_ID=run-YYYYMMDD-HHMMSS-human-android
@@ -48,12 +48,12 @@ RUN_ID=run-YYYYMMDD-HHMMSS-human-android
 target/debug/input-dynamics doctor
 target/debug/input-dynamics install
 target/debug/input-dynamics select-ime
-target/debug/input-dynamics start --run-id "$RUN_ID"
-target/debug/input-dynamics status
-target/debug/input-dynamics stop
-target/debug/input-dynamics pull --out "runs/$RUN_ID"
-target/debug/input-dynamics validate "runs/$RUN_ID" --run-id "$RUN_ID"
+target/debug/input-dynamics record --run-id "$RUN_ID" --out ".agents/experiments/$RUN_ID"
 ```
+
+The `record` command starts IME logging, captures an ADB touchscreen event
+stream, stops cleanly when you press Enter, pulls logs, writes `manifest.json`,
+and writes `validation.json`.
 
 To build and install a local debug APK instead:
 

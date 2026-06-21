@@ -13,6 +13,7 @@ use crate::args::{Commands, PressKey};
 use crate::error::{CliError, CliResult};
 use crate::layout::{json_number_to_shell_arg, key_matches};
 use crate::process::{FailureMode, run_process};
+use crate::record::{RecordConfig, record_run};
 use crate::validate::validate_logs;
 
 const LAYOUT_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -57,6 +58,24 @@ pub(crate) fn run_command(app: &App, command: Commands) -> CliResult<Value> {
         Commands::ClearLogs => app.broadcast("CLEAR_LOGS", Vec::new()),
         Commands::Pull { out } => pull_logs(app, &out),
         Commands::Validate { path, run_id } => validate_logs(&path, run_id.as_deref()),
+        Commands::Record {
+            run_id,
+            out,
+            duration_ms,
+            input_actor,
+            input_controller,
+            input_cadence_policy,
+        } => {
+            let config = RecordConfig {
+                run_id,
+                out,
+                duration_ms,
+                input_actor,
+                input_controller,
+                input_cadence_policy,
+            };
+            record_run(app, &config)
+        }
         Commands::Tap { label, code } => tap_key(app, label.as_deref(), code),
         Commands::Press { key } => press_key(app, key),
     }
@@ -329,7 +348,7 @@ fn millis_u64(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
-fn pull_logs(app: &App, out: &Path) -> CliResult<Value> {
+pub(crate) fn pull_logs(app: &App, out: &Path) -> CliResult<Value> {
     fs::create_dir_all(out)?;
     let pull_output = app.adb(
         &[

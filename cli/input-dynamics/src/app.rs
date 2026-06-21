@@ -35,6 +35,10 @@ impl App {
         &self.package
     }
 
+    pub(crate) fn adb_program(&self) -> &str {
+        &self.adb
+    }
+
     pub(crate) fn ime_component(&self) -> String {
         format!("{}/{IME_CLASS}", self.package)
     }

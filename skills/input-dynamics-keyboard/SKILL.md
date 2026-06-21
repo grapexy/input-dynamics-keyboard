@@ -1,6 +1,6 @@
 ---
 name: input-dynamics-keyboard
-description: Run and validate local Android Input Dynamics Keyboard sessions over ADB. Use when Codex needs to download or build the Android IME APK, install it on a device, enable or select it, start or stop input dynamics logging with an external run_id, inspect status or keyboard layout data, avoid screenshot-dependent automation, pull JSONL logs, or validate the password-field suppression boundary.
+description: Run and validate local Android Input Dynamics Keyboard sessions over ADB. Use when Codex needs to download or build the Android IME APK, install it on a device, enable or select it, record a bounded input dynamics run with an external run_id, inspect status or keyboard layout data, avoid screenshot-dependent automation, pull JSONL logs, or validate the password-field suppression boundary.
 ---
 
 # Input Dynamics Keyboard
@@ -78,21 +78,29 @@ idk install --apk "$APK"
 idk select-ime
 ```
 
-4. Start a session with an external run id:
+4. Record a bounded run with an external run id:
 
 ```bash
 RUN_ID=run-YYYYMMDD-HHMMSS-local-android
-idk start --run-id "$RUN_ID"
+idk record --run-id "$RUN_ID" --out ".agents/experiments/$RUN_ID"
 ```
 
-5. Read status and layout:
+When `--duration-ms` is omitted, press Enter in the terminal to stop capture
+cleanly. Agents should use `--duration-ms <ms>` for scripted smoke tests.
+
+The command writes `manifest.json`, `validation.json`, `ime/`, `adb/`, and
+`derived/` under the output directory. The `adb/getevent.raw.log` stream is
+device-level touchscreen data and should be analyzed separately from IME-owned
+JSONL privacy guarantees.
+
+5. Use lower-level status and layout commands when debugging:
 
 ```bash
 idk status
 idk layout
 ```
 
-6. Stop, pull, and validate logs:
+6. If not using `record`, stop, pull, and validate logs manually:
 
 ```bash
 idk stop

@@ -9,6 +9,7 @@ pub(crate) mod error;
 pub(crate) mod layout;
 pub(crate) mod output;
 pub(crate) mod process;
+pub(crate) mod record;
 pub(crate) mod validate;
 
 use std::process::ExitCode;

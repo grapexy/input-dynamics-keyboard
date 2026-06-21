@@ -95,6 +95,27 @@ pub(crate) enum Commands {
         #[arg(long)]
         run_id: Option<String>,
     },
+    /// Record a bounded research run with IME logs and ADB touch events.
+    Record {
+        /// External run id to write into each session record.
+        #[arg(long)]
+        run_id: String,
+        /// Local experiment output directory.
+        #[arg(long)]
+        out: PathBuf,
+        /// Optional capture duration. If omitted, press Enter on stdin to stop.
+        #[arg(long)]
+        duration_ms: Option<u64>,
+        /// Session-level input actor provenance.
+        #[arg(long, default_value = "human")]
+        input_actor: String,
+        /// Session-level controller provenance.
+        #[arg(long)]
+        input_controller: Option<String>,
+        /// Session-level cadence provenance.
+        #[arg(long, default_value = "manual")]
+        input_cadence_policy: String,
+    },
     /// Tap a key from the current layout by label or code.
     Tap {
         /// Key label to tap.

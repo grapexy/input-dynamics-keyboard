@@ -28,6 +28,24 @@ target/debug/input-dynamics doctor
 
 ## Common Workflow
 
+For a complete bounded experiment capture, use `record`. It starts IME logging,
+captures a concurrent ADB touchscreen event stream with `getevent`, stops the
+session, pulls IME logs, writes `manifest.json`, and writes `validation.json`:
+
+```bash
+RUN_ID=run-YYYYMMDD-HHMMSS-human-android
+
+cargo run --quiet -p input-dynamics -- doctor
+cargo run --quiet -p input-dynamics -- install
+cargo run --quiet -p input-dynamics -- select-ime
+cargo run --quiet -p input-dynamics -- record --run-id "$RUN_ID" --out ".agents/experiments/$RUN_ID"
+```
+
+When `--duration-ms` is omitted, press Enter in the terminal to stop capture
+cleanly. For scripted smoke tests, pass `--duration-ms <ms>`.
+
+Lower-level session commands remain available for debugging:
+
 ```bash
 RUN_ID=run-YYYYMMDD-HHMMSS-local-android
 
@@ -90,10 +108,34 @@ scraping human-oriented text.
 - `clear-logs`: clears logs when no session is active.
 - `pull --out <dir>`: pulls app-specific external log storage.
 - `validate <path> --run-id <id>`: validates JSONL lifecycle and safety fields.
+- `record --run-id <id> --out <dir>`: records a complete run with IME JSONL,
+  ADB `getevent` raw touch stream, manifest, pull, and validation output. Use
+  `--duration-ms <ms>` for timed runs; otherwise press Enter to stop.
 
 Use semantic `press` commands for common non-letter keys. `tap --code=-7` still
 works for delete, and `tap --code -7` is also accepted, but semantic commands
 are easier for agents to generate correctly.
+
+## Record Output
+
+`record` creates:
+
+```text
+<out>/
+  manifest.json
+  validation.json
+  ime/
+    session-*.jsonl
+    input_dynamics_control_status.json
+  adb/
+    getevent.raw.log
+    getevent.stderr.log
+  derived/
+```
+
+The `adb/getevent.raw.log` stream is device-level touchscreen data. Keep it
+separate from IME-owned JSONL records when analyzing password-field suppression
+or keyboard-local privacy guarantees.
 
 Use [adb-control.md](adb-control.md) when debugging the lower-level broadcast
 surface directly.

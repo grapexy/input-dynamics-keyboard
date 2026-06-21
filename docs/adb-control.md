@@ -123,7 +123,7 @@ Status includes:
 - build variant
 - enabled/active state
 - current and last session ids
-- external run id
+- current external run id and last external run id
 - input actor, controller, and cadence policy
 - log directory
 - current or last log file path

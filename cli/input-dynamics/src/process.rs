@@ -1,6 +1,8 @@
 //! Process execution wrapper.
 
-use std::process::Command;
+use std::fs::File;
+use std::path::Path;
+use std::process::{Child, Command, Stdio};
 
 use serde_json::{Value, json};
 
@@ -68,4 +70,31 @@ pub(crate) fn run_process(
             }
         }
     }
+}
+
+pub(crate) fn spawn_process_to_files(
+    program: &str,
+    args: &[String],
+    stdout_path: &Path,
+    stderr_path: &Path,
+) -> CliResult<Child> {
+    let stdout = File::create(stdout_path)?;
+    let stderr = File::create(stderr_path)?;
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "this wrapper centralizes the one long-running capture process path"
+    )]
+    let child = Command::new(program)
+        .args(args)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .map_err(|error| {
+            CliError::new(format!(
+                "failed to spawn {} {}: {error}",
+                program,
+                args.join(" ")
+            ))
+        })?;
+    Ok(child)
 }

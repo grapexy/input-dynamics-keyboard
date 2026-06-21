@@ -120,6 +120,7 @@ object ResearchSessionLogger {
             ?: DEFAULT_INPUT_CADENCE_POLICY
         pressIdCounter.set(0)
         pointerPressIds.clear()
+        lifecycleFieldSnapshot = fieldSnapshot()
         appContext.prefs().edit(commit = true) {
             putBoolean(PREF_ACTIVE, true)
             putString(PREF_SESSION_ID, sessionId)
@@ -498,7 +499,7 @@ object ResearchSessionLogger {
         val appContext = rememberContext(context)
         val active = isSessionActive(appContext)
         val lastSessionId = currentSessionId(appContext)
-        val externalRunId = currentExternalRunId(appContext)
+        val lastExternalRunId = currentExternalRunId(appContext)
         val logDirectory = logDirectory(appContext)
         val currentLogFile = if (active && lastSessionId != null) {
             File(logDirectory, "session-$lastSessionId.jsonl")
@@ -525,7 +526,8 @@ object ResearchSessionLogger {
             .put("active", active)
             .put("current_session_id", jsonValue(if (active) lastSessionId else null))
             .put("last_session_id", jsonValue(lastSessionId))
-            .put("external_run_id", jsonValue(externalRunId))
+            .put("external_run_id", jsonValue(if (active) lastExternalRunId else null))
+            .put("last_external_run_id", jsonValue(lastExternalRunId))
             .put("input_actor", currentInputActor(appContext))
             .put("input_controller", jsonValue(currentInputController(appContext)))
             .put("input_cadence_policy", currentInputCadencePolicy(appContext))

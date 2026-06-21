@@ -128,6 +128,7 @@ Expected status fields include:
 - `current_session_id`
 - `last_session_id`
 - `external_run_id`
+- `last_external_run_id`
 - `input_actor`
 - `input_controller`
 - `input_cadence_policy`
