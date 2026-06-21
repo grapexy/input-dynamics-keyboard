@@ -25,7 +25,9 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicLong
 
 object ResearchSessionLogger {
     const val PREF_ENABLED = "input_dynamics_logging_enabled"
@@ -43,6 +45,8 @@ object ResearchSessionLogger {
     private const val CHEAP_RECORD_COUNT_MAX_BYTES = 10L * 1024L * 1024L
 
     private val ioExecutor = Executors.newSingleThreadExecutor()
+    private val pressIdCounter = AtomicLong(0)
+    private val pointerPressIds = ConcurrentHashMap<Int, Long>()
     @Volatile private var appContext: Context? = null
     @Volatile private var currentInputAttributes: InputAttributes? = null
     @Volatile private var lifecycleFieldSnapshot: FieldSnapshot? = null
@@ -114,6 +118,8 @@ object ResearchSessionLogger {
             ?.trim()
             ?.takeIf { it.isNotEmpty() }
             ?: DEFAULT_INPUT_CADENCE_POLICY
+        pressIdCounter.set(0)
+        pointerPressIds.clear()
         appContext.prefs().edit(commit = true) {
             putBoolean(PREF_ACTIVE, true)
             putString(PREF_SESSION_ID, sessionId)
@@ -296,6 +302,7 @@ object ResearchSessionLogger {
         val actionName = motionActionName(actionMasked)
         val pointerCount = event.pointerCount
         val actionIndex = event.actionIndex
+        updatePressIdsForMotionAction(event, actionMasked, actionIndex, pointerCount)
         val records = ArrayList<PendingEvent>(pointerCount * (event.historySize + 1))
 
         for (historyIndex in 0 until event.historySize) {
@@ -309,7 +316,8 @@ object ResearchSessionLogger {
                     pointerIndex,
                     historicalTime,
                     "historical",
-                    historyIndex
+                    historyIndex,
+                    pointerPressIds[event.getPointerId(pointerIndex)]
                 ))
             }
         }
@@ -322,11 +330,22 @@ object ResearchSessionLogger {
                 pointerIndex,
                 event.eventTime,
                 "current",
-                null
+                null,
+                pointerPressIds[event.getPointerId(pointerIndex)]
             ))
         }
 
         appendEvents(appContext, session, records, fieldSnapshot())
+    }
+
+    @JvmStatic
+    fun finishPress(pointerId: Int) {
+        pointerPressIds.remove(pointerId)
+    }
+
+    @JvmStatic
+    fun finishAllPresses() {
+        pointerPressIds.clear()
     }
 
     @JvmStatic
@@ -343,6 +362,8 @@ object ResearchSessionLogger {
         val session = currentSessionSnapshot(appContext) ?: return
         val fields = mutableMapOf<String, Any?>(
             "pointer_id" to pointerId,
+            "press_id" to pointerPressIds[pointerId],
+            "gesture_id" to pointerPressIds[pointerId],
             "t_event_uptime_ms" to eventTime,
             "x_px" to x,
             "y_px" to y,
@@ -640,7 +661,8 @@ object ResearchSessionLogger {
         pointerIndex: Int,
         eventTime: Long,
         sampleKind: String,
-        historyIndex: Int?
+        historyIndex: Int?,
+        pressId: Long?
     ): PendingEvent {
         val x = if (historyIndex == null) {
             event.getX(pointerIndex)
@@ -700,6 +722,8 @@ object ResearchSessionLogger {
             "motion_flags" to event.flags,
             "pointer_count" to event.pointerCount,
             "pointer_id" to event.getPointerId(pointerIndex),
+            "press_id" to pressId,
+            "gesture_id" to pressId,
             "pointer_index" to pointerIndex,
             "tool_type" to event.getToolType(pointerIndex),
             "t_event_uptime_ms" to eventTime,
@@ -721,6 +745,34 @@ object ResearchSessionLogger {
             fields["history_index"] = historyIndex
         }
         return PendingEvent("pointer_sample", fields)
+    }
+
+    private fun updatePressIdsForMotionAction(
+        event: MotionEvent,
+        actionMasked: Int,
+        actionIndex: Int,
+        pointerCount: Int
+    ) {
+        if (actionIndex !in 0 until pointerCount) return
+        val pointerId = event.getPointerId(actionIndex)
+        when (actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                pointerPressIds.clear()
+                beginPress(pointerId)
+            }
+            MotionEvent.ACTION_POINTER_DOWN -> beginPress(pointerId)
+            MotionEvent.ACTION_CANCEL -> {
+                if (!pointerPressIds.containsKey(pointerId)) {
+                    beginPress(pointerId)
+                }
+            }
+        }
+    }
+
+    private fun beginPress(pointerId: Int): Long {
+        val pressId = pressIdCounter.incrementAndGet()
+        pointerPressIds[pointerId] = pressId
+        return pressId
     }
 
     private fun rememberContext(context: Context): Context {

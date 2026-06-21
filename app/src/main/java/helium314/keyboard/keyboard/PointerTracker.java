@@ -652,6 +652,7 @@ public final class PointerTracker implements PointerTrackerQueue.Element,
                             + " ignore potential noise: time=%d distance=%d",
                             mPointerId, deltaT, distance));
                 cancelTrackingForAction();
+                ResearchSessionLogger.finishPress(mPointerId);
                 return;
             }
         }
@@ -661,6 +662,7 @@ public final class PointerTracker implements PointerTrackerQueue.Element,
         if (key != null && key.isModifier()) {
             if (sInGesture) {
                 // Make sure not to interrupt an active gesture
+                ResearchSessionLogger.finishPress(mPointerId);
                 return;
             } else {
                 // Before processing a down event of modifier key, all pointers
@@ -1032,6 +1034,7 @@ public final class PointerTracker implements PointerTrackerQueue.Element,
             }
         }
         onUpEventInternal(x, y, eventTime);
+        ResearchSessionLogger.finishPress(mPointerId);
         sPointerTrackerQueue.remove(this);
     }
 
@@ -1044,6 +1047,7 @@ public final class PointerTracker implements PointerTrackerQueue.Element,
             printTouchEvent("onPhntEvent:", mLastX, mLastY, eventTime);
         }
         onUpEventInternal(mLastX, mLastY, eventTime);
+        ResearchSessionLogger.finishPress(mPointerId);
         cancelTrackingForAction();
     }
 
@@ -1202,6 +1206,7 @@ public final class PointerTracker implements PointerTrackerQueue.Element,
         setReleasedKeyGraphics(mCurrentKey, true);
         resetKeySelectionByDraggingFinger();
         dismissPopupKeysPanel();
+        ResearchSessionLogger.finishAllPresses();
     }
 
     private boolean isMajorEnoughMoveToBeOnNewKey(final int x, final int y, final long eventTime,

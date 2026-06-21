@@ -95,6 +95,8 @@ input_dynamics_event.v1
 
 Input-scoped non-password records can also include:
 
+- `press_id`
+- `gesture_id`
 - `t_event_uptime_ms`
 - `pointer_id`
 - `key_code`
@@ -150,6 +152,11 @@ after field cleanup. Observed dismissal evidence such as `ime_hide_request`,
 `ime_hide_window_called`, `system_back_event`, and `editor_action` should not be
 treated as a definitive app-side hide reason unless the record explicitly marks
 `dismissal_confidence` as `definitive`.
+
+`press_id` correlates pointer samples with key down/up/commit records from the
+same touch sequence. `gesture_id` currently matches `press_id` for ordinary key
+touches; it is included so later gesture-level analysis can group richer
+multi-sample interactions without changing existing records.
 
 Example record:
 

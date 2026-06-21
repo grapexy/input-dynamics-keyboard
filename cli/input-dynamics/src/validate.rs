@@ -51,6 +51,9 @@ pub(crate) fn validate_logs(path: &Path, run_id: Option<&str>) -> CliResult<Valu
         "missing_required_field_count": counts.missing_required_field_count,
         "invalid_required_field_count": counts.invalid_required_field_count,
         "invalid_provenance_count": counts.invalid_provenance_count,
+        "touch_sequence_record_count": counts.touch_sequence_record_count,
+        "missing_press_id_count": counts.missing_press_id_count,
+        "missing_gesture_id_count": counts.missing_gesture_id_count,
         "session_id_mismatch_count": counts.session_id_mismatch_count,
         "event_order_violation_count": counts.event_order_violation_count,
         "password_record_count": counts.password_record_count,
@@ -90,6 +93,9 @@ struct ValidationCounts {
     missing_required_field_count: u64,
     invalid_required_field_count: u64,
     invalid_provenance_count: u64,
+    touch_sequence_record_count: u64,
+    missing_press_id_count: u64,
+    missing_gesture_id_count: u64,
     session_id_mismatch_count: u64,
     event_order_violation_count: u64,
     password_record_count: u64,
@@ -102,6 +108,7 @@ impl ValidationCounts {
     fn update(&mut self, value: &Value) -> CliResult<()> {
         increment(&mut self.selected_count)?;
         self.validate_required_fields(value)?;
+        self.validate_touch_sequence_ids(value)?;
         self.validate_session_id(value)?;
         self.validate_event_order(value)?;
         if value.get("schema").and_then(Value::as_str) != Some(SCHEMA) {
@@ -134,6 +141,8 @@ impl ValidationCounts {
             && self.missing_required_field_count == 0
             && self.invalid_required_field_count == 0
             && self.invalid_provenance_count == 0
+            && self.missing_press_id_count == 0
+            && self.missing_gesture_id_count == 0
             && self.session_id_mismatch_count == 0
             && self.event_order_violation_count == 0
             && self.password_record_count == 0
@@ -157,6 +166,24 @@ impl ValidationCounts {
             }
         }
 
+        Ok(())
+    }
+
+    fn validate_touch_sequence_ids(&mut self, value: &Value) -> CliResult<()> {
+        let Some(event) = value.get("event").and_then(Value::as_str) else {
+            return Ok(());
+        };
+        if !requires_touch_sequence_id(event) {
+            return Ok(());
+        }
+
+        increment(&mut self.touch_sequence_record_count)?;
+        if !value.get("press_id").is_some_and(is_non_negative_integer) {
+            increment(&mut self.missing_press_id_count)?;
+        }
+        if !value.get("gesture_id").is_some_and(is_non_negative_integer) {
+            increment(&mut self.missing_gesture_id_count)?;
+        }
         Ok(())
     }
 
@@ -244,6 +271,23 @@ fn is_non_empty_string(value: &Value) -> bool {
     value.as_str().is_some_and(|text| !text.is_empty())
 }
 
+fn requires_touch_sequence_id(event: &str) -> bool {
+    matches!(
+        event,
+        "pointer_sample"
+            | "key_down"
+            | "key_up"
+            | "key_commit"
+            | "key_repeat"
+            | "key_long_press"
+            | "key_cancel"
+    )
+}
+
+fn is_non_negative_integer(value: &Value) -> bool {
+    value.as_u64().is_some() || value.as_i64().is_some_and(|number| number >= 0)
+}
+
 fn record_matches_run_id(value: &Value, run_id: Option<&str>) -> bool {
     match run_id {
         Some(expected_run_id) => {
@@ -288,6 +332,8 @@ mod tests {
             "event": "key_down",
             "t_wall_ms": 2_u64,
             "t_uptime_ms": 2_u64,
+            "press_id": 1_u64,
+            "gesture_id": 1_u64,
             "target_package": "org.example.input",
             "password_field": false
         });
@@ -337,6 +383,43 @@ mod tests {
         assert_eq!(
             counts.invalid_provenance_count, 1,
             "invalid provenance count should increment"
+        );
+    }
+
+    #[test]
+    fn validation_counts_reject_touch_record_without_press_ids() {
+        let mut counts = ValidationCounts::default();
+        let record = json!({
+            "schema": "input_dynamics_event.v1",
+            "session_id": "session-1",
+            "event": "pointer_sample",
+            "t_wall_ms": 1_u64,
+            "t_uptime_ms": 1_u64,
+            "target_package": "org.example.input",
+            "password_field": false
+        });
+
+        let update_result = counts.update(&record);
+
+        assert!(
+            update_result.is_ok(),
+            "touch sequence record should update counts"
+        );
+        assert!(
+            !counts.is_valid(),
+            "missing touch sequence ids should fail validation"
+        );
+        assert_eq!(
+            counts.touch_sequence_record_count, 1,
+            "touch sequence record count should increment"
+        );
+        assert_eq!(
+            counts.missing_press_id_count, 1,
+            "missing press id count should increment"
+        );
+        assert_eq!(
+            counts.missing_gesture_id_count, 1,
+            "missing gesture id count should increment"
         );
     }
 

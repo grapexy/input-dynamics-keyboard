@@ -13,6 +13,8 @@ Use this reference when validating logs or changing event fields.
 - `session_start` and `session_stop` records bracket a normal session.
 - `session_start` includes session-level provenance: `input_actor`,
   `input_controller`, and `input_cadence_policy`.
+- Key and pointer records include `press_id` when they belong to a touch
+  sequence. `gesture_id` currently matches `press_id` for ordinary key touches.
 - Lifecycle events include `input_view_start`, `input_view_finish`,
   `input_finish`, `ime_window_shown`, and `ime_window_hidden`.
 - Dismissal-evidence events include `ime_hide_request`,
@@ -35,6 +37,8 @@ Minimum fields expected across typing/touch records include:
 - `t_uptime_ms`
 - `t_wall_ms`
 - `target_package`
+- `press_id`
+- `gesture_id`
 - `pointer_id`
 - `key_code`
 - `key_label`
