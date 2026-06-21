@@ -58,7 +58,9 @@
               pkgs.gh
               pkgs.git
               pkgs.jdk17
+              pkgs.python3
               pkgs.unzip
+              pkgs.uv
               pkgs.zip
             ];
 

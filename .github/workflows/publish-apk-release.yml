@@ -87,7 +87,13 @@ jobs:
             exit 1
           fi
 
-          debug_asset="release-assets/InputDynamicsKeyboard-${tag_name}-debug.apk"
+          version_name="$("$aapt_bin" dump badging "$debug_apk" | sed -n "s/.*versionName='\([^']*\)'.*/\1/p")"
+          provenance="$(printf '%s' "$version_name" | sed -n 's/.*+\(heli[^+[:space:]]*\)$/\1/p')"
+          if [ -z "$provenance" ]; then
+            provenance="heliunknown"
+          fi
+
+          debug_asset="release-assets/InputDynamicsKeyboard-${tag_name}-${provenance}-debug.apk"
           cp "$debug_apk" "$debug_asset"
 
           "$aapt_bin" dump permissions "$debug_asset" | tee release-assets/APK_PERMISSIONS.txt
@@ -103,9 +109,14 @@ jobs:
 
           APK assets:
 
-          - \`InputDynamicsKeyboard-${tag_name}-debug.apk\`: debug package \`org.inputdynamics.ime.debug\`
+          - \`InputDynamicsKeyboard-${tag_name}-${provenance}-debug.apk\`: debug package \`org.inputdynamics.ime.debug\`
           - \`SHA256SUMS.txt\`: SHA-256 checksums for APK assets
           - \`APK_PERMISSIONS.txt\`: permissions dumped from the debug APK
+
+          Version metadata:
+
+          - Android versionName: \`$version_name\`
+          - Upstream base: \`$provenance\`
 
           Verification:
 
