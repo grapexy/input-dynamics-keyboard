@@ -8,7 +8,7 @@ use std::time::UNIX_EPOCH;
 
 use serde_json::{Value, json};
 
-use crate::app::App;
+use crate::app::{App, LOG_DIR};
 use crate::args::Commands;
 use crate::error::{CliError, CliResult};
 use crate::layout::{json_number_to_shell_arg, key_matches};
@@ -50,12 +50,20 @@ fn doctor(app: &App) -> CliResult<Value> {
         FailureMode::AllowFailure,
     )?;
     let device_connected = has_connected_device(adb_devices.stdout());
+    let ime_registered = ime_is_registered(ime_list.stdout(), &app.ime_component());
+    let gh_available = gh_version.status_code == Some(0_i32);
 
     Ok(json!({
-        "ok": adb_devices.status_code == Some(0) && device_connected,
+        "ok": adb_devices.status_code == Some(0_i32)
+            && device_connected
+            && ime_list.status_code == Some(0_i32)
+            && ime_registered
+            && gh_available,
         "package_name": app.package(),
         "ime_component": app.ime_component(),
         "device_connected": device_connected,
+        "ime_registered": ime_registered,
+        "gh_available": gh_available,
         "adb_devices": adb_devices.json(),
         "ime_list": ime_list.json(),
         "gh_version": gh_version.json(),
@@ -66,20 +74,22 @@ fn install(app: &App, apk: Option<&Path>, repo: &str, dir: &Path) -> CliResult<V
     let apk_path = if let Some(path) = apk {
         path.to_path_buf()
     } else {
-        fs::create_dir_all(dir)?;
+        let download_dir = fresh_download_dir(dir)?;
+        let release_tag = latest_release_tag(repo)?;
         let gh_args = vec![
             String::from("release"),
             String::from("download"),
+            release_tag,
             String::from("--repo"),
             String::from(repo),
             String::from("--pattern"),
             String::from("*debug.apk"),
             String::from("--dir"),
-            path_string(dir)?,
+            path_string(&download_dir)?,
             String::from("--clobber"),
         ];
         let _download = run_process("gh", &gh_args, FailureMode::RequireSuccess)?;
-        latest_apk(dir)?
+        latest_debug_apk(&download_dir)?
     };
 
     let install_output = app.adb(
@@ -133,9 +143,10 @@ fn start(app: &App, run_id: &str) -> CliResult<Value> {
             String::from(run_id),
         ],
     )?;
+    let ok = json_ok(&enable) && json_ok(&start);
 
     Ok(json!({
-        "ok": true,
+        "ok": ok,
         "package_name": app.package(),
         "external_run_id": run_id,
         "enable": enable,
@@ -151,15 +162,31 @@ fn pull_logs(app: &App, out: &Path) -> CliResult<Value> {
             app.remote_log_dir(),
             path_string(out)?,
         ],
-        FailureMode::RequireSuccess,
+        FailureMode::AllowFailure,
     )?;
+
+    if pull_output.status_code == Some(0_i32) {
+        return Ok(json!({
+            "ok": true,
+            "package_name": app.package(),
+            "remote_log_dir": app.remote_log_dir(),
+            "output_dir": path_string(out)?,
+            "pull_method": "external_adb_pull",
+            "pull": pull_output.json(),
+        }));
+    }
+
+    let internal_pull = pull_internal_logs(app, out)?;
 
     Ok(json!({
         "ok": true,
         "package_name": app.package(),
         "remote_log_dir": app.remote_log_dir(),
+        "internal_log_dir": App::internal_log_dir(),
         "output_dir": path_string(out)?,
-        "pull": pull_output.json(),
+        "pull_method": "run_as_internal_fallback",
+        "external_pull": pull_output.json(),
+        "internal_pull": internal_pull,
     }))
 }
 
@@ -213,12 +240,66 @@ fn tap_key(app: &App, label: Option<&str>, code: Option<i64>) -> CliResult<Value
     }))
 }
 
-fn latest_apk(dir: &Path) -> CliResult<PathBuf> {
+fn pull_internal_logs(app: &App, out: &Path) -> CliResult<Value> {
+    let local_log_dir = out.join(LOG_DIR);
+    fs::create_dir_all(&local_log_dir)?;
+    let list_output = app.adb_shell(
+        vec![
+            String::from("run-as"),
+            String::from(app.package()),
+            String::from("ls"),
+            App::internal_log_dir(),
+        ],
+        FailureMode::RequireSuccess,
+    )?;
+    let mut pulled_files = Vec::new();
+    for line in list_output.stdout().lines() {
+        let file_name = line.trim();
+        if file_name.is_empty() {
+            continue;
+        }
+        if file_name.contains('/') || file_name == "." || file_name == ".." {
+            return Err(CliError::new(format!(
+                "unexpected internal log file name: {file_name}"
+            )));
+        }
+        let remote_file = format!("{}/{file_name}", App::internal_log_dir());
+        let file_output = app.adb_shell(
+            vec![
+                String::from("run-as"),
+                String::from(app.package()),
+                String::from("cat"),
+                remote_file,
+            ],
+            FailureMode::RequireSuccess,
+        )?;
+        fs::write(local_log_dir.join(file_name), file_output.stdout())?;
+        pulled_files.push(String::from(file_name));
+    }
+
+    Ok(json!({
+        "status_code": 0,
+        "file_count": pulled_files.len(),
+        "files": pulled_files,
+        "list": list_output.json(),
+    }))
+}
+
+fn fresh_download_dir(base_dir: &Path) -> CliResult<PathBuf> {
+    let download_dir = base_dir.join(format!("download-{}", std::process::id()));
+    if download_dir.exists() {
+        fs::remove_dir_all(&download_dir)?;
+    }
+    fs::create_dir_all(&download_dir)?;
+    Ok(download_dir)
+}
+
+fn latest_debug_apk(dir: &Path) -> CliResult<PathBuf> {
     let mut candidates = Vec::new();
     for entry_result in fs::read_dir(dir)? {
         let entry = entry_result?;
         let path = entry.path();
-        if path.extension().and_then(OsStr::to_str) != Some("apk") {
+        if !is_debug_apk(&path) {
             continue;
         }
         let metadata = entry.metadata()?;
@@ -232,7 +313,51 @@ fn latest_apk(dir: &Path) -> CliResult<PathBuf> {
     candidates
         .first()
         .map(|candidate| candidate.1.clone())
-        .ok_or_else(|| CliError::new(format!("no APK was found in {}", dir.display())))
+        .ok_or_else(|| CliError::new(format!("no debug APK was found in {}", dir.display())))
+}
+
+fn latest_release_tag(repo: &str) -> CliResult<String> {
+    let gh_args = vec![
+        String::from("release"),
+        String::from("list"),
+        String::from("--repo"),
+        String::from(repo),
+        String::from("--json"),
+        String::from("tagName,isDraft,isPrerelease,createdAt"),
+        String::from("--limit"),
+        String::from("50"),
+    ];
+    let output = run_process("gh", &gh_args, FailureMode::RequireSuccess)?;
+    latest_release_tag_from_json(output.stdout())
+}
+
+fn latest_release_tag_from_json(json_text: &str) -> CliResult<String> {
+    let value: Value = serde_json::from_str(json_text)?;
+    let releases = value
+        .as_array()
+        .ok_or_else(|| CliError::new("gh release list did not return an array"))?;
+    for release in releases {
+        let is_draft = release
+            .get("isDraft")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if is_draft {
+            continue;
+        }
+        let Some(tag_name) = release.get("tagName").and_then(Value::as_str) else {
+            continue;
+        };
+        if !tag_name.is_empty() {
+            return Ok(String::from(tag_name));
+        }
+    }
+    Err(CliError::new("no non-draft GitHub release was found"))
+}
+
+fn is_debug_apk(path: &Path) -> bool {
+    path.file_name()
+        .and_then(OsStr::to_str)
+        .is_some_and(|file_name| file_name.ends_with("-debug.apk"))
 }
 
 pub(crate) fn path_string(path: &Path) -> CliResult<String> {
@@ -250,11 +375,25 @@ fn has_connected_device(adb_devices_stdout: &str) -> bool {
     })
 }
 
+fn ime_is_registered(ime_list_stdout: &str, ime_component: &str) -> bool {
+    ime_list_stdout
+        .lines()
+        .any(|line| line.trim() == ime_component)
+}
+
+fn json_ok(value: &Value) -> bool {
+    value.get("ok").and_then(Value::as_bool) == Some(true)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use proptest::strategy::Strategy;
 
-    use crate::commands::has_connected_device;
+    use crate::commands::{
+        has_connected_device, ime_is_registered, is_debug_apk, latest_release_tag_from_json,
+    };
 
     proptest::proptest! {
         #[test]
@@ -284,5 +423,57 @@ mod tests {
 
     fn non_device_state() -> impl Strategy<Value = String> {
         "(offline|unauthorized|recovery|sideload|bootloader)"
+    }
+
+    #[test]
+    fn ime_registration_requires_exact_component_line() {
+        let ime = "org.inputdynamics.ime.debug/helium314.keyboard.latin.LatinIME";
+        let ime_list = format!("other/.Ime\n{ime}\n");
+
+        assert!(
+            ime_is_registered(&ime_list, ime),
+            "exact IME component should be detected"
+        );
+        assert!(
+            !ime_is_registered("org.inputdynamics.ime.debug/.OtherIme\n", ime),
+            "different IME component should not be accepted"
+        );
+    }
+
+    #[test]
+    fn debug_apk_filter_rejects_unrelated_apk_names() {
+        assert!(
+            is_debug_apk(Path::new("InputDynamicsKeyboard-v0.1.0-debug.apk")),
+            "debug release asset should be accepted"
+        );
+        assert!(
+            !is_debug_apk(Path::new("other.apk")),
+            "unrelated APK should be rejected"
+        );
+        assert!(
+            !is_debug_apk(Path::new("notdebug.apk")),
+            "APK names must use the release debug suffix"
+        );
+    }
+
+    #[test]
+    fn release_tag_parser_accepts_prereleases_and_skips_drafts() {
+        let releases = r#"
+            [
+                {"tagName":"v0.2.0-draft","isDraft":true,"isPrerelease":false,"createdAt":"2026-06-21T01:00:00Z"},
+                {"tagName":"v0.1.0","isDraft":false,"isPrerelease":true,"createdAt":"2026-06-21T00:00:00Z"}
+            ]
+        "#;
+        let tag_result = latest_release_tag_from_json(releases);
+
+        assert!(
+            tag_result.is_ok(),
+            "latest non-draft release tag should parse"
+        );
+        assert_eq!(
+            tag_result.as_deref().ok(),
+            Some("v0.1.0"),
+            "prereleases should be valid install sources"
+        );
     }
 }

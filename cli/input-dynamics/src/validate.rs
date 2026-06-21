@@ -47,6 +47,10 @@ pub(crate) fn validate_logs(path: &Path, run_id: Option<&str>) -> CliResult<Valu
         "session_stop_count": counts.session_stop_count,
         "target_package_seen": counts.target_package_seen,
         "invalid_schema_count": counts.invalid_schema_count,
+        "missing_required_field_count": counts.missing_required_field_count,
+        "invalid_required_field_count": counts.invalid_required_field_count,
+        "session_id_mismatch_count": counts.session_id_mismatch_count,
+        "event_order_violation_count": counts.event_order_violation_count,
         "password_record_count": counts.password_record_count,
     }))
 }
@@ -80,12 +84,22 @@ struct ValidationCounts {
     session_stop_count: u64,
     target_package_seen: bool,
     invalid_schema_count: u64,
+    missing_required_field_count: u64,
+    invalid_required_field_count: u64,
+    session_id_mismatch_count: u64,
+    event_order_violation_count: u64,
     password_record_count: u64,
+    first_session_id: Option<String>,
+    seen_session_start: bool,
+    seen_session_stop: bool,
 }
 
 impl ValidationCounts {
     fn update(&mut self, value: &Value) -> CliResult<()> {
         increment(&mut self.selected_count)?;
+        self.validate_required_fields(value)?;
+        self.validate_session_id(value)?;
+        self.validate_event_order(value)?;
         if value.get("schema").and_then(Value::as_str) != Some(SCHEMA) {
             increment(&mut self.invalid_schema_count)?;
         }
@@ -109,8 +123,99 @@ impl ValidationCounts {
             && self.session_stop_count > 0
             && self.target_package_seen
             && self.invalid_schema_count == 0
+            && self.missing_required_field_count == 0
+            && self.invalid_required_field_count == 0
+            && self.session_id_mismatch_count == 0
+            && self.event_order_violation_count == 0
             && self.password_record_count == 0
     }
+
+    fn validate_required_fields(&mut self, value: &Value) -> CliResult<()> {
+        self.require_non_empty_string(value, "session_id")?;
+        self.require_non_empty_string(value, "event")?;
+        self.require_non_negative_integer(value, "t_wall_ms")?;
+        self.require_non_negative_integer(value, "t_uptime_ms")?;
+
+        if let Some(target_package) = value.get("target_package") {
+            if !is_non_empty_string(target_package) {
+                increment(&mut self.invalid_required_field_count)?;
+            }
+        }
+
+        if let Some(password_field) = value.get("password_field") {
+            if !password_field.is_boolean() {
+                increment(&mut self.invalid_required_field_count)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_session_id(&mut self, value: &Value) -> CliResult<()> {
+        let Some(session_id) = value.get("session_id").and_then(Value::as_str) else {
+            return Ok(());
+        };
+        if let Some(first_session_id) = self.first_session_id.as_deref() {
+            if first_session_id != session_id {
+                increment(&mut self.session_id_mismatch_count)?;
+            }
+        } else {
+            self.first_session_id = Some(String::from(session_id));
+        }
+        Ok(())
+    }
+
+    fn validate_event_order(&mut self, value: &Value) -> CliResult<()> {
+        match value.get("event").and_then(Value::as_str) {
+            Some("session_start") => {
+                if self.seen_session_start || self.seen_session_stop {
+                    increment(&mut self.event_order_violation_count)?;
+                }
+                self.seen_session_start = true;
+            }
+            Some("session_stop") => {
+                if !self.seen_session_start || self.seen_session_stop {
+                    increment(&mut self.event_order_violation_count)?;
+                }
+                self.seen_session_stop = true;
+            }
+            Some(_) if !self.seen_session_start || self.seen_session_stop => {
+                increment(&mut self.event_order_violation_count)?;
+            }
+            Some(_) | None => {}
+        }
+        Ok(())
+    }
+
+    fn require_non_empty_string(&mut self, value: &Value, field: &str) -> CliResult<()> {
+        match value.get(field) {
+            Some(field_value) => {
+                if !is_non_empty_string(field_value) {
+                    increment(&mut self.invalid_required_field_count)?;
+                }
+            }
+            None => increment(&mut self.missing_required_field_count)?,
+        }
+        Ok(())
+    }
+
+    fn require_non_negative_integer(&mut self, value: &Value, field: &str) -> CliResult<()> {
+        match value.get(field) {
+            Some(field_value) => {
+                let valid = field_value.as_u64().is_some()
+                    || field_value.as_i64().is_some_and(|number| number >= 0);
+                if !valid {
+                    increment(&mut self.invalid_required_field_count)?;
+                }
+            }
+            None => increment(&mut self.missing_required_field_count)?,
+        }
+        Ok(())
+    }
+}
+
+fn is_non_empty_string(value: &Value) -> bool {
+    value.as_str().is_some_and(|text| !text.is_empty())
 }
 
 fn record_matches_run_id(value: &Value, run_id: Option<&str>) -> bool {
@@ -141,19 +246,28 @@ mod tests {
         let mut counts = ValidationCounts::default();
         let start_record = json!({
             "schema": "input_dynamics_event.v1",
+            "session_id": "session-1",
             "event": "session_start",
+            "t_wall_ms": 1_u64,
+            "t_uptime_ms": 1_u64,
             "target_package": "org.example.input",
             "password_field": false
         });
         let key_record = json!({
             "schema": "input_dynamics_event.v1",
+            "session_id": "session-1",
             "event": "key_down",
+            "t_wall_ms": 2_u64,
+            "t_uptime_ms": 2_u64,
             "target_package": "org.example.input",
             "password_field": false
         });
         let stop_record = json!({
             "schema": "input_dynamics_event.v1",
+            "session_id": "session-1",
             "event": "session_stop",
+            "t_wall_ms": 3_u64,
+            "t_uptime_ms": 3_u64,
             "target_package": "org.example.input",
             "password_field": false
         });
@@ -173,7 +287,10 @@ mod tests {
         let mut counts = ValidationCounts::default();
         let password_record = json!({
             "schema": "input_dynamics_event.v1",
+            "session_id": "session-1",
             "event": "key_down",
+            "t_wall_ms": 1_u64,
+            "t_uptime_ms": 1_u64,
             "target_package": "org.example.input",
             "password_field": true
         });
@@ -188,6 +305,29 @@ mod tests {
         assert_eq!(
             counts.password_record_count, 1,
             "password record count should increment"
+        );
+    }
+
+    #[test]
+    fn validation_counts_reject_malformed_minimal_record() {
+        let mut counts = ValidationCounts::default();
+        let malformed_record = json!({
+            "schema": "input_dynamics_event.v1",
+            "event": "key_down",
+            "target_package": "org.example.input",
+            "password_field": false
+        });
+
+        let update_result = counts.update(&malformed_record);
+
+        assert!(update_result.is_ok(), "malformed record should be counted");
+        assert!(
+            !counts.is_valid(),
+            "missing required fields should fail validation"
+        );
+        assert_eq!(
+            counts.missing_required_field_count, 3,
+            "session_id and timestamps should be required"
         );
     }
 
