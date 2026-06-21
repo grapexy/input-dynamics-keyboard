@@ -73,10 +73,18 @@
               export GH_CONFIG_DIR="$PWD/.git/gh"
               export PATH="${androidHome}/platform-tools:${buildTools}:${ndkHome}:$PATH"
 
+              if [ -s "$GH_CONFIG_DIR/token" ]; then
+                export GH_TOKEN="$(cat "$GH_CONFIG_DIR/token")"
+                github_auth_status="token loaded"
+              else
+                github_auth_status="no local token"
+              fi
+
               echo "Android SDK: $ANDROID_HOME"
               echo "Android NDK: $ANDROID_NDK_HOME"
               echo "Java: $JAVA_HOME"
               echo "GitHub CLI config: $GH_CONFIG_DIR"
+              echo "GitHub CLI auth: $github_auth_status"
               echo "Build with: ./gradlew :app:assembleDebugNoMinify"
             '';
           };
