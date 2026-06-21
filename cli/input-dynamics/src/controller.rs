@@ -202,12 +202,14 @@ pub(crate) fn status(app: &App) -> CliResult<Value> {
 pub(crate) fn stop(app: &App) -> CliResult<Value> {
     let paths = RuntimePaths::for_app(app)?;
     let before = status(app)?;
+    let virtual_event_path = virtual_event_path_from_status(&before);
     if !before
         .get("active")
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
         remove_stale_runtime(&paths)?;
+        let cleanup = cleanup_report(app, &paths, virtual_event_path.as_deref());
         return Ok(json!({
             "ok": true,
             "active": false,
@@ -215,13 +217,10 @@ pub(crate) fn stop(app: &App) -> CliResult<Value> {
             "device_serial": paths.device_serial.as_str(),
             "already_stopped": true,
             "before": before,
+            "cleanup": cleanup,
         }));
     }
 
-    let virtual_event_path = before
-        .pointer("/state/virtual_touchscreen/profile/event_path")
-        .and_then(Value::as_str)
-        .map(String::from);
     let response = send_request(&paths.socket, &ControllerRequest::Stop)?;
     remove_stale_runtime(&paths)?;
     let cleanup = cleanup_report(app, &paths, virtual_event_path.as_deref());
@@ -602,6 +601,16 @@ fn cleanup_report(app: &App, paths: &RuntimePaths, virtual_event_path: Option<&s
         "runtime": wait_for_runtime_cleanup(paths),
         "virtual_touchscreen": wait_for_virtual_touchscreen_cleanup(app, virtual_event_path),
     })
+}
+
+fn virtual_event_path_from_status(status: &Value) -> Option<String> {
+    [
+        "/state/virtual_touchscreen/profile/event_path",
+        "/session_lock/controller_state/virtual_touchscreen/profile/event_path",
+    ]
+    .into_iter()
+    .find_map(|pointer| status.pointer(pointer).and_then(Value::as_str))
+    .map(String::from)
 }
 
 fn wait_for_runtime_cleanup(paths: &RuntimePaths) -> Value {
@@ -1130,6 +1139,7 @@ mod tests {
 
     use crate::controller::{
         RuntimePaths, parse_dumpsys_input, parse_i64_list, sanitize_path_component,
+        virtual_event_path_from_status,
     };
 
     const SAMPLE_DUMPSYS_INPUT: &str = r"
@@ -1216,6 +1226,56 @@ Input Reader State (Nums of device: 4):
     fn parses_framework_id_list() {
         assert_eq!(parse_i64_list("[ 1 5 ]"), vec![1, 5]);
         assert_eq!(parse_i64_list("[ ]"), Vec::<i64>::new());
+    }
+
+    #[test]
+    fn virtual_event_path_prefers_live_state() {
+        let status = serde_json::json!({
+            "state": {
+                "virtual_touchscreen": {
+                    "profile": {
+                        "event_path": "/dev/input/event4"
+                    }
+                }
+            },
+            "session_lock": {
+                "controller_state": {
+                    "virtual_touchscreen": {
+                        "profile": {
+                            "event_path": "/dev/input/event5"
+                        }
+                    }
+                }
+            }
+        });
+
+        assert_eq!(
+            virtual_event_path_from_status(&status),
+            Some(String::from("/dev/input/event4")),
+            "live state should be preferred over lock fallback"
+        );
+    }
+
+    #[test]
+    fn virtual_event_path_falls_back_to_session_lock() {
+        let status = serde_json::json!({
+            "state": null,
+            "session_lock": {
+                "controller_state": {
+                    "virtual_touchscreen": {
+                        "profile": {
+                            "event_path": "/dev/input/event5"
+                        }
+                    }
+                }
+            }
+        });
+
+        assert_eq!(
+            virtual_event_path_from_status(&status),
+            Some(String::from("/dev/input/event5")),
+            "stale lock state should still support cleanup reporting"
+        );
     }
 
     proptest::proptest! {

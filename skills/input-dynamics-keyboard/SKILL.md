@@ -121,6 +121,10 @@ idk hide-keyboard --method edge-back --side right
 idk session stop
 ```
 
+If a controller process is interrupted, use `idk session stop` as the repair
+path. It removes stale runtime files, stops IME logging, and reports whether
+the saved virtual touchscreen event path is gone.
+
 4. For bounded capture, use `record` with an external run id:
 
 ```bash

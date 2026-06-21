@@ -168,7 +168,9 @@ scraping human-oriented text.
   device metadata, and Input Reader device metadata when Android exposes them.
 - `session stop`: stops the local input controller, verifies normal runtime
   cleanup, verifies that the mirrored virtual touchscreen event path has
-  disappeared when it was detected, then stops IME logging.
+  disappeared when it was detected, then stops IME logging. If a previous
+  controller process was interrupted, `session stop` also removes stale runtime
+  files and reports cleanup from the saved state.
 - `layout`: returns status including `keyboard_layout` when the IME is visible.
 - `layout --wait-visible` / `layout --wait-hidden`: waits for keyboard layout
   visibility state before returning.
