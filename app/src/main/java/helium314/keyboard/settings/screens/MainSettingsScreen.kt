@@ -37,6 +37,7 @@ fun MainSettingsScreen(
     onClickToolbar: () -> Unit,
     onClickGestureTyping: () -> Unit,
     onClickDataGathering: () -> Unit,
+    onClickResearchLogging: () -> Unit,
     onClickAdvanced: () -> Unit,
     onClickAppearance: () -> Unit,
     onClickLanguage: () -> Unit,
@@ -89,6 +90,12 @@ fun MainSettingsScreen(
                         icon = R.drawable.ic_settings_gesture
                     ) { NextScreenIcon() }
                 Preference(
+                    name = stringResource(R.string.research_logging_screen),
+                    description = stringResource(R.string.research_logging_main_summary),
+                    onClick = onClickResearchLogging,
+                    icon = R.drawable.ic_settings_about_log
+                ) { NextScreenIcon() }
+                Preference(
                     name = stringResource(R.string.settings_screen_correction),
                     onClick = onClickTextCorrection,
                     icon = R.drawable.ic_settings_correction
@@ -124,7 +131,7 @@ private fun PreviewScreen() {
     initPreview(LocalContext.current)
     Theme(previewDark) {
         Surface {
-            MainSettingsScreen({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})
+            MainSettingsScreen({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})
         }
     }
 }

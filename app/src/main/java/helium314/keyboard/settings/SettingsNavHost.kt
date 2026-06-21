@@ -28,6 +28,7 @@ import helium314.keyboard.settings.screens.MainSettingsScreen
 import helium314.keyboard.settings.screens.PersonalDictionariesScreen
 import helium314.keyboard.settings.screens.PersonalDictionaryScreen
 import helium314.keyboard.settings.screens.PreferencesScreen
+import helium314.keyboard.settings.screens.ResearchLoggingScreen
 import helium314.keyboard.settings.screens.SecondaryLayoutScreen
 import helium314.keyboard.settings.screens.SubtypeScreen
 import helium314.keyboard.settings.screens.TextCorrectionScreen
@@ -72,6 +73,7 @@ fun SettingsNavHost(
                 onClickToolbar = { navController.navigate(SettingsDestination.Toolbar) },
                 onClickGestureTyping = { navController.navigate(SettingsDestination.GestureTyping) },
                 onClickDataGathering = { navController.navigate(SettingsDestination.DataGathering) },
+                onClickResearchLogging = { navController.navigate(SettingsDestination.ResearchLogging) },
                 onClickAdvanced = { navController.navigate(SettingsDestination.Advanced) },
                 onClickAppearance = { navController.navigate(SettingsDestination.Appearance) },
                 onClickLanguage = { navController.navigate(SettingsDestination.Languages) },
@@ -97,6 +99,9 @@ fun SettingsNavHost(
         }
         composable(SettingsDestination.DataGathering) {
             GestureDataScreen(onClickBack = ::goBack)
+        }
+        composable(SettingsDestination.ResearchLogging) {
+            ResearchLoggingScreen(onClickBack = ::goBack)
         }
 /*      will be added as part of passive data gathering
         composable(SettingsDestination.DataReview) {
@@ -153,6 +158,7 @@ object SettingsDestination {
     const val GestureTyping = "gesture_typing"
     const val DataGathering = "data_gathering" // remove when data gathering phase is done (end of 2026 latest)
     const val DataReview = "data_review" // remove when data gathering phase is done (end of 2026 latest)
+    const val ResearchLogging = "research_logging"
     const val Advanced = "advanced"
     const val Debug = "debug"
     const val Appearance = "appearance"

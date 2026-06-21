@@ -74,6 +74,21 @@
     <string name="research_spell_checker_service_name" translatable="false">Typing Research Keyboard Spell Checker</string>
     <string name="research_ime_settings" translatable="false">Typing Research Keyboard Settings</string>
     <string name="research_android_spell_checker_settings" translatable="false">Typing Research Keyboard Spell Checker Settings</string>
+    <string name="research_logging_screen" translatable="false">Research logging</string>
+    <string name="research_logging_main_summary" translatable="false">Record local JSONL timing sessions for ADB pull.</string>
+    <string name="research_logging_section_logging" translatable="false">Logging</string>
+    <string name="research_logging_section_session" translatable="false">Session</string>
+    <string name="research_logging_section_data" translatable="false">Data</string>
+    <string name="research_logging_enabled" translatable="false">Enable research logging</string>
+    <string name="research_logging_enabled_summary" translatable="false">Allows explicit local timing sessions. Password fields remain excluded.</string>
+    <string name="research_logging_start_session" translatable="false">Start session</string>
+    <string name="research_logging_stop_session" translatable="false">Stop session</string>
+    <string name="research_logging_clear_logs" translatable="false">Clear logs</string>
+    <string name="research_logging_status_active" translatable="false">Active session: %1$s</string>
+    <string name="research_logging_status_inactive" translatable="false">No active session.</string>
+    <string name="research_logging_log_count" translatable="false">JSONL files: %1$d</string>
+    <string name="research_logging_path" translatable="false">Path: %1$s</string>
+    <string name="research_logging_adb_pull" translatable="false">ADB pull command</string>
     <!-- App slogan-->
     <string name="app_slogan" translatable="false">Human typing dynamics research keyboard.</string>
 
