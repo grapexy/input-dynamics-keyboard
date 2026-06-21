@@ -11,7 +11,7 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "org.typingresearch.ime"
+        applicationId = "org.inputdynamics.ime"
         minSdk = 21
         targetSdk = 35
         versionCode = 3901
@@ -54,7 +54,7 @@ android {
             signingConfig = signingConfigs.getByName("debug")
             applicationIdSuffix = ".debug"
         }
-        base.archivesBaseName = "TypingResearchKeyboard_" + defaultConfig.versionName
+        base.archivesBaseName = "InputDynamicsKeyboard_" + defaultConfig.versionName
         // got a little too big for GitHub after some dependency upgrades, so we remove the largest dictionary
         androidComponents.onVariants { variant: ApplicationVariant ->
             if (variant.buildType == "debug") {

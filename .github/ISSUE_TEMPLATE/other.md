@@ -1,12 +1,13 @@
 ---
 name: Other
-about: Anything that does not fit into the other categories. Please don't use this for questions, discussions, or anything that fits into one of the other issue categories.
+about: Questions or maintenance tasks that do not fit another template
 ---
 
-Please see the appropriate readme section for issue reporting guidelines: https://github.com/Helium314/HeliBoard?tab=readme-ov-file#reporting-issues
-tl;dr:
-* search for duplicates, also in closed issues
-* a single issue per topic
-* ONLY add screenshots when necessary, and reduce their size
+Do not attach raw input dynamics logs, JSONL exports, status JSON files, APKs, or
+signing keys.
 
-<!-- please remove above text before submitting, and choose a meaningful title for your issue -->
+**Topic**
+
+**Details**
+
+**Relevant files or commands**

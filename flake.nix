@@ -1,5 +1,5 @@
 {
-  description = "Typing Research Keyboard Android development shell";
+  description = "Input Dynamics Keyboard Android development shell";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";

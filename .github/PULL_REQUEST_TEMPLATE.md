@@ -1,3 +1,22 @@
-Please make sure you are at least reasonably close to the contribution guidelines: https://github.com/Helium314/HeliBoard/blob/main/CONTRIBUTING.md#guidelines
-Due to maintainer availability, your PR may take quite some time to be addressed
-<!-- (please remove the text above before submitting the PR) -->
+## Summary
+
+-
+
+## Research Boundary
+
+- [ ] Keeps the project application-neutral.
+- [ ] Does not add Internet permission or automatic upload behavior.
+- [ ] Preserves password-class field suppression.
+- [ ] Does not include raw input dynamics logs, JSONL exports, APKs, or signing keys.
+
+## Validation
+
+Commands run:
+
+```bash
+
+```
+
+Notes:
+
+-

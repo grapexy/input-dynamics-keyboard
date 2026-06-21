@@ -9,8 +9,8 @@ labels, exported data, or documentation.
 
 ## Objective
 
-Build a consented Android IME research mode that records close-to-millisecond
-typing and touch dynamics from real human use.
+Build a consented Android IME input dynamics mode that records
+close-to-millisecond typing and touch dynamics from real human use.
 
 Primary measurements:
 
@@ -25,10 +25,10 @@ Primary measurements:
 
 Use neutral research naming:
 
-- Recommended Android `applicationId`: `org.typingresearch.ime`
-- Recommended app label: `Typing Research Keyboard`
+- Recommended Android `applicationId`: `org.inputdynamics.ime`
+- Recommended app label: `Input Dynamics Keyboard`
 - Recommended branch prefix: `research/`
-- Recommended schema prefix: `typing_event.v`
+- Recommended schema prefix: `input_dynamics_event.v`
 
 Do not use names tied to a particular service, product, or website.
 
@@ -44,7 +44,7 @@ Do not use names tied to a particular service, product, or website.
   later written protocol explicitly changes that.
 - Keep the app offline. Do not add Internet permission.
 - Export data manually through local Android storage/share flows.
-- Make collected JSONL pullable over ADB by default. Write research logs to
+- Make collected JSONL pullable over ADB by default. Write input dynamics logs to
   app-specific external storage with internal app-private storage only as a
   fallback when external storage is unavailable.
 - Keep raw exports out of git.
@@ -55,7 +55,7 @@ Keep changes small and auditable.
 
 Start with:
 
-1. A research logging toggle.
+1. An input dynamics logging toggle.
 2. Explicit session start/stop state.
 3. A JSONL writer in app-specific external storage.
 4. Touch-event instrumentation at the keyboard view / pointer tracker layer.
@@ -108,8 +108,8 @@ fields are the automatic suppression boundary.
 - Document every schema change in `docs/`.
 - Build and test the debug variant before installing on a device.
 - Expected release readback pattern:
-  `adb pull /sdcard/Android/data/org.typingresearch.ime/files/research_typing_logs/ .`
+  `adb pull /sdcard/Android/data/org.inputdynamics.ime/files/input_dynamics_logs/ .`
 - Expected debug readback pattern after the package rename:
-  `adb pull /sdcard/Android/data/org.typingresearch.ime.debug/files/research_typing_logs/ .`
+  `adb pull /sdcard/Android/data/org.inputdynamics.ime.debug/files/input_dynamics_logs/ .`
   Internal fallback files, if any, can still be inspected with
-  `adb shell run-as org.typingresearch.ime.debug ls files/research_typing_logs`.
+  `adb shell run-as org.inputdynamics.ime.debug ls files/input_dynamics_logs`.

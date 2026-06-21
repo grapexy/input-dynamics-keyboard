@@ -17,3 +17,17 @@ tools/*.txt
 *.patch
 *.diff
 *.sh
+
+# Local research exports and command status files.
+input_dynamics_logs/
+**/input_dynamics_logs/
+session-*.jsonl
+*.jsonl
+input_dynamics_control_status.json
+
+# Packaged Android artifacts and signing material.
+*.apk
+*.aab
+*.apks
+*.jks
+*.keystore

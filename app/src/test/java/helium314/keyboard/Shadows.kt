@@ -29,8 +29,8 @@ class ShadowInputMethodManager2 : ShadowInputMethodManager() {
     @Implementation
     override fun getInputMethodList() = listOf(
         if (BuildConfig.BUILD_TYPE == "debug" || BuildConfig.BUILD_TYPE == "debugNoMinify")
-            InputMethodInfo("org.typingresearch.ime.debug", "LatinIME", "Typing Research Keyboard debug", null)
-        else InputMethodInfo("org.typingresearch.ime", "LatinIME", "Typing Research Keyboard", null),
+            InputMethodInfo("org.inputdynamics.ime.debug", "LatinIME", "Input Dynamics Keyboard debug", null)
+        else InputMethodInfo("org.inputdynamics.ime", "LatinIME", "Input Dynamics Keyboard", null),
     )
     @Implementation
     fun getShortcutInputMethodsAndSubtypes() = emptyMap<InputMethodInfo, List<InputMethodSubtype>>()

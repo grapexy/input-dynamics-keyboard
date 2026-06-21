@@ -3,10 +3,10 @@
     SPDX-License-Identifier: GPL-3.0-only
 -->
 <resources>
-    <string name="english_ime_name" translatable="false">Typing Research Keyboard debug</string>
-    <string name="research_spell_checker_service_name" translatable="false">Typing Research Keyboard debug Spell Checker</string>
-    <string name="research_ime_settings" translatable="false">Typing Research Keyboard debug Settings</string>
-    <string name="research_android_spell_checker_settings" translatable="false">Typing Research Keyboard debug Spell Checker Settings</string>
-    <string name="spell_checker_service_name" translatable="false">Typing Research Keyboard debug Spell Checker</string>
-    <string name="ime_settings" translatable="false">Typing Research Keyboard debug Settings</string>
+    <string name="english_ime_name" translatable="false">Input Dynamics Keyboard debug</string>
+    <string name="research_spell_checker_service_name" translatable="false">Input Dynamics Keyboard debug Spell Checker</string>
+    <string name="research_ime_settings" translatable="false">Input Dynamics Keyboard debug Settings</string>
+    <string name="research_android_spell_checker_settings" translatable="false">Input Dynamics Keyboard debug Spell Checker Settings</string>
+    <string name="spell_checker_service_name" translatable="false">Input Dynamics Keyboard debug Spell Checker</string>
+    <string name="ime_settings" translatable="false">Input Dynamics Keyboard debug Settings</string>
 </resources>

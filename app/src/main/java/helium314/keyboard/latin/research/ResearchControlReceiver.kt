@@ -1,0 +1,150 @@
+// SPDX-License-Identifier: GPL-3.0-only
+package helium314.keyboard.latin.research
+
+import android.app.Activity
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.os.Bundle
+import org.json.JSONObject
+
+open class ResearchControlReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        val appContext = context.applicationContext
+        val action = intent.action.orEmpty()
+        val command = action.substringAfterLast('.', action).lowercase()
+        val result = handleCommand(appContext, action, intent)
+        ResearchSessionLogger.waitForPendingWrites()
+        val status = ResearchSessionLogger.controlStatusJson(
+            appContext,
+            command = command,
+            ok = result.ok,
+            message = result.message,
+            includeLogs = result.includeLogs,
+            extraFields = result.extraFields,
+        )
+        ResearchSessionLogger.writeControlStatusJson(appContext, status)
+        publishResult(status, result.ok)
+    }
+
+    private fun handleCommand(context: Context, action: String, intent: Intent): CommandResult =
+        when (action) {
+            ACTION_ENABLE -> {
+                ResearchSessionLogger.setEnabled(context, true)
+                CommandResult(message = "input dynamics logging enabled")
+            }
+            ACTION_DISABLE -> {
+                val stoppedSessionId = if (ResearchSessionLogger.isSessionActive(context)) {
+                    ResearchSessionLogger.stopSession(context)
+                } else {
+                    null
+                }
+                ResearchSessionLogger.setEnabled(context, false)
+                CommandResult(
+                    message = "input dynamics logging disabled",
+                    extraFields = mapOf("stopped_session_id" to stoppedSessionId)
+                )
+            }
+            ACTION_START -> {
+                if (!ResearchSessionLogger.isEnabled(context)) {
+                    CommandResult(
+                        ok = false,
+                        message = "input dynamics logging is disabled; run ENABLE before START"
+                    )
+                } else {
+                    val stoppedSessionId = if (ResearchSessionLogger.isSessionActive(context)) {
+                        ResearchSessionLogger.stopSession(context)
+                    } else {
+                        null
+                    }
+                    ResearchSessionLogger.waitForPendingWrites()
+                    val externalRunId = intent.getStringExtra(EXTRA_RUN_ID)
+                        ?.trim()
+                        ?.takeIf { it.isNotEmpty() }
+                    val sessionId = ResearchSessionLogger.startSession(context, externalRunId)
+                    CommandResult(
+                        message = "input dynamics session started",
+                        extraFields = mapOf(
+                            "started_session_id" to sessionId,
+                            "stopped_previous_session_id" to stoppedSessionId
+                        )
+                    )
+                }
+            }
+            ACTION_STOP -> {
+                val stoppedSessionId = if (ResearchSessionLogger.isSessionActive(context)) {
+                    ResearchSessionLogger.stopSession(context)
+                } else {
+                    null
+                }
+                CommandResult(
+                    message = if (stoppedSessionId == null) {
+                        "no active input dynamics session"
+                    } else {
+                        "input dynamics session stopped"
+                    },
+                    extraFields = mapOf("stopped_session_id" to stoppedSessionId)
+                )
+            }
+            ACTION_STATUS -> CommandResult(message = "input dynamics logging status")
+            ACTION_KEYBOARD_LAYOUT -> CommandResult(
+                message = "input dynamics keyboard layout",
+                extraFields = mapOf(
+                    "keyboard_layout" to ResearchKeyboardLayoutSnapshot.currentLayoutJson(context)
+                )
+            )
+            ACTION_LIST_LOGS -> CommandResult(
+                message = "input dynamics log list",
+                includeLogs = true
+            )
+            ACTION_CLEAR_LOGS -> {
+                if (ResearchSessionLogger.isSessionActive(context)) {
+                    CommandResult(
+                        ok = false,
+                        message = "cannot clear logs while an input dynamics session is active"
+                    )
+                } else {
+                    val deleted = ResearchSessionLogger.deleteAllLogs(context)
+                    CommandResult(
+                        message = "input dynamics logs cleared",
+                        extraFields = mapOf("deleted_log_count" to deleted),
+                        includeLogs = true
+                    )
+                }
+            }
+            else -> CommandResult(
+                ok = false,
+                message = "unknown input dynamics control action"
+            )
+        }
+
+    private fun publishResult(status: JSONObject, ok: Boolean) {
+        if (!isOrderedBroadcast) return
+        val statusString = status.toString()
+        setResultCode(if (ok) Activity.RESULT_OK else Activity.RESULT_CANCELED)
+        setResultData(statusString)
+        setResultExtras(Bundle().apply {
+            putString(EXTRA_STATUS_JSON, statusString)
+        })
+    }
+
+    private data class CommandResult(
+        val ok: Boolean = true,
+        val message: String,
+        val includeLogs: Boolean = false,
+        val extraFields: Map<String, Any?> = emptyMap(),
+    )
+
+    companion object {
+        const val ACTION_ENABLE = "org.inputdynamics.ime.action.ENABLE"
+        const val ACTION_DISABLE = "org.inputdynamics.ime.action.DISABLE"
+        const val ACTION_START = "org.inputdynamics.ime.action.START"
+        const val ACTION_STOP = "org.inputdynamics.ime.action.STOP"
+        const val ACTION_STATUS = "org.inputdynamics.ime.action.STATUS"
+        const val ACTION_KEYBOARD_LAYOUT = "org.inputdynamics.ime.action.KEYBOARD_LAYOUT"
+        const val ACTION_LIST_LOGS = "org.inputdynamics.ime.action.LIST_LOGS"
+        const val ACTION_CLEAR_LOGS = "org.inputdynamics.ime.action.CLEAR_LOGS"
+        const val EXTRA_RUN_ID = "run_id"
+        const val EXTRA_STATUS_JSON = "status_json"
+    }
+}

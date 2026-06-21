@@ -1,32 +1,24 @@
 ---
 name: Feature request
-about: Suggest an idea for this project
+about: Suggest a research-fork improvement
 labels: enhancement
 ---
 
-Please see the appropriate readme section for issue reporting guidelines: https://github.com/Helium314/HeliBoard?tab=readme-ov-file#reporting-issues
-tl;dr:
-* search for duplicates, also in closed issues
-* check FAQ / hidden features
-* a single issue per topic
-* ONLY add screenshots when necessary, and reduce their size
+Do not include raw research data in public issues.
 
-<!--
-issue template below, please remove above text before submitting (and the template too if you think it's a good idea)
-Please choose a meaningful title for your issue
--->
+**Problem**
 
-<!-- Please check FAQ and hidden features whether what you want is already implemented -->
+**Proposed change**
 
-**Is your feature request related to a problem? Please describe.**
+**Research value**
 
-**Describe the solution you'd like**
-Please provide a description of what you would like to have. The clearer it is described, the better it can be implemented the way you want it.
+**Privacy and safety boundary**
 
-**Use case**
-Provide a clear and concise description of *your use case* and what you thus think is missing, and why.
+Explain how this preserves:
 
-**Describe alternatives you've considered (if any)**
+- application-neutral naming
+- no Internet permission
+- password-class field suppression
+- local-only storage/export
 
-**App version**
-Please provide the explicit version, you're using.
+**Validation approach**

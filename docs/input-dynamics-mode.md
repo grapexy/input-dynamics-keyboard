@@ -1,0 +1,151 @@
+# Input Dynamics Mode
+
+Input Dynamics Keyboard is a local Android IME research fork for measuring
+real human soft-keyboard interaction timing.
+
+The project is application-neutral and focused on local keyboard
+instrumentation.
+
+## Purpose
+
+The input dynamics mode records consented typing interaction traces from real Android
+keyboard use so timing and touch behavior can be studied empirically.
+
+Primary measurements include:
+
+- key press and release timing
+- hold time and flight time
+- touch position within key bounds
+- pointer pressure and size when available
+- correction actions such as backspace, space, enter, and suggestion taps
+- session-level cadence and pause structure
+
+## Privacy Boundary
+
+Use this keyboard only in consented, local research settings.
+
+- The app is offline and must not request Internet permission.
+- Logs are written locally; there is no automatic upload path.
+- Password-class fields are the hard automatic suppression boundary.
+- Non-password fields remain in scope and may include typed content, key labels,
+  output text, input app package context, timing, and touch geometry.
+- Raw JSONL exports are sensitive research data and must stay out of git,
+  public issues, screenshots, and public logs unless a written protocol
+  explicitly allows sharing.
+
+Password-class fields include password, visible password, web password, and
+number password variations. Other ordinary non-password field types remain in
+scope unless a written protocol changes that.
+
+## Event Sources
+
+Input dynamics timing uses Android input timestamps from touch events:
+
+- `MotionEvent.getEventTime()` for millisecond event time in uptime base
+- `MotionEvent.getDownTime()` for gesture start time
+- `MotionEvent.getHistoricalEventTime()` for coalesced move history
+- `MotionEvent.getPressure()` and `MotionEvent.getSize()` when available
+
+Millisecond event time is the primary comparable signal.
+
+## Event Types
+
+Implemented event types:
+
+- `session_start`
+- `session_stop`
+- `field_enter`
+- `field_exit`
+- `pointer_sample`
+- `key_down`
+- `key_up`
+- `key_commit`
+- `key_repeat`
+- `key_long_press`
+- `key_cancel`
+
+Key records use `key_class` values such as `letter`, `digit`, `symbol`,
+`space`, `enter`, `delete`, `modifier`, `action`, and `function`.
+
+## JSONL Schema
+
+Logs are newline-delimited JSON. Every record has:
+
+- `schema`
+- `session_id`
+- `external_run_id`
+- `event`
+- `t_wall_ms`
+- `t_uptime_ms`
+
+The current schema value is:
+
+```text
+input_dynamics_event.v1
+```
+
+Input-scoped non-password records can also include:
+
+- `t_event_uptime_ms`
+- `pointer_id`
+- `key_code`
+- `key_code_printable`
+- `key_label`
+- `key_hint_label`
+- `key_preview_label`
+- `key_output_text`
+- `key_icon_name`
+- `key_alt_code`
+- `key_popup_keys`
+- `key_class`
+- `x_px`
+- `y_px`
+- `key_touch_x_ratio`
+- `key_touch_y_ratio`
+- `key_center_offset_x_px`
+- `key_center_offset_y_px`
+- `pressure`
+- `size`
+- `target_package`
+- `input_type_class`
+- `input_type_variation`
+- `password_field`
+
+`target_package` is the Android package name reported for the app that owns the
+current input field. It is useful for session provenance and layout/input-type
+debugging, and should be treated as sensitive context in exports.
+
+`session_id` is generated internally for each logging session.
+`external_run_id` is optional caller-provided metadata for coordinating local
+runs; when present, it is copied to every JSONL record in that session.
+
+Example record:
+
+```json
+{"schema":"input_dynamics_event.v1","session_id":"20260621-102007-197e66cd","external_run_id":"run-YYYYMMDD-HHMMSS-human-android","event":"key_down","t_wall_ms":1782037207000,"t_uptime_ms":67690000,"t_event_uptime_ms":67689950,"target_package":"org.example.input","key_code":97,"key_label":"a","key_output_text":null,"key_class":"letter","key_touch_x_ratio":0.52,"key_touch_y_ratio":0.44,"password_field":false}
+```
+
+## Storage
+
+Input dynamics logs are written to app-specific external storage by default:
+
+```text
+/sdcard/Android/data/org.inputdynamics.ime/files/input_dynamics_logs/
+/sdcard/Android/data/org.inputdynamics.ime.debug/files/input_dynamics_logs/
+```
+
+Each session writes a file named:
+
+```text
+session-<session_id>.jsonl
+```
+
+The ADB control surface also writes:
+
+```text
+input_dynamics_control_status.json
+```
+
+If app-specific external storage is unavailable, the logger falls back to
+internal app-private storage. `adb shell run-as` access to fallback files is
+normally limited to debuggable builds.

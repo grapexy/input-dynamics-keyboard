@@ -10,6 +10,7 @@ import androidx.core.content.edit
 import helium314.keyboard.keyboard.Key
 import helium314.keyboard.keyboard.internal.PopupKeySpec
 import helium314.keyboard.keyboard.internal.keyboard_parser.floris.KeyCode
+import helium314.keyboard.latin.BuildConfig
 import helium314.keyboard.latin.InputAttributes
 import helium314.keyboard.latin.common.Constants
 import helium314.keyboard.latin.utils.prefs
@@ -17,6 +18,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.util.concurrent.TimeUnit
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -25,11 +27,14 @@ import java.util.UUID
 import java.util.concurrent.Executors
 
 object ResearchSessionLogger {
-    const val PREF_ENABLED = "research_logging_enabled"
-    private const val PREF_ACTIVE = "research_logging_session_active"
-    private const val PREF_SESSION_ID = "research_logging_session_id"
-    private const val LOG_DIR_NAME = "research_typing_logs"
-    private const val SCHEMA = "typing_event.v1"
+    const val PREF_ENABLED = "input_dynamics_logging_enabled"
+    private const val PREF_ACTIVE = "input_dynamics_logging_session_active"
+    private const val PREF_SESSION_ID = "input_dynamics_logging_session_id"
+    private const val PREF_EXTERNAL_RUN_ID = "input_dynamics_logging_external_run_id"
+    private const val LOG_DIR_NAME = "input_dynamics_logs"
+    private const val CONTROL_STATUS_FILE_NAME = "input_dynamics_control_status.json"
+    private const val SCHEMA = "input_dynamics_event.v1"
+    private const val CHEAP_RECORD_COUNT_MAX_BYTES = 10L * 1024L * 1024L
 
     private val ioExecutor = Executors.newSingleThreadExecutor()
     @Volatile private var appContext: Context? = null
@@ -46,7 +51,7 @@ object ResearchSessionLogger {
         if (!enabled && isSessionActive(applicationContext)) {
             stopSession(applicationContext)
         }
-        applicationContext.prefs().edit { putBoolean(PREF_ENABLED, enabled) }
+        applicationContext.prefs().edit(commit = true) { putBoolean(PREF_ENABLED, enabled) }
     }
 
     @JvmStatic
@@ -58,24 +63,39 @@ object ResearchSessionLogger {
         context.prefs().getString(PREF_SESSION_ID, null)
 
     @JvmStatic
-    fun startSession(context: Context): String {
+    fun currentExternalRunId(context: Context): String? =
+        context.prefs().getString(PREF_EXTERNAL_RUN_ID, null)
+
+    @JvmStatic
+    @JvmOverloads
+    fun startSession(context: Context, externalRunId: String? = null): String {
         val appContext = rememberContext(context)
+        if (isSessionActive(appContext)) {
+            stopSession(appContext)
+        }
         val sessionId = newSessionId()
-        appContext.prefs().edit {
+        val normalizedExternalRunId = externalRunId?.trim()?.takeIf { it.isNotEmpty() }
+        appContext.prefs().edit(commit = true) {
             putBoolean(PREF_ACTIVE, true)
             putString(PREF_SESSION_ID, sessionId)
+            if (normalizedExternalRunId == null) {
+                remove(PREF_EXTERNAL_RUN_ID)
+            } else {
+                putString(PREF_EXTERNAL_RUN_ID, normalizedExternalRunId)
+            }
         }
-        appendLifecycleEvent(appContext, sessionId, "session_start")
+        appendLifecycleEvent(appContext, SessionSnapshot(sessionId, normalizedExternalRunId), "session_start")
         return sessionId
     }
 
     @JvmStatic
     fun stopSession(context: Context): String? {
         val appContext = rememberContext(context)
-        val sessionId = currentSessionId(appContext) ?: return null
-        appendLifecycleEvent(appContext, sessionId, "session_stop")
-        appContext.prefs().edit { putBoolean(PREF_ACTIVE, false) }
-        return sessionId
+        if (!isSessionActive(appContext)) return null
+        val session = currentSessionSnapshot(appContext) ?: return null
+        appendLifecycleEvent(appContext, session, "session_stop")
+        appContext.prefs().edit(commit = true) { putBoolean(PREF_ACTIVE, false) }
+        return session.sessionId
     }
 
     @JvmStatic
@@ -108,7 +128,7 @@ object ResearchSessionLogger {
     fun logMotionEvent(context: Context, event: MotionEvent) {
         val appContext = rememberContext(context)
         if (!canLogInputEvent(appContext)) return
-        val sessionId = currentSessionId(appContext) ?: return
+        val session = currentSessionSnapshot(appContext) ?: return
         val actionMasked = event.actionMasked
         val actionName = motionActionName(actionMasked)
         val pointerCount = event.pointerCount
@@ -143,7 +163,7 @@ object ResearchSessionLogger {
             ))
         }
 
-        appendEvents(appContext, sessionId, records, includeFieldState = true)
+        appendEvents(appContext, session, records, includeFieldState = true)
     }
 
     @JvmStatic
@@ -157,7 +177,7 @@ object ResearchSessionLogger {
     ) {
         val appContext = this.appContext ?: return
         if (!canLogInputEvent(appContext)) return
-        val sessionId = currentSessionId(appContext) ?: return
+        val session = currentSessionSnapshot(appContext) ?: return
         val fields = mutableMapOf<String, Any?>(
             "pointer_id" to pointerId,
             "t_event_uptime_ms" to eventTime,
@@ -229,7 +249,7 @@ object ResearchSessionLogger {
                 "key_popup_keys" to popupKeysJson(popupKeys)
             )
         }
-        appendEvent(appContext, sessionId, event, fields, includeFieldState = true)
+        appendEvent(appContext, session, event, fields, includeFieldState = true)
     }
 
     @JvmStatic
@@ -241,8 +261,8 @@ object ResearchSessionLogger {
     fun logEvent(context: Context, event: String, fields: Map<String, Any?>) {
         val appContext = rememberContext(context)
         if (!canLogInputEvent(appContext)) return
-        val sessionId = currentSessionId(appContext) ?: return
-        appendEvent(appContext, sessionId, event, fields, includeFieldState = true)
+        val session = currentSessionSnapshot(appContext) ?: return
+        appendEvent(appContext, session, event, fields, includeFieldState = true)
     }
 
     fun logDirectory(context: Context): File =
@@ -264,20 +284,94 @@ object ResearchSessionLogger {
         return deleted
     }
 
-    private fun appendLifecycleEvent(context: Context, sessionId: String, event: String) {
-        appendEvent(context, sessionId, event, emptyMap(), includeFieldState = false)
+    fun waitForPendingWrites(timeoutMs: Long = 2_000): Boolean =
+        runCatching {
+            ioExecutor.submit<Unit> { }.get(timeoutMs, TimeUnit.MILLISECONDS)
+            true
+        }.getOrDefault(false)
+
+    fun controlStatusJson(
+        context: Context,
+        command: String? = null,
+        ok: Boolean = true,
+        message: String? = null,
+        includeLogs: Boolean = false,
+        extraFields: Map<String, Any?> = emptyMap(),
+    ): JSONObject {
+        val appContext = rememberContext(context)
+        val active = isSessionActive(appContext)
+        val lastSessionId = currentSessionId(appContext)
+        val externalRunId = currentExternalRunId(appContext)
+        val logDirectory = logDirectory(appContext)
+        val currentLogFile = if (active && lastSessionId != null) {
+            File(logDirectory, "session-$lastSessionId.jsonl")
+        } else {
+            null
+        }
+        val lastLogFile = currentLogFile ?: listLogFiles(appContext).firstOrNull()
+        val packageInfo = appContext.packageManager.getPackageInfo(appContext.packageName, 0)
+        val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            packageInfo.longVersionCode
+        } else {
+            @Suppress("DEPRECATION")
+            packageInfo.versionCode.toLong()
+        }
+        val statusFile = File(logDirectory, CONTROL_STATUS_FILE_NAME)
+        val json = JSONObject()
+            .put("package_name", appContext.packageName)
+            .put("version_name", packageInfo.versionName ?: BuildConfig.VERSION_NAME)
+            .put("version_code", versionCode)
+            .put("build_variant", BuildConfig.BUILD_TYPE)
+            .put("debug", BuildConfig.DEBUG)
+            .put("enabled", isEnabled(appContext))
+            .put("active", active)
+            .put("current_session_id", jsonValue(if (active) lastSessionId else null))
+            .put("last_session_id", jsonValue(lastSessionId))
+            .put("external_run_id", jsonValue(externalRunId))
+            .put("log_directory", logDirectory.absolutePath)
+            .put("current_log_file_path", jsonValue(currentLogFile?.absolutePath))
+            .put("last_log_file_path", jsonValue(lastLogFile?.absolutePath))
+            .put("record_count", jsonValue(recordCountIfCheap(lastLogFile)))
+            .put("status_file_path", statusFile.absolutePath)
+            .put("log_file_count", listLogFiles(appContext).size)
+            .put("t_wall_ms", System.currentTimeMillis())
+            .put("t_uptime_ms", SystemClock.uptimeMillis())
+            .put("ok", ok)
+            .put("command", jsonValue(command))
+            .put("message", jsonValue(message))
+
+        if (includeLogs) {
+            json.put("log_files", logFilesJson(appContext))
+        }
+        extraFields.forEach { (key, value) ->
+            json.put(key, jsonValue(value))
+        }
+        return json
+    }
+
+    fun writeControlStatusJson(context: Context, status: JSONObject): File {
+        val file = File(logDirectory(context), CONTROL_STATUS_FILE_NAME)
+        FileOutputStream(file, false).use { output ->
+            output.write(status.toString(2).toByteArray(Charsets.UTF_8))
+            output.write('\n'.code)
+        }
+        return file
+    }
+
+    private fun appendLifecycleEvent(context: Context, session: SessionSnapshot, event: String) {
+        appendEvent(context, session, event, emptyMap(), includeFieldState = false)
     }
 
     private fun appendEvent(
         context: Context,
-        sessionId: String,
+        session: SessionSnapshot,
         event: String,
         fields: Map<String, Any?>,
         includeFieldState: Boolean
     ) {
         appendEvents(
             context,
-            sessionId,
+            session,
             listOf(PendingEvent(event, fields)),
             includeFieldState
         )
@@ -285,7 +379,7 @@ object ResearchSessionLogger {
 
     private fun appendEvents(
         context: Context,
-        sessionId: String,
+        session: SessionSnapshot,
         events: List<PendingEvent>,
         includeFieldState: Boolean
     ) {
@@ -294,12 +388,13 @@ object ResearchSessionLogger {
         val fieldSnapshot = if (includeFieldState) fieldSnapshot() else null
         ioExecutor.execute {
             val target = resolveLogDirectory(appContext)
-            val file = File(target.directory, "session-$sessionId.jsonl")
+            val file = File(target.directory, "session-${session.sessionId}.jsonl")
             FileOutputStream(file, true).use { output ->
                 events.forEach { event ->
                     val record = JSONObject()
                         .put("schema", SCHEMA)
-                        .put("session_id", sessionId)
+                        .put("session_id", session.sessionId)
+                        .put("external_run_id", jsonValue(session.externalRunId))
                         .put("event", event.name)
                         .put("t_wall_ms", System.currentTimeMillis())
                         .put("t_uptime_ms", SystemClock.uptimeMillis())
@@ -423,6 +518,11 @@ object ResearchSessionLogger {
     private fun canLogInputEvent(context: Context): Boolean =
         isEnabled(context) && isSessionActive(context) && knownNonPasswordField
 
+    private fun currentSessionSnapshot(context: Context): SessionSnapshot? {
+        val sessionId = currentSessionId(context) ?: return null
+        return SessionSnapshot(sessionId, currentExternalRunId(context))
+    }
+
     private fun fieldSnapshot(): FieldSnapshot? {
         val inputAttributes = currentInputAttributes ?: return null
         if (!knownNonPasswordField) return null
@@ -442,6 +542,39 @@ object ResearchSessionLogger {
             is Boolean, is Number, is String, is JSONObject, is JSONArray -> value
             else -> value.toString()
         }
+
+    private fun logFilesJson(context: Context): JSONArray {
+        val files = listLogFiles(context)
+        val array = JSONArray()
+        files.forEach { file ->
+            array.put(
+                JSONObject()
+                    .put("name", file.name)
+                    .put("path", file.absolutePath)
+                    .put("bytes", file.length())
+                    .put("last_modified_ms", file.lastModified())
+                    .put("record_count", jsonValue(recordCountIfCheap(file)))
+            )
+        }
+        return array
+    }
+
+    private fun recordCountIfCheap(file: File?): Long? {
+        if (file == null || !file.exists() || !file.isFile) return null
+        if (file.length() > CHEAP_RECORD_COUNT_MAX_BYTES) return null
+        var count = 0L
+        file.inputStream().buffered().use { input ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val read = input.read(buffer)
+                if (read <= 0) break
+                for (index in 0 until read) {
+                    if (buffer[index] == '\n'.code.toByte()) count++
+                }
+            }
+        }
+        return count
+    }
 
     private fun motionActionName(action: Int): String =
         when (action) {
@@ -525,6 +658,11 @@ object ResearchSessionLogger {
     private data class LogDirectory(
         val directory: File,
         val external: Boolean
+    )
+
+    private data class SessionSnapshot(
+        val sessionId: String,
+        val externalRunId: String?
     )
 
     private data class PendingEvent(

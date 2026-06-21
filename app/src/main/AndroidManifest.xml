@@ -107,6 +107,12 @@ SPDX-License-Identifier: Apache-2.0 AND GPL-3.0-only
             </intent-filter>
         </receiver>
 
+        <receiver
+            android:name="${applicationId}.control.InputDynamicsControlReceiver"
+            android:exported="true"
+            android:directBootAware="false"
+            android:permission="android.permission.DUMP" />
+
         <!-- necessary for sending mail attachments, remove when data gathering phase is done (end of 2026 latest) -->
         <provider android:name="helium314.keyboard.settings.screens.gesturedata.GestureFileProvider"
             android:authorities="@string/gesture_data_provider_authority"

@@ -9,11 +9,11 @@
     xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2"
     tools:ignore="MissingTranslation">
     <!-- Name of Android spell checker service. The app name should not be translated. -->
-    <string name="spell_checker_service_name">Typing Research Keyboard Spell Checker</string>
+    <string name="spell_checker_service_name">Input Dynamics Keyboard Spell Checker</string>
     <!-- Title for IME settings screen. The app name should not be translated. -->
-    <string name="ime_settings">Typing Research Keyboard Settings</string>
+    <string name="ime_settings">Input Dynamics Keyboard Settings</string>
     <!-- Title for the spell checking service settings screen. The app name should not be translated. -->
-    <string name="android_spell_checker_settings">Typing Research Keyboard Spell Checker Settings</string>
+    <string name="android_spell_checker_settings">Input Dynamics Keyboard Spell Checker Settings</string>
     <!-- Option to provide vibrate/haptic feedback on keypress -->
     <string name="vibrate_on_keypress">Vibrate on keypress</string>
     <!-- Option to provide vibrate/haptic feedback on keypress even in do not disturb mode -->

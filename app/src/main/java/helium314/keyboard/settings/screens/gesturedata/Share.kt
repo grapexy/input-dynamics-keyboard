@@ -254,4 +254,4 @@ private var gestureIdsBeingExported: List<Long>? = null
 
 private var zippedDataPath = "" // set after writing the file
 
-private const val MAIL_SUBJECT = "Typing Research Keyboard ${BuildConfig.VERSION_NAME} gesture data"
+private const val MAIL_SUBJECT = "Input Dynamics Keyboard ${BuildConfig.VERSION_NAME} gesture data"
