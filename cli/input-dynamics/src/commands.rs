@@ -91,6 +91,10 @@ pub(crate) fn run_command(app: &App, cli_command: Commands) -> CliResult<Value> 
         } => session(app, session_command),
         Commands::Tap { label, code } => tap_key(app, label.as_deref(), code),
         Commands::Press { key } => press_key(app, key),
+        Commands::Type {
+            text,
+            inter_key_delay_ms,
+        } => type_text(app, &text, inter_key_delay_ms),
         Commands::Touch {
             command: touch_command,
         } => touch(app, &touch_command),
@@ -680,6 +684,61 @@ fn press_key(app: &App, key: PressKey) -> CliResult<Value> {
     Ok(result)
 }
 
+fn type_text(app: &App, text: &str, inter_key_delay_ms: u64) -> CliResult<Value> {
+    let input_status = controller::status(app)?;
+    if !input_status
+        .get("active")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err(CliError::new(
+            "no active input session; run `input-dynamics session start --run-id <id>`",
+        ));
+    }
+
+    let layout_result = app.broadcast("KEYBOARD_LAYOUT", Vec::new())?;
+    let plan = planned_type_steps(app, &layout_result, text)?;
+    let total_steps = plan.steps.len();
+    let mut typed = Vec::with_capacity(total_steps);
+    for (step_index, step) in plan.steps.iter().enumerate() {
+        let touch_output = controller::tap(app, TapSpec::new(step.x, step.y))?;
+        let touch_ok = touch_output
+            .get("ok")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        typed.push(step.to_json(&touch_output));
+        if !touch_ok {
+            return Ok(json!({
+                "ok": false,
+                "package_name": app.package(),
+                "input_backend": "uinput",
+                "error": "touch controller rejected type step",
+                "failed_step_index": step_index,
+                "typed_count": typed.len(),
+                "text_char_count": total_steps,
+                "inter_key_delay_ms": inter_key_delay_ms,
+                "layout_refresh_count": plan.layout_refresh_count,
+                "typed": typed,
+            }));
+        }
+        if step_index < total_steps.saturating_sub(1) && inter_key_delay_ms > 0 {
+            std::thread::sleep(Duration::from_millis(inter_key_delay_ms));
+        }
+    }
+
+    Ok(json!({
+        "ok": true,
+        "package_name": app.package(),
+        "input_backend": "uinput",
+        "text_char_count": total_steps,
+        "typed_count": typed.len(),
+        "inter_key_delay_ms": inter_key_delay_ms,
+        "input_cadence_policy": "fixed_inter_key_delay",
+        "layout_refresh_count": plan.layout_refresh_count,
+        "typed": typed,
+    }))
+}
+
 fn touch(app: &App, command: &TouchCommand) -> CliResult<Value> {
     match *command {
         TouchCommand::Doctor => uinput::doctor(app),
@@ -834,6 +893,28 @@ enum LayoutWait {
     Hidden,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum TypeKeyTarget {
+    Label(String),
+    Code(i64),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PlannedTypeStep {
+    char_index: usize,
+    target: TypeKeyTarget,
+    x: i32,
+    y: i32,
+    key_code: Option<i64>,
+    key_class: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PlannedTypeSteps {
+    steps: Vec<PlannedTypeStep>,
+    layout_refresh_count: u64,
+}
+
 impl LayoutWait {
     const fn description(self) -> &'static str {
         match self {
@@ -890,45 +971,178 @@ fn tap_key(app: &App, label: Option<&str>, code: Option<i64>) -> CliResult<Value
     }
 
     let layout_result = app.broadcast("KEYBOARD_LAYOUT", Vec::new())?;
-    let layout = layout_result
-        .get("keyboard_layout")
-        .ok_or_else(|| CliError::new("keyboard_layout was not present"))?;
-    let available = layout
-        .get("available")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    if !available {
-        return Err(CliError::new("keyboard layout is not available"));
-    }
-
-    let keys = layout
-        .get("keys")
-        .and_then(Value::as_array)
-        .ok_or_else(|| CliError::new("keyboard_layout.keys was not an array"))?;
-    let key = keys
-        .iter()
-        .find(|candidate| key_matches(candidate, label, code))
-        .ok_or_else(|| CliError::new("requested key was not found in keyboard layout"))?;
-    let x_arg = key
-        .get("tap_center_screen_x_px")
-        .and_then(json_number_to_shell_arg)
-        .ok_or_else(|| CliError::new("key is missing tap_center_screen_x_px"))?;
-    let y_arg = key
-        .get("tap_center_screen_y_px")
-        .and_then(json_number_to_shell_arg)
-        .ok_or_else(|| CliError::new("key is missing tap_center_screen_y_px"))?;
-    let x = parse_tap_coordinate(&x_arg, "x")?;
-    let y = parse_tap_coordinate(&y_arg, "y")?;
+    let layout = keyboard_layout_value(&layout_result)?;
+    ensure_keyboard_layout_available(layout)?;
+    let key = resolve_layout_key(layout, label, code)?;
+    let x = key_tap_coordinate(key, "x")?;
+    let y = key_tap_coordinate(key, "y")?;
 
     let touch_output = controller::tap(app, TapSpec::new(x, y))?;
+    let touch_ok = touch_output
+        .get("ok")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
 
     Ok(json!({
-        "ok": true,
+        "ok": touch_ok,
         "package_name": app.package(),
         "input_backend": "uinput",
         "key": key,
         "touch": touch_output,
     }))
+}
+
+fn planned_type_steps(
+    app: &App,
+    initial_layout_result: &Value,
+    text: &str,
+) -> CliResult<PlannedTypeSteps> {
+    let mut layout_result = initial_layout_result.clone();
+    let mut layout_refresh_count = 0_u64;
+    let mut steps = Vec::with_capacity(text.chars().count());
+    for (char_index, character) in text.chars().enumerate() {
+        let step_result = planned_type_step(&layout_result, char_index, character);
+        let step = match step_result {
+            Ok(step) => step,
+            Err(first_error) => {
+                layout_result = app.broadcast("KEYBOARD_LAYOUT", Vec::new())?;
+                layout_refresh_count = layout_refresh_count.saturating_add(1);
+                planned_type_step(&layout_result, char_index, character).map_err(
+                    |second_error| {
+                        CliError::new(format!(
+                            "{first_error}; after layout refresh: {second_error}"
+                        ))
+                    },
+                )?
+            }
+        };
+        steps.push(step);
+    }
+    Ok(PlannedTypeSteps {
+        steps,
+        layout_refresh_count,
+    })
+}
+
+fn planned_type_step(
+    layout_result: &Value,
+    char_index: usize,
+    character: char,
+) -> CliResult<PlannedTypeStep> {
+    let target = type_key_target(character, char_index)?;
+    let layout = keyboard_layout_value(layout_result)?;
+    ensure_keyboard_layout_available(layout)?;
+    let key = match target {
+        TypeKeyTarget::Label(ref label) => resolve_layout_key(layout, Some(label.as_str()), None),
+        TypeKeyTarget::Code(code) => resolve_layout_key(layout, None, Some(code)),
+    }
+    .map_err(|error| {
+        CliError::new(format!(
+            "unsupported character at index {char_index}: {}: {error}",
+            character_description(character)
+        ))
+    })?;
+    Ok(PlannedTypeStep {
+        char_index,
+        target,
+        x: key_tap_coordinate(key, "x")?,
+        y: key_tap_coordinate(key, "y")?,
+        key_code: key.get("key_code").and_then(Value::as_i64),
+        key_class: key
+            .get("key_class")
+            .and_then(Value::as_str)
+            .map(String::from),
+    })
+}
+
+fn type_key_target(character: char, char_index: usize) -> CliResult<TypeKeyTarget> {
+    if character == ' ' {
+        return Ok(TypeKeyTarget::Code(press_key_code(PressKey::Space)));
+    }
+    if character.is_control() || character.is_whitespace() {
+        return Err(CliError::new(format!(
+            "unsupported character at index {char_index}: {}; type supports visible layout keys and ASCII space only",
+            character_description(character)
+        )));
+    }
+    Ok(TypeKeyTarget::Label(character.to_string()))
+}
+
+fn keyboard_layout_value(layout_result: &Value) -> CliResult<&Value> {
+    layout_result
+        .get("keyboard_layout")
+        .ok_or_else(|| CliError::new("keyboard_layout was not present"))
+}
+
+fn ensure_keyboard_layout_available(layout: &Value) -> CliResult<()> {
+    let available = layout
+        .get("available")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if available {
+        Ok(())
+    } else {
+        Err(CliError::new("keyboard layout is not available"))
+    }
+}
+
+fn resolve_layout_key<'a>(
+    layout: &'a Value,
+    label: Option<&str>,
+    code: Option<i64>,
+) -> CliResult<&'a Value> {
+    let keys = layout
+        .get("keys")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CliError::new("keyboard_layout.keys was not an array"))?;
+    keys.iter()
+        .find(|candidate| key_matches(candidate, label, code))
+        .ok_or_else(|| CliError::new("requested key was not found in keyboard layout"))
+}
+
+fn key_tap_coordinate(key: &Value, axis: &str) -> CliResult<i32> {
+    let field = format!("tap_center_screen_{axis}_px");
+    let coordinate = key
+        .get(&field)
+        .and_then(json_number_to_shell_arg)
+        .ok_or_else(|| CliError::new(format!("key is missing {field}")))?;
+    parse_tap_coordinate(&coordinate, axis)
+}
+
+fn character_description(character: char) -> String {
+    let escaped = character.escape_default().collect::<String>();
+    format!("'{escaped}' (U+{:04X})", u32::from(character))
+}
+
+impl PlannedTypeStep {
+    fn to_json(&self, touch_output: &Value) -> Value {
+        json!({
+            "char_index": self.char_index,
+            "target": self.target.to_json(),
+            "key_class": self.key_class,
+            "tap": {
+                "x": self.x,
+                "y": self.y,
+            },
+            "touch_ok": touch_output
+                .get("ok")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        })
+    }
+}
+
+impl TypeKeyTarget {
+    fn to_json(&self) -> Value {
+        match *self {
+            Self::Label(_) => json!({
+                "kind": "label",
+            }),
+            Self::Code(_) => json!({
+                "kind": "code",
+            }),
+        }
+    }
 }
 
 fn parse_tap_coordinate(value: &str, axis: &str) -> CliResult<i32> {
@@ -1075,7 +1289,14 @@ fn ime_is_registered(ime_list_stdout: &str, ime_component: &str) -> bool {
 mod tests {
     use std::path::Path;
 
-    use crate::commands::{ime_is_registered, is_debug_apk, latest_release_tag_from_json};
+    use proptest::strategy::Strategy;
+    use serde_json::json;
+
+    use crate::args::PressKey;
+    use crate::commands::{
+        TypeKeyTarget, ime_is_registered, is_debug_apk, latest_release_tag_from_json,
+        planned_type_step, press_key_code, type_key_target,
+    };
 
     #[test]
     fn ime_registration_requires_exact_component_line() {
@@ -1127,5 +1348,84 @@ mod tests {
             Some("v0.1.0"),
             "prereleases should be valid install sources"
         );
+    }
+
+    #[test]
+    fn type_key_target_maps_space_to_space_code() {
+        assert_eq!(
+            type_key_target(' ', 0).ok(),
+            Some(TypeKeyTarget::Code(press_key_code(PressKey::Space))),
+            "space should use the semantic space key code"
+        );
+    }
+
+    #[test]
+    fn planned_type_step_resolves_visible_label_and_space() {
+        let layout = sample_layout_result();
+
+        let letter_result = planned_type_step(&layout, 0, 'a');
+        assert!(
+            letter_result.is_ok(),
+            "visible label should resolve to a tap"
+        );
+        let Ok(letter) = letter_result else {
+            return;
+        };
+        assert_eq!(letter.char_index, 0);
+        assert_eq!(letter.target, TypeKeyTarget::Label(String::from("a")));
+        assert_eq!((letter.x, letter.y), (10_i32, 20_i32));
+        assert_eq!(letter.key_code, Some(97));
+        assert_eq!(letter.key_class.as_deref(), Some("letter"));
+
+        let space_result = planned_type_step(&layout, 1, ' ');
+        assert!(
+            space_result.is_ok(),
+            "space should resolve to the semantic space key"
+        );
+        let Ok(space) = space_result else {
+            return;
+        };
+        assert_eq!(space.char_index, 1);
+        assert_eq!(space.target, TypeKeyTarget::Code(32));
+        assert_eq!((space.x, space.y), (50_i32, 60_i32));
+        assert_eq!(space.key_class.as_deref(), Some("space"));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn type_key_target_rejects_control_characters(character in control_character()) {
+            proptest::prop_assert!(
+                type_key_target(character, 0).is_err(),
+                "control characters should fail before any key is pressed"
+            );
+        }
+    }
+
+    fn sample_layout_result() -> serde_json::Value {
+        json!({
+            "keyboard_layout": {
+                "available": true,
+                "keys": [
+                    {
+                        "key_label": "a",
+                        "key_code": 97,
+                        "key_class": "letter",
+                        "tap_center_screen_x_px": 10.0,
+                        "tap_center_screen_y_px": 20
+                    },
+                    {
+                        "key_label": null,
+                        "key_code": 32,
+                        "key_class": "space",
+                        "tap_center_screen_x_px": 50,
+                        "tap_center_screen_y_px": 60
+                    }
+                ]
+            }
+        })
+    }
+
+    fn control_character() -> impl Strategy<Value = char> {
+        (0_u32..=0x1f).prop_map(|code| char::from_u32(code).unwrap_or('\0'))
     }
 }

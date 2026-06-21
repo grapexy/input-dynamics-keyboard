@@ -45,7 +45,7 @@ devices do not share controller sockets, state files, or ownership locks.
 
 For live agent-driven input, use the stateful session lifecycle. It selects the
 IME, starts IME logging, starts one persistent AOSP uinput controller, and then
-accepts live `tap` and `press` commands:
+accepts live `type`, `tap`, and `press` commands:
 
 ```bash
 RUN_ID=run-YYYYMMDD-HHMMSS-local-android
@@ -55,8 +55,7 @@ cargo run --quiet -p input-dynamics -- install
 cargo run --quiet -p input-dynamics -- touch doctor
 cargo run --quiet -p input-dynamics -- session start --run-id "$RUN_ID"
 cargo run --quiet -p input-dynamics -- layout --wait-visible
-cargo run --quiet -p input-dynamics -- tap --label a
-cargo run --quiet -p input-dynamics -- press space
+cargo run --quiet -p input-dynamics -- type "ab a"
 cargo run --quiet -p input-dynamics -- press delete
 cargo run --quiet -p input-dynamics -- session stop
 ```
@@ -87,7 +86,7 @@ cleanly. For scripted smoke tests, pass `--duration-ms <ms>`.
 For bounded agent-driven input, add `--with-input-controller`. This starts the
 persistent uinput controller for the record window and writes controller
 runtime metadata plus cleanup results into `manifest.json`. A second CLI
-process can send `tap`, `press`, `touch swipe`, `touch path`, or
+process can send `type`, `tap`, `press`, `touch swipe`, `touch path`, or
 `hide-keyboard` commands while the timed record process is running:
 
 ```bash
@@ -181,6 +180,10 @@ scraping human-oriented text.
   through the active session controller.
 - `press delete`, `press enter`, `press space`: taps common keys by semantic
   name through the active session controller.
+- `type <text>`: types text through visible layout keys in the active session.
+  The command plans the full string before pressing any key; unsupported
+  characters fail without partial typing. It uses a deterministic
+  `--inter-key-delay-ms` delay, default `40`.
 - `touch doctor`: checks AOSP uinput availability and reports the mirrored
   physical touchscreen profile used by the CLI.
 - `touch tap --x <x> --y <y> [--hold-ms <ms>]`: sends an absolute screen tap
@@ -200,11 +203,12 @@ scraping human-oriented text.
   `--with-input-controller` for bounded agent-driven runs that need persistent
   uinput controller metadata in the manifest.
 
-Use semantic `press` commands for common non-letter keys. `tap --code=-7` still
-works for delete, and `tap --code -7` is also accepted, but semantic commands
-are easier for agents to generate correctly. `tap`, `press`, `hide-keyboard`,
-`touch swipe`, and `touch path` require `session start`; use `touch tap` only
-for low-level diagnostic absolute taps.
+Use `type <text>` for ordinary text entry. Use semantic `press` commands for
+common non-letter keys and corrections. `tap --code=-7` still works for delete,
+and `tap --code -7` is also accepted, but semantic commands are easier for
+agents to generate correctly. `type`, `tap`, `press`, `hide-keyboard`, `touch
+swipe`, and `touch path` require `session start`; use `touch tap` only for
+low-level diagnostic absolute taps.
 
 `session` input and `touch` commands use AOSP `/system/bin/uinput` for
 touchscreen input. They fail if the device does not expose that command instead

@@ -114,8 +114,7 @@ Then use live commands while the session is active:
 
 ```bash
 idk layout --wait-visible
-idk tap --label a
-idk press space
+idk type "ab a"
 idk press delete
 idk hide-keyboard --method edge-back --side right
 idk session stop
@@ -142,7 +141,8 @@ JSONL privacy guarantees.
 
 For a bounded agent-driven run that also needs persistent uinput controller
 metadata, run `record` with `--with-input-controller` and a duration. Then drive
-input from another CLI process while the record process is active:
+input from another CLI process while the record process is active. Use
+`type <text>` for ordinary text entry:
 
 ```bash
 RUN_ID=run-YYYYMMDD-HHMMSS-local-android
@@ -183,27 +183,27 @@ command variants and fallbacks.
 
 When the keyboard view is visible, use `KEYBOARD_LAYOUT` instead of screenshots.
 With the CLI, start a session, wait for layout state, and press common keys by
-semantic name:
+semantic name. Use `type <text>` for ordinary text entry:
 
 ```bash
 idk session start --run-id "$RUN_ID"
 idk layout --wait-visible
 idk touch doctor
-idk tap --label a
-idk press space
+idk type "ab a"
 idk press delete
 idk press enter
 idk hide-keyboard --method edge-back --side right
 idk session stop
 ```
 
-Use `tap --code=<code>` only when there is no semantic command. Use
-`touch tap --x <x> --y <y>` for diagnostic absolute screen coordinates. Use
-`touch swipe` and `touch path` only when a protocol needs raw absolute gesture
-control; otherwise prefer semantic commands such as `press` and
-`hide-keyboard`. The CLI routes session input and `touch` commands through AOSP
-`/system/bin/uinput` and should fail rather than switch to another touch
-backend.
+`type <text>` plans the full string from visible layout keys before pressing any
+key and fails on unsupported characters without partial typing. Use
+`tap --code=<code>` only when there is no semantic command. Use `touch tap --x
+<x> --y <y>` for diagnostic absolute screen coordinates. Use `touch swipe` and
+`touch path` only when a protocol needs raw absolute gesture control; otherwise
+prefer semantic commands such as `type`, `press`, and `hide-keyboard`. The CLI
+routes session input and `touch` commands through AOSP `/system/bin/uinput` and
+should fail rather than switch to another touch backend.
 
 ## Validation
 

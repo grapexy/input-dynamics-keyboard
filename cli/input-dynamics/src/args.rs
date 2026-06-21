@@ -168,6 +168,14 @@ pub(crate) enum Commands {
         /// Semantic key to press.
         key: PressKey,
     },
+    /// Type text through the active uinput session using visible layout keys.
+    Type {
+        /// Text to type. Unsupported characters fail before any key is pressed.
+        text: String,
+        /// Deterministic delay between typed keys.
+        #[arg(long, default_value_t = 40)]
+        inter_key_delay_ms: u64,
+    },
     /// Send touchscreen input through AOSP uinput.
     Touch {
         #[command(subcommand)]
