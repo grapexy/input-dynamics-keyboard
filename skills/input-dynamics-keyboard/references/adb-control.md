@@ -6,17 +6,51 @@ Keyboard control, status, layout inspection, log readback, or cleanup.
 ## Packages
 
 ```bash
+REPO=grapexy/input-dynamics-keyboard
+
 # Debug build
 PKG=org.inputdynamics.ime.debug
 
-# Release build
-PKG=org.inputdynamics.ime
+# Locally built non-debug package, if used
+# PKG=org.inputdynamics.ime
 
 IME=helium314.keyboard.latin.LatinIME
 RECEIVER=.control.InputDynamicsControlReceiver
 ACTION_PREFIX=org.inputdynamics.ime.action
 LOG_DIR=input_dynamics_logs
 STATUS_FILE=input_dynamics_control_status.json
+```
+
+GitHub Release APKs are currently debug-variant APKs and use
+`org.inputdynamics.ime.debug`.
+
+## Install APK
+
+Preferred path for agents:
+
+```bash
+mkdir -p /tmp/input-dynamics-keyboard
+gh release download --repo "$REPO" --pattern '*debug.apk' \
+  --dir /tmp/input-dynamics-keyboard --clobber
+APK="$(ls -t /tmp/input-dynamics-keyboard/*debug.apk | head -n 1)"
+adb install -r "$APK"
+```
+
+Fallback when testing a source checkout:
+
+```bash
+./gradlew :app:assembleDebug
+APK="$(ls -t app/build/outputs/apk/debug/*.apk | head -n 1)"
+adb install -r "$APK"
+```
+
+Confirm the APK stays offline:
+
+```bash
+if aapt dump permissions "$APK" | rg 'android.permission.INTERNET'; then
+  echo "Unexpected INTERNET permission"
+  exit 1
+fi
 ```
 
 ## Enable IME

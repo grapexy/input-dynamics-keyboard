@@ -1,4 +1,4 @@
 interface:
   display_name: "Input Dynamics Keyboard"
-  short_description: "Run local Android IME timing workflows"
-  default_prompt: "Use $input-dynamics-keyboard to run and validate a local Android input dynamics session over ADB."
+  short_description: "Install and run Android IME logging"
+  default_prompt: "Use $input-dynamics-keyboard to install the APK and run a local Android input dynamics session over ADB."

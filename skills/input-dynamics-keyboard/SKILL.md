@@ -1,6 +1,6 @@
 ---
 name: input-dynamics-keyboard
-description: Run and validate local Android Input Dynamics Keyboard sessions over ADB. Use when Codex needs to build or install the Android IME, enable or select it, start or stop input dynamics logging with an external run_id, inspect status or keyboard layout data, avoid screenshot-dependent automation, pull JSONL logs, or validate the password-field suppression boundary.
+description: Run and validate local Android Input Dynamics Keyboard sessions over ADB. Use when Codex needs to download or build the Android IME APK, install it on a device, enable or select it, start or stop input dynamics logging with an external run_id, inspect status or keyboard layout data, avoid screenshot-dependent automation, pull JSONL logs, or validate the password-field suppression boundary.
 ---
 
 # Input Dynamics Keyboard
@@ -13,7 +13,8 @@ instrumentation surface. Keep workflows app-neutral, offline, and ADB-driven.
 ## Safety Rules
 
 - Do not add or rely on Internet permission.
-- Do not name or imply any specific app, site, service, or external workflow.
+- Keep instructions app-neutral; do not name external services or study-specific
+  workflows.
 - Treat password-class fields as the hard automatic suppression boundary.
 - Keep raw JSONL exports out of git.
 - Prefer app-specific external storage for logs; use internal storage only as a
@@ -26,8 +27,8 @@ instrumentation surface. Keep workflows app-neutral, offline, and ADB-driven.
 Use these defaults unless the repo or device status says otherwise:
 
 ```bash
+REPO=grapexy/input-dynamics-keyboard
 PKG=org.inputdynamics.ime.debug
-RELEASE_PKG=org.inputdynamics.ime
 IME=helium314.keyboard.latin.LatinIME
 RECEIVER=.control.InputDynamicsControlReceiver
 ACTION_PREFIX=org.inputdynamics.ime.action
@@ -35,8 +36,9 @@ LOG_DIR=input_dynamics_logs
 STATUS_FILE=input_dynamics_control_status.json
 ```
 
-The release package uses the same receiver and action names with
-`PKG=org.inputdynamics.ime`.
+GitHub Release APKs are currently debug-variant APKs, so the default package is
+`org.inputdynamics.ime.debug`. Locally built non-debug APKs use the same
+receiver and action names with `PKG=org.inputdynamics.ime`.
 
 ## Workflow
 
@@ -46,17 +48,29 @@ The release package uses the same receiver and action names with
 adb devices
 ```
 
-2. Build and install the debug APK when needed:
+2. Install the latest published APK:
+
+```bash
+mkdir -p /tmp/input-dynamics-keyboard
+gh release download --repo "$REPO" --pattern '*debug.apk' \
+  --dir /tmp/input-dynamics-keyboard --clobber
+APK="$(ls -t /tmp/input-dynamics-keyboard/*debug.apk | head -n 1)"
+adb install -r "$APK"
+```
+
+If GitHub CLI is unavailable or source changes must be tested, build locally
+from a repo checkout instead:
 
 ```bash
 ./gradlew :app:assembleDebug
-adb install -r app/build/outputs/apk/debug/*.apk
+APK="$(ls -t app/build/outputs/apk/debug/*.apk | head -n 1)"
+adb install -r "$APK"
 ```
 
-3. Confirm the APK does not request Internet permission:
+3. Confirm the installed APK does not request Internet permission:
 
 ```bash
-if aapt dump permissions app/build/outputs/apk/debug/*.apk | rg 'android.permission.INTERNET'; then
+if aapt dump permissions "$APK" | rg 'android.permission.INTERNET'; then
   echo "Unexpected INTERNET permission"
   exit 1
 else
