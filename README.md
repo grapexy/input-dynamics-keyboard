@@ -70,8 +70,10 @@ Raw ADB command reference: [docs/adb-control.md](docs/adb-control.md).
 
 Public APKs are distributed as GitHub Release assets, not committed binaries.
 Release assets include the debug APK, SHA-256 checksums, and a permissions dump.
-Release tags use the fork version, while APK metadata and asset names include
-the HeliBoard base version for provenance. See [docs/releases.md](docs/releases.md).
+Published APKs are signed with the project APK key so agents can upgrade the
+same package across releases. Release tags use the fork version, while APK
+metadata and asset names include the HeliBoard base version for provenance. See
+[docs/releases.md](docs/releases.md).
 
 ## Documentation
 

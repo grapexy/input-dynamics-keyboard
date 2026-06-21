@@ -1,5 +1,20 @@
 import com.android.build.api.variant.ApplicationVariant
 
+val inputDynamicsSigningConfigName = "inputDynamicsStable"
+val inputDynamicsSigningEnv = mapOf(
+    "storeFile" to System.getenv("INPUT_DYNAMICS_KEYSTORE_FILE"),
+    "storeType" to System.getenv("INPUT_DYNAMICS_KEYSTORE_TYPE"),
+    "storePassword" to System.getenv("INPUT_DYNAMICS_KEYSTORE_PASSWORD"),
+    "keyAlias" to System.getenv("INPUT_DYNAMICS_KEY_ALIAS"),
+    "keyPassword" to System.getenv("INPUT_DYNAMICS_KEY_PASSWORD"),
+)
+val inputDynamicsSigningEnabled = listOf(
+    "storeFile",
+    "storePassword",
+    "keyAlias",
+    "keyPassword",
+).all { !inputDynamicsSigningEnv[it].isNullOrBlank() }
+
 plugins {
     id("com.android.application")
     kotlin("android")
@@ -23,18 +38,38 @@ android {
         proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
     }
 
+    signingConfigs {
+        if (inputDynamicsSigningEnabled) {
+            create(inputDynamicsSigningConfigName) {
+                storeFile = file(inputDynamicsSigningEnv.getValue("storeFile").orEmpty())
+                inputDynamicsSigningEnv["storeType"]?.takeIf { it.isNotBlank() }?.let {
+                    storeType = it
+                }
+                storePassword = inputDynamicsSigningEnv.getValue("storePassword")
+                keyAlias = inputDynamicsSigningEnv.getValue("keyAlias")
+                keyPassword = inputDynamicsSigningEnv.getValue("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
             isShrinkResources = false
             isDebuggable = false
             isJniDebuggable = false
+            if (inputDynamicsSigningEnabled) {
+                signingConfig = signingConfigs.getByName(inputDynamicsSigningConfigName)
+            }
         }
         create("nouserlib") { // same as release, but does not allow the user to provide a library
             isMinifyEnabled = true
             isShrinkResources = false
             isDebuggable = false
             isJniDebuggable = false
+            if (inputDynamicsSigningEnabled) {
+                signingConfig = signingConfigs.getByName(inputDynamicsSigningConfigName)
+            }
         }
         debug {
             // "normal" debug has minify for smaller APK to fit the GitHub 25 MB limit when zipped
@@ -42,6 +77,9 @@ android {
             isMinifyEnabled = true
             isJniDebuggable = false
             applicationIdSuffix = ".debug"
+            if (inputDynamicsSigningEnabled) {
+                signingConfig = signingConfigs.getByName(inputDynamicsSigningConfigName)
+            }
         }
         create("runTests") { // build variant for running tests on CI that skips tests known to fail
             isMinifyEnabled = false
@@ -51,7 +89,9 @@ android {
             isDebuggable = true
             isMinifyEnabled = false
             isJniDebuggable = false
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName(
+                if (inputDynamicsSigningEnabled) inputDynamicsSigningConfigName else "debug"
+            )
             applicationIdSuffix = ".debug"
         }
         base.archivesBaseName = "InputDynamicsKeyboard_" + defaultConfig.versionName
@@ -111,6 +151,20 @@ android {
     namespace = "helium314.keyboard.latin"
     lint {
         abortOnError = true
+    }
+}
+
+gradle.taskGraph.whenReady {
+    val producesInstallableArtifact = gradle.startParameter.taskNames.any { requestedTask ->
+        val taskName = requestedTask.substringAfterLast(":")
+        taskName == "build" || taskName.startsWith("assemble") || taskName.startsWith("bundle")
+    }
+    if (producesInstallableArtifact && !inputDynamicsSigningEnabled) {
+        throw GradleException(
+            "Project APK signing is required for installable artifacts. " +
+                "Load .git/signing/input-dynamics.env or provide INPUT_DYNAMICS_KEYSTORE_FILE, " +
+                "INPUT_DYNAMICS_KEYSTORE_PASSWORD, INPUT_DYNAMICS_KEY_ALIAS, and INPUT_DYNAMICS_KEY_PASSWORD."
+        )
     }
 }
 

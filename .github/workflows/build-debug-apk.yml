@@ -22,6 +22,42 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
+      - name: Restore APK signing key
+        shell: bash
+        env:
+          INPUT_DYNAMICS_KEYSTORE_B64: ${{ secrets.INPUT_DYNAMICS_KEYSTORE_B64 }}
+          INPUT_DYNAMICS_KEYSTORE_PASSWORD: ${{ secrets.INPUT_DYNAMICS_KEYSTORE_PASSWORD }}
+          INPUT_DYNAMICS_KEY_ALIAS: ${{ secrets.INPUT_DYNAMICS_KEY_ALIAS }}
+          INPUT_DYNAMICS_KEY_PASSWORD: ${{ secrets.INPUT_DYNAMICS_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          for name in \
+            INPUT_DYNAMICS_KEYSTORE_B64 \
+            INPUT_DYNAMICS_KEYSTORE_PASSWORD \
+            INPUT_DYNAMICS_KEY_ALIAS \
+            INPUT_DYNAMICS_KEY_PASSWORD
+          do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing GitHub secret $name"
+              exit 1
+            fi
+          done
+
+          signing_dir="$RUNNER_TEMP/input-dynamics-signing"
+          mkdir -p "$signing_dir"
+          keystore_file="$signing_dir/input-dynamics.p12"
+          printf '%s' "$INPUT_DYNAMICS_KEYSTORE_B64" | base64 --decode > "$keystore_file"
+          chmod 600 "$keystore_file"
+
+          {
+            echo "INPUT_DYNAMICS_KEYSTORE_FILE=$keystore_file"
+            echo "INPUT_DYNAMICS_KEYSTORE_TYPE=PKCS12"
+            echo "INPUT_DYNAMICS_KEYSTORE_PASSWORD=$INPUT_DYNAMICS_KEYSTORE_PASSWORD"
+            echo "INPUT_DYNAMICS_KEY_ALIAS=$INPUT_DYNAMICS_KEY_ALIAS"
+            echo "INPUT_DYNAMICS_KEY_PASSWORD=$INPUT_DYNAMICS_KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
+
       - name: Build with Gradle
         run: ./gradlew assembleDebug
 

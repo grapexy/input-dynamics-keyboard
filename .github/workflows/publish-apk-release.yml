@@ -64,6 +64,42 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
+      - name: Restore APK signing key
+        shell: bash
+        env:
+          INPUT_DYNAMICS_KEYSTORE_B64: ${{ secrets.INPUT_DYNAMICS_KEYSTORE_B64 }}
+          INPUT_DYNAMICS_KEYSTORE_PASSWORD: ${{ secrets.INPUT_DYNAMICS_KEYSTORE_PASSWORD }}
+          INPUT_DYNAMICS_KEY_ALIAS: ${{ secrets.INPUT_DYNAMICS_KEY_ALIAS }}
+          INPUT_DYNAMICS_KEY_PASSWORD: ${{ secrets.INPUT_DYNAMICS_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          for name in \
+            INPUT_DYNAMICS_KEYSTORE_B64 \
+            INPUT_DYNAMICS_KEYSTORE_PASSWORD \
+            INPUT_DYNAMICS_KEY_ALIAS \
+            INPUT_DYNAMICS_KEY_PASSWORD
+          do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing GitHub secret $name"
+              exit 1
+            fi
+          done
+
+          signing_dir="$RUNNER_TEMP/input-dynamics-signing"
+          mkdir -p "$signing_dir"
+          keystore_file="$signing_dir/input-dynamics.p12"
+          printf '%s' "$INPUT_DYNAMICS_KEYSTORE_B64" | base64 --decode > "$keystore_file"
+          chmod 600 "$keystore_file"
+
+          {
+            echo "INPUT_DYNAMICS_KEYSTORE_FILE=$keystore_file"
+            echo "INPUT_DYNAMICS_KEYSTORE_TYPE=PKCS12"
+            echo "INPUT_DYNAMICS_KEYSTORE_PASSWORD=$INPUT_DYNAMICS_KEYSTORE_PASSWORD"
+            echo "INPUT_DYNAMICS_KEY_ALIAS=$INPUT_DYNAMICS_KEY_ALIAS"
+            echo "INPUT_DYNAMICS_KEY_PASSWORD=$INPUT_DYNAMICS_KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
+
       - name: Test and build debug APK
         run: ./gradlew :app:testRunTestsUnitTest :app:assembleDebug
 
@@ -81,9 +117,14 @@ jobs:
             exit 1
           fi
 
-          aapt_bin="$(find "$ANDROID_HOME/build-tools" -name aapt | sort -V | tail -n 1)"
+          aapt_bin="$(find -L "$ANDROID_HOME/build-tools" -name aapt | sort -V | tail -n 1)"
           if [ -z "$aapt_bin" ]; then
             echo "::error::Android build-tools are missing aapt"
+            exit 1
+          fi
+          apksigner_bin="$(find -L "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -n 1)"
+          if [ -z "$apksigner_bin" ]; then
+            echo "::error::Android build-tools are missing apksigner"
             exit 1
           fi
 
@@ -102,6 +143,7 @@ jobs:
             exit 1
           fi
 
+          "$apksigner_bin" verify --print-certs "$debug_asset" | tee release-assets/APK_SIGNING_CERT_SHA256.txt
           sha256sum release-assets/*.apk > release-assets/SHA256SUMS.txt
 
           cat > release-assets/RELEASE_NOTES.md <<EOF
@@ -112,6 +154,7 @@ jobs:
           - \`InputDynamicsKeyboard-${tag_name}-${provenance}-debug.apk\`: debug package \`org.inputdynamics.ime.debug\`
           - \`SHA256SUMS.txt\`: SHA-256 checksums for APK assets
           - \`APK_PERMISSIONS.txt\`: permissions dumped from the debug APK
+          - \`APK_SIGNING_CERT_SHA256.txt\`: signing certificate fingerprint for install compatibility checks
 
           Version metadata:
 
@@ -121,7 +164,7 @@ jobs:
           Verification:
 
           - Unit tests passed in CI.
-          - Debug APK was built from tag \`$tag_name\`.
+          - Debug APK was built from tag \`$tag_name\` and signed with the project APK key.
           - Debug APK was checked for absence of \`android.permission.INTERNET\`.
 
           Local control surface:
@@ -149,12 +192,13 @@ jobs:
 
           if gh release view "$tag_name" >/dev/null 2>&1; then
             gh release edit "$tag_name" --title "$title" --notes-file release-assets/RELEASE_NOTES.md "${prerelease_args[@]}"
-            gh release upload "$tag_name" release-assets/*.apk release-assets/SHA256SUMS.txt release-assets/APK_PERMISSIONS.txt --clobber
+            gh release upload "$tag_name" release-assets/*.apk release-assets/SHA256SUMS.txt release-assets/APK_PERMISSIONS.txt release-assets/APK_SIGNING_CERT_SHA256.txt --clobber
           else
             gh release create "$tag_name" \
               release-assets/*.apk \
               release-assets/SHA256SUMS.txt \
               release-assets/APK_PERMISSIONS.txt \
+              release-assets/APK_SIGNING_CERT_SHA256.txt \
               --title "$title" \
               --notes-file release-assets/RELEASE_NOTES.md \
               "${prerelease_args[@]}"

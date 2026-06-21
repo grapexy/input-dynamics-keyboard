@@ -15,7 +15,7 @@ Build and test the debug variant:
 ./gradlew :app:testRunTestsUnitTest :app:assembleDebug
 ```
 
-Build debug and unsigned release APKs:
+Build signed debug and release APKs:
 
 ```bash
 ./gradlew :app:assembleDebug :app:assembleRelease
@@ -26,12 +26,12 @@ Current APK outputs:
 ```text
 app/build/outputs/apk/debug/*-debug.apk
 app/build/outputs/apk/debugNoMinify/*-debugNoMinify.apk
-app/build/outputs/apk/release/*-release-unsigned.apk
+app/build/outputs/apk/release/*-release.apk
 ```
 
-The GitHub Release workflow currently publishes the debug APK. The local release
-APK is unsigned and is not distributed unless a signed release process is added
-later.
+Installable APK builds require the project signing environment. The Nix dev
+shell loads `.git/signing/input-dynamics.env` automatically when it exists.
+GitHub Release assets are signed with the same project APK key.
 
 ## Package IDs
 
@@ -84,8 +84,7 @@ adb shell am broadcast -n "$PKG/.control.InputDynamicsControlReceiver" -a org.in
 adb shell am broadcast -n "$PKG/.control.InputDynamicsControlReceiver" -a org.inputdynamics.ime.action.DISABLE
 ```
 
-Use `PKG=org.inputdynamics.ime` only for locally installed signed release
-builds.
+Use `PKG=org.inputdynamics.ime` only for installed release builds.
 
 Optional clear command, only when no session is active:
 

@@ -88,11 +88,20 @@
                 github_auth_status="no local token"
               fi
 
+              signing_env="$PWD/.git/signing/input-dynamics.env"
+              if [ -s "$signing_env" ]; then
+                . "$signing_env"
+                signing_status="stable signing loaded"
+              else
+                signing_status="not loaded"
+              fi
+
               echo "Android SDK: $ANDROID_HOME"
               echo "Android NDK: $ANDROID_NDK_HOME"
               echo "Java: $JAVA_HOME"
               echo "GitHub CLI config: $GH_CONFIG_DIR"
               echo "GitHub CLI auth: $github_auth_status"
+              echo "APK signing: $signing_status"
               echo "Build with: ./gradlew :app:assembleDebugNoMinify"
               echo "Rust checks: cargo ci-fmt && cargo ci-test && cargo ci-clippy"
             '';

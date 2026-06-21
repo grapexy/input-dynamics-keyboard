@@ -7,13 +7,35 @@ commit APK, AAB, APKS, keystore, signing output, or checksum files to git.
 
 Each release should include:
 
-- debug APK for `org.inputdynamics.ime.debug`
+- signed debug APK for `org.inputdynamics.ime.debug`
 - `SHA256SUMS.txt`
 - `APK_PERMISSIONS.txt`
+- `APK_SIGNING_CERT_SHA256.txt`
 
 The debug APK is the supported install artifact for local research and agent
 automation workflows. A signed release APK for `org.inputdynamics.ime` can be
 added later if the project needs a stable non-debug package identity.
+
+## Signing
+
+Installable APKs must be signed with the project APK signing key. The keystore
+is private material and must not be committed. Local trusted builds load signing
+configuration from `.git/signing/input-dynamics.env`; GitHub Actions reconstructs
+the same keystore from repository secrets.
+
+Required local environment variables:
+
+```text
+INPUT_DYNAMICS_KEYSTORE_FILE
+INPUT_DYNAMICS_KEYSTORE_TYPE
+INPUT_DYNAMICS_KEYSTORE_PASSWORD
+INPUT_DYNAMICS_KEY_ALIAS
+INPUT_DYNAMICS_KEY_PASSWORD
+```
+
+The Nix dev shell loads `.git/signing/input-dynamics.env` automatically when it
+exists. Gradle refuses to run installable artifact tasks such as `assembleDebug`
+unless signing is configured.
 
 ## Publishing
 
@@ -65,15 +87,14 @@ The workflow runs:
 ```
 
 It then checks the debug APK for absence of `android.permission.INTERNET` and
-writes checksums.
+writes checksums plus the APK signing certificate fingerprint.
 
-Local unsigned release builds are still useful for smoke testing the release
-build type, but they are not published by the current GitHub Release workflow:
+Local release builds use the same project signing key when signing is configured:
 
 ```bash
 ./gradlew :app:assembleRelease
 ```
 
 ```text
-app/build/outputs/apk/release/*-release-unsigned.apk
+app/build/outputs/apk/release/*-release.apk
 ```

@@ -32,3 +32,4 @@ input_dynamics_control_status.json
 *.apks
 *.jks
 *.keystore
+*.p12

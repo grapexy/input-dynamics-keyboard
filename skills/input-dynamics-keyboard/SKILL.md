@@ -32,7 +32,7 @@ PKG=org.inputdynamics.ime.debug
 LOG_DIR=input_dynamics_logs
 ```
 
-GitHub Release APKs are currently debug-variant APKs, so the default package is
+GitHub Release APKs are signed debug-variant APKs, so the default package is
 `org.inputdynamics.ime.debug`. Locally built non-debug APKs use the same
 receiver and action names with `PKG=org.inputdynamics.ime`.
 

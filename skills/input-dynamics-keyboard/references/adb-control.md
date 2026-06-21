@@ -24,7 +24,7 @@ LOG_DIR=input_dynamics_logs
 STATUS_FILE=input_dynamics_control_status.json
 ```
 
-GitHub Release APKs are currently debug-variant APKs and use
+GitHub Release APKs are signed debug-variant APKs and use
 `org.inputdynamics.ime.debug`.
 
 ## Install APK
@@ -33,7 +33,9 @@ Preferred path for agents:
 
 ```bash
 mkdir -p /tmp/input-dynamics-keyboard
-gh release download --repo "$REPO" --pattern '*debug.apk' \
+TAG="$(gh release list --repo "$REPO" --json tagName,isDraft \
+  --jq '.[] | select(.isDraft == false) | .tagName' | head -n 1)"
+gh release download "$TAG" --repo "$REPO" --pattern '*debug.apk' \
   --dir /tmp/input-dynamics-keyboard --clobber
 APK="$(ls -t /tmp/input-dynamics-keyboard/*debug.apk | head -n 1)"
 adb install -r "$APK"
