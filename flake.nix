@@ -77,8 +77,21 @@
             JAVA_HOME = pkgs.jdk17.home;
 
             shellHook = ''
+              workspace_root="$PWD"
+              credential_root="$PWD"
+              if [ -d "$PWD/../.git/gh" ] || [ -d "$PWD/../.git/signing" ]; then
+                workspace_root="$(cd "$PWD/.." && pwd)"
+                credential_root="$workspace_root"
+              fi
+
+              export INPUT_DYNAMICS_KEYBOARD_REPO="$PWD"
+              if [ -d "$workspace_root/lab" ]; then
+                export INPUT_DYNAMICS_WORKSPACE="$workspace_root"
+                export INPUT_DYNAMICS_LAB_REPO="$workspace_root/lab"
+              fi
+
               export ANDROID_USER_HOME="$PWD/.android"
-              export GH_CONFIG_DIR="$PWD/.git/gh"
+              export GH_CONFIG_DIR="$credential_root/.git/gh"
               export PATH="${androidHome}/platform-tools:${buildTools}:${ndkHome}:$PATH"
 
               if [ -s "$GH_CONFIG_DIR/token" ]; then
@@ -88,7 +101,7 @@
                 github_auth_status="no local token"
               fi
 
-              signing_env="$PWD/.git/signing/input-dynamics.env"
+              signing_env="$credential_root/.git/signing/input-dynamics.env"
               if [ -s "$signing_env" ]; then
                 . "$signing_env"
                 signing_status="stable signing loaded"
@@ -99,6 +112,10 @@
               echo "Android SDK: $ANDROID_HOME"
               echo "Android NDK: $ANDROID_NDK_HOME"
               echo "Java: $JAVA_HOME"
+              echo "Keyboard repo: $INPUT_DYNAMICS_KEYBOARD_REPO"
+              if [ -n "''${INPUT_DYNAMICS_WORKSPACE:-}" ]; then
+                echo "Workspace: $INPUT_DYNAMICS_WORKSPACE"
+              fi
               echo "GitHub CLI config: $GH_CONFIG_DIR"
               echo "GitHub CLI auth: $github_auth_status"
               echo "APK signing: $signing_status"

@@ -1,4 +1,4 @@
-# AGENTS.md — heliboard-research-ime
+# AGENTS.md - input-dynamics-keyboard
 
 This repository is a local research fork of HeliBoard for measuring real human
 soft-keyboard interaction timing on Android.
