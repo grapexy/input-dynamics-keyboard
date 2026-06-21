@@ -21,6 +21,10 @@ pub(crate) struct Cli {
     #[arg(long, global = true, default_value = DEFAULT_PACKAGE)]
     pub(crate) package: String,
 
+    /// ADB device serial to target. Required when multiple devices are connected.
+    #[arg(long, global = true)]
+    pub(crate) serial: Option<String>,
+
     #[command(subcommand)]
     pub(crate) command: Commands,
 }

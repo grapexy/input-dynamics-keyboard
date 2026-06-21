@@ -93,37 +93,63 @@ pub(crate) fn run_command(app: &App, command: Commands) -> CliResult<Value> {
 }
 
 fn doctor(app: &App) -> CliResult<Value> {
-    let adb_devices = app.adb(&[String::from("devices")], FailureMode::AllowFailure)?;
-    let ime_list = app.adb_shell(
-        vec![
-            String::from("ime"),
-            String::from("list"),
-            String::from("-s"),
-        ],
-        FailureMode::AllowFailure,
-    )?;
+    let adb_devices = app.adb_host(&[String::from("devices")], FailureMode::AllowFailure)?;
+    let device = app.device_selection_json(adb_devices.stdout());
+    let device_selected = device.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    let ime_list = if device_selected {
+        app.adb_shell(
+            vec![
+                String::from("ime"),
+                String::from("list"),
+                String::from("-s"),
+            ],
+            FailureMode::AllowFailure,
+        )
+        .ok()
+    } else {
+        None
+    };
     let gh_version = run_process(
         "gh",
         &[String::from("--version")],
         FailureMode::AllowFailure,
     )?;
-    let device_connected = has_connected_device(adb_devices.stdout());
-    let ime_registered = ime_is_registered(ime_list.stdout(), &app.ime_component());
+    let device_connected = device
+        .get("connected_device_count")
+        .and_then(Value::as_u64)
+        .is_some_and(|count| count > 0);
+    let ime_list_json = ime_list.as_ref().map_or_else(
+        || {
+            json!({
+                "skipped": true,
+                "reason": "no unambiguous adb device selected",
+            })
+        },
+        crate::process::ProcessOutput::json,
+    );
+    let ime_registered = ime_list
+        .as_ref()
+        .is_some_and(|output| ime_is_registered(output.stdout(), &app.ime_component()));
     let gh_available = gh_version.status_code == Some(0_i32);
+    let ime_list_ok = ime_list
+        .as_ref()
+        .is_some_and(|output| output.status_code == Some(0_i32));
 
     Ok(json!({
         "ok": adb_devices.status_code == Some(0_i32)
-            && device_connected
-            && ime_list.status_code == Some(0_i32)
+            && device_selected
+            && ime_list_ok
             && ime_registered
             && gh_available,
         "package_name": app.package(),
         "ime_component": app.ime_component(),
+        "requested_serial": app.serial(),
         "device_connected": device_connected,
+        "device": device,
         "ime_registered": ime_registered,
         "gh_available": gh_available,
         "adb_devices": adb_devices.json(),
-        "ime_list": ime_list.json(),
+        "ime_list": ime_list_json,
         "gh_version": gh_version.json(),
     }))
 }
@@ -281,7 +307,7 @@ fn session_start(
             let input_ok = input.get("ok").and_then(Value::as_bool).unwrap_or(false);
             let stop_after_input_failure = if input_ok {
                 session_lock.activate(&input)?;
-                input = controller::status(app);
+                input = controller::status(app)?;
                 Value::Null
             } else {
                 app.broadcast("STOP", Vec::new()).unwrap_or_else(|error| {
@@ -313,10 +339,13 @@ fn session_start(
 
 fn session_status(app: &App) -> CliResult<Value> {
     let ime = app.broadcast("STATUS", Vec::new())?;
-    let input = controller::status(app);
+    let input = controller::status(app)?;
+    let adb_devices = app.adb_host(&[String::from("devices")], FailureMode::AllowFailure)?;
+    let device = app.device_selection_json(adb_devices.stdout());
     Ok(json!({
         "ok": true,
         "package_name": app.package(),
+        "device": device,
         "ime": ime,
         "input": input,
     }))
@@ -711,15 +740,6 @@ pub(crate) fn path_string(path: &Path) -> CliResult<String> {
         .ok_or_else(|| CliError::new(format!("path is not valid UTF-8: {}", path.display())))
 }
 
-fn has_connected_device(adb_devices_stdout: &str) -> bool {
-    adb_devices_stdout.lines().any(|line| {
-        let mut fields = line.split_whitespace();
-        let serial = fields.next();
-        let state = fields.next();
-        serial.is_some() && state == Some("device")
-    })
-}
-
 fn ime_is_registered(ime_list_stdout: &str, ime_component: &str) -> bool {
     ime_list_stdout
         .lines()
@@ -730,41 +750,7 @@ fn ime_is_registered(ime_list_stdout: &str, ime_component: &str) -> bool {
 mod tests {
     use std::path::Path;
 
-    use proptest::strategy::Strategy;
-
-    use crate::commands::{
-        has_connected_device, ime_is_registered, is_debug_apk, latest_release_tag_from_json,
-    };
-
-    proptest::proptest! {
-        #[test]
-        fn device_parser_accepts_any_serial_with_device_state(serial in serial_text()) {
-            let output = format!("List of devices attached\n{serial}\tdevice\n");
-
-            proptest::prop_assert!(
-                has_connected_device(&output),
-                "adb device state should be accepted"
-            );
-        }
-
-        #[test]
-        fn device_parser_rejects_non_device_state(serial in serial_text(), state in non_device_state()) {
-            let output = format!("List of devices attached\n{serial}\t{state}\n");
-
-            proptest::prop_assert!(
-                !has_connected_device(&output),
-                "only the literal device state should be accepted"
-            );
-        }
-    }
-
-    fn serial_text() -> impl Strategy<Value = String> {
-        "[A-Za-z0-9._:-]{1,64}"
-    }
-
-    fn non_device_state() -> impl Strategy<Value = String> {
-        "(offline|unauthorized|recovery|sideload|bootloader)"
-    }
+    use crate::commands::{ime_is_registered, is_debug_apk, latest_release_tag_from_json};
 
     #[test]
     fn ime_registration_requires_exact_component_line() {

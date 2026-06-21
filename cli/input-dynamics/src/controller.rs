@@ -37,6 +37,7 @@ pub(crate) struct RunConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RuntimePaths {
     dir: PathBuf,
+    device_serial: String,
     socket: PathBuf,
     state: PathBuf,
     session_lock: PathBuf,
@@ -56,6 +57,7 @@ pub(crate) enum SessionStartPermit {
 pub(crate) struct SessionStartLock {
     path: PathBuf,
     package_name: String,
+    device_serial: String,
     run_id: String,
     persist: bool,
 }
@@ -69,11 +71,11 @@ enum ControllerRequest {
 }
 
 pub(crate) fn acquire_session_start(app: &App, run_id: &str) -> CliResult<SessionStartPermit> {
-    let paths = RuntimePaths::for_app(app);
+    let paths = RuntimePaths::for_app(app)?;
     fs::create_dir_all(&paths.dir)?;
     remove_stale_runtime(&paths)?;
 
-    let current_status = status(app);
+    let current_status = status(app)?;
     if value_bool(&current_status, "active") {
         return Ok(SessionStartPermit::Busy(session_busy(
             app,
@@ -109,12 +111,13 @@ pub(crate) fn acquire_session_start(app: &App, run_id: &str) -> CliResult<Sessio
             Ok(SessionStartPermit::Acquired(SessionStartLock {
                 path: paths.session_lock,
                 package_name: String::from(app.package()),
+                device_serial: paths.device_serial,
                 run_id: String::from(run_id),
                 persist: false,
             }))
         }
         Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-            let race_status = status(app);
+            let race_status = status(app)?;
             Ok(SessionStartPermit::Busy(session_busy(
                 app,
                 &paths,
@@ -127,15 +130,15 @@ pub(crate) fn acquire_session_start(app: &App, run_id: &str) -> CliResult<Sessio
 }
 
 pub(crate) fn clear_session_lock(app: &App) -> CliResult<()> {
-    remove_file_if_exists(&RuntimePaths::for_app(app).session_lock)
+    remove_file_if_exists(&RuntimePaths::for_app(app)?.session_lock)
 }
 
 pub(crate) fn start(app: &App, run_id: &str) -> CliResult<Value> {
-    let paths = RuntimePaths::for_app(app);
+    let paths = RuntimePaths::for_app(app)?;
     fs::create_dir_all(&paths.dir)?;
     remove_stale_runtime(&paths)?;
 
-    let existing_status = status(app);
+    let existing_status = status(app)?;
     if existing_status
         .get("active")
         .and_then(Value::as_bool)
@@ -144,6 +147,7 @@ pub(crate) fn start(app: &App, run_id: &str) -> CliResult<Value> {
         return Ok(json!({
             "ok": false,
             "package_name": app.package(),
+            "device_serial": paths.device_serial.as_str(),
             "error": "input controller is already active",
             "controller": existing_status,
         }));
@@ -163,34 +167,36 @@ pub(crate) fn start(app: &App, run_id: &str) -> CliResult<Value> {
     wait_until_active(app, &paths, run_id)
 }
 
-pub(crate) fn status(app: &App) -> Value {
-    let paths = RuntimePaths::for_app(app);
+pub(crate) fn status(app: &App) -> CliResult<Value> {
+    let paths = RuntimePaths::for_app(app)?;
     match send_request(&paths.socket, &ControllerRequest::Status) {
-        Ok(response) => json!({
+        Ok(response) => Ok(json!({
             "ok": true,
             "active": response.get("ok").and_then(Value::as_bool).unwrap_or(false),
             "package_name": app.package(),
+            "device_serial": paths.device_serial.as_str(),
             "runtime": paths_json(&paths),
             "state": read_state_json(&paths.state),
             "session_lock": read_lock_json(&paths.session_lock).unwrap_or(Value::Null),
             "controller": response,
-        }),
-        Err(error) => json!({
+        })),
+        Err(error) => Ok(json!({
             "ok": true,
             "active": false,
             "package_name": app.package(),
+            "device_serial": paths.device_serial.as_str(),
             "runtime": paths_json(&paths),
             "state": read_state_json(&paths.state),
             "session_lock": read_lock_json(&paths.session_lock).unwrap_or(Value::Null),
             "stale_runtime": paths.socket.exists() || paths.state.exists(),
             "controller_error": error.to_string(),
-        }),
+        })),
     }
 }
 
 pub(crate) fn stop(app: &App) -> CliResult<Value> {
-    let paths = RuntimePaths::for_app(app);
-    let before = status(app);
+    let paths = RuntimePaths::for_app(app)?;
+    let before = status(app)?;
     if !before
         .get("active")
         .and_then(Value::as_bool)
@@ -201,6 +207,7 @@ pub(crate) fn stop(app: &App) -> CliResult<Value> {
             "ok": true,
             "active": false,
             "package_name": app.package(),
+            "device_serial": paths.device_serial.as_str(),
             "already_stopped": true,
             "before": before,
         }));
@@ -212,6 +219,7 @@ pub(crate) fn stop(app: &App) -> CliResult<Value> {
         "ok": response.get("ok").and_then(Value::as_bool).unwrap_or(false),
         "active": false,
         "package_name": app.package(),
+        "device_serial": paths.device_serial.as_str(),
         "already_stopped": false,
         "before": before,
         "controller": response,
@@ -219,7 +227,7 @@ pub(crate) fn stop(app: &App) -> CliResult<Value> {
 }
 
 pub(crate) fn tap(app: &App, spec: TapSpec) -> CliResult<Value> {
-    let paths = RuntimePaths::for_app(app);
+    let paths = RuntimePaths::for_app(app)?;
     if !paths.socket.exists() {
         return Err(CliError::new(
             "no active input session; run `input-dynamics session start --run-id <id>`",
@@ -236,6 +244,7 @@ pub(crate) fn tap(app: &App, spec: TapSpec) -> CliResult<Value> {
     Ok(json!({
         "ok": response.get("ok").and_then(Value::as_bool).unwrap_or(false),
         "input_backend": "uinput",
+        "device_serial": paths.device_serial.as_str(),
         "controller": response,
     }))
 }
@@ -253,7 +262,7 @@ pub(crate) fn run(app: &App, config: &RunConfig) -> CliResult<Value> {
     thread::sleep(Duration::from_millis(uinput::DEVICE_SETTLE_MS));
     ensure_uinput_alive(&mut uinput_process)?;
 
-    let state = controller_state(app, config, &profile);
+    let state = controller_state(app, config, &profile)?;
     write_json_file(&config.state, &state)?;
 
     let mut stopped = false;
@@ -273,6 +282,7 @@ pub(crate) fn run(app: &App, config: &RunConfig) -> CliResult<Value> {
         "ok": true,
         "stopped": stopped,
         "package_name": app.package(),
+        "device_serial": app.selected_device_serial()?,
     }))
 }
 
@@ -282,6 +292,8 @@ fn controller_args(app: &App, paths: &RuntimePaths, run_id: &str) -> CliResult<V
         String::from(app.adb_program()),
         String::from("--package"),
         String::from(app.package()),
+        String::from("--serial"),
+        paths.device_serial.clone(),
         String::from("controller"),
         String::from("run"),
         String::from("--socket"),
@@ -300,7 +312,7 @@ fn controller_args(app: &App, paths: &RuntimePaths, run_id: &str) -> CliResult<V
 fn wait_until_active(app: &App, paths: &RuntimePaths, run_id: &str) -> CliResult<Value> {
     let start_time = Instant::now();
     loop {
-        let current = status(app);
+        let current = status(app)?;
         if current
             .get("active")
             .and_then(Value::as_bool)
@@ -310,6 +322,7 @@ fn wait_until_active(app: &App, paths: &RuntimePaths, run_id: &str) -> CliResult
                 "ok": true,
                 "active": true,
                 "package_name": app.package(),
+                "device_serial": paths.device_serial.as_str(),
                 "run_id": run_id,
                 "runtime": paths_json(paths),
                 "controller": current,
@@ -320,6 +333,7 @@ fn wait_until_active(app: &App, paths: &RuntimePaths, run_id: &str) -> CliResult
                 "ok": false,
                 "active": false,
                 "package_name": app.package(),
+                "device_serial": paths.device_serial.as_str(),
                 "run_id": run_id,
                 "runtime": paths_json(paths),
                 "error": "timed out waiting for input controller to start",
@@ -403,9 +417,10 @@ fn start_uinput_process(app: &App, config: &RunConfig) -> CliResult<StdinProcess
         String::from("uinput"),
         String::from("-"),
     ];
+    let scoped_args = app.scoped_adb_args(&args)?;
     spawn_process_with_stdin_to_files(
         app.adb_program(),
-        &args,
+        &scoped_args,
         &config.uinput_stdout,
         &config.uinput_stderr,
     )
@@ -438,12 +453,17 @@ fn shutdown_uinput(process: StdinProcess) -> CliResult<()> {
     }
 }
 
-fn controller_state(app: &App, config: &RunConfig, profile: &uinput::TouchscreenProfile) -> Value {
-    json!({
+fn controller_state(
+    app: &App,
+    config: &RunConfig,
+    profile: &uinput::TouchscreenProfile,
+) -> CliResult<Value> {
+    Ok(json!({
         "schema": "input_dynamics_controller_state.v1",
         "active": true,
         "pid": process::id(),
         "package_name": app.package(),
+        "device_serial": app.selected_device_serial()?,
         "run_id": config.run_id,
         "socket_path": path_string_lossy(&config.socket),
         "state_path": path_string_lossy(&config.state),
@@ -451,7 +471,7 @@ fn controller_state(app: &App, config: &RunConfig, profile: &uinput::Touchscreen
         "input_backend": "uinput",
         "input_device_command": uinput::input_device_command(),
         "physical_touchscreen": uinput::profile_summary(profile),
-    })
+    }))
 }
 
 fn write_json_file(path: &Path, value: &Value) -> CliResult<()> {
@@ -488,6 +508,7 @@ fn remove_file_if_exists(path: &Path) -> CliResult<()> {
 fn paths_json(paths: &RuntimePaths) -> Value {
     json!({
         "dir": path_string_lossy(&paths.dir),
+        "device_serial": paths.device_serial.as_str(),
         "socket": path_string_lossy(&paths.socket),
         "state": path_string_lossy(&paths.state),
         "session_lock": path_string_lossy(&paths.session_lock),
@@ -499,13 +520,23 @@ fn paths_json(paths: &RuntimePaths) -> Value {
 }
 
 impl RuntimePaths {
-    fn for_app(app: &App) -> Self {
-        Self::from_base_dir(runtime_base_dir(), app.package())
+    fn for_app(app: &App) -> CliResult<Self> {
+        let device_serial = app.selected_device_serial()?;
+        Ok(Self::from_base_dir(
+            runtime_base_dir(),
+            app.package(),
+            &device_serial,
+        ))
     }
 
-    fn from_base_dir(base_dir: PathBuf, package: &str) -> Self {
-        let prefix = sanitize_path_component(package);
+    fn from_base_dir(base_dir: PathBuf, package: &str, device_serial: &str) -> Self {
+        let prefix = format!(
+            "{}.{}",
+            sanitize_path_component(package),
+            sanitize_path_component(device_serial)
+        );
         Self {
+            device_serial: String::from(device_serial),
             socket: runtime_file(&base_dir, &prefix, "sock"),
             state: runtime_file(&base_dir, &prefix, "state.json"),
             session_lock: runtime_file(&base_dir, &prefix, "session.lock.json"),
@@ -575,6 +606,7 @@ impl SessionStartLock {
             "schema": "input_dynamics_session_lock.v1",
             "state": "active",
             "package_name": self.package_name,
+            "device_serial": self.device_serial.as_str(),
             "run_id": self.run_id,
             "owner_pid": process::id(),
             "created_wall_ms": read_lock_json(&self.path)
@@ -607,6 +639,7 @@ fn initial_lock_json(app: &App, paths: &RuntimePaths, run_id: &str) -> Value {
         "schema": "input_dynamics_session_lock.v1",
         "state": "starting",
         "package_name": app.package(),
+        "device_serial": paths.device_serial.as_str(),
         "run_id": run_id,
         "owner_pid": process::id(),
         "created_wall_ms": wall_time_ms(),
@@ -655,17 +688,17 @@ mod tests {
     use crate::controller::{RuntimePaths, sanitize_path_component};
 
     #[test]
-    fn runtime_paths_include_sanitized_package_name() {
+    fn runtime_paths_include_sanitized_package_and_serial() {
         let base = PathBuf::from("/tmp/input-dynamics-test");
-        let paths = RuntimePaths::from_base_dir(base, "org.inputdynamics.ime/debug");
+        let paths = RuntimePaths::from_base_dir(base, "org.inputdynamics.ime/debug", "device/123");
 
         assert!(
             paths
                 .socket
                 .file_name()
                 .and_then(OsStr::to_str)
-                .is_some_and(|name| name.contains("org.inputdynamics.ime_debug.sock")),
-            "socket path should include sanitized package name"
+                .is_some_and(|name| name.contains("org.inputdynamics.ime_debug.device_123.sock")),
+            "socket path should include sanitized package name and device serial"
         );
     }
 

@@ -26,6 +26,21 @@ Or run the built binary:
 target/debug/input-dynamics doctor
 ```
 
+## Device Selection
+
+The CLI targets one Android device at a time. With one connected device, the CLI
+selects it automatically and internally runs ADB commands with that serial. With
+multiple connected devices, pass `--serial <adb-serial>` to every command:
+
+```bash
+adb devices
+cargo run --quiet -p input-dynamics -- --serial "$SERIAL" doctor
+cargo run --quiet -p input-dynamics -- --serial "$SERIAL" session status
+```
+
+Stateful session runtime files are keyed by package and ADB serial, so two
+devices do not share controller sockets, state files, or ownership locks.
+
 ## Common Workflow
 
 For live agent-driven input, use the stateful session lifecycle. It selects the
@@ -46,10 +61,11 @@ cargo run --quiet -p input-dynamics -- press delete
 cargo run --quiet -p input-dynamics -- session stop
 ```
 
-Only one stateful session can be active for a package runtime at a time. A
-competing `session start` returns JSON with `ok: false` and `busy: true` before
-changing IME or logging state. Agents should treat that as a hard ownership
-conflict, inspect `session status`, and wait for the active run to stop.
+Only one stateful session can be active for a package/device runtime at a time.
+A competing `session start` for the same package and ADB serial returns JSON
+with `ok: false` and `busy: true` before changing IME or logging state. Agents
+should treat that as a hard ownership conflict, inspect `session status`, and
+wait for the active run to stop.
 
 For a complete bounded experiment capture, use `record`. It starts IME logging,
 captures a concurrent ADB touchscreen event stream with `getevent`, stops the
@@ -112,7 +128,10 @@ scraping human-oriented text.
 
 ## Commands
 
-- `doctor`: checks ADB visibility, IME registration, and GitHub CLI presence.
+- global `--serial <adb-serial>`: selects the target device. Required when more
+  than one device is connected.
+- `doctor`: checks ADB visibility, selected device state, IME registration, and
+  GitHub CLI presence.
 - `install`: downloads or installs an APK.
 - `select-ime`: enables and selects the IME.
 - `enable-logging` / `disable-logging`: toggles logging.

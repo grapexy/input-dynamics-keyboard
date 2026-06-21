@@ -111,9 +111,10 @@ pub(crate) fn tap(app: &App, spec: TapSpec) -> CliResult<Value> {
         String::from("uinput"),
         String::from("-"),
     ];
+    let scoped_args = app.scoped_adb_args(&args)?;
     let output = run_process_with_stdin(
         app.adb_program(),
-        &args,
+        &scoped_args,
         &stream,
         FailureMode::RequireSuccess,
     )?;

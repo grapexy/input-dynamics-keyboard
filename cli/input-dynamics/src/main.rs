@@ -25,7 +25,7 @@ use crate::output::{success_exit_code, write_failure, write_success};
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let app = App::new(cli.adb, cli.package);
+    let app = App::new(cli.adb, cli.package, cli.serial);
     let outcome = run_command(&app, cli.command);
 
     match outcome {

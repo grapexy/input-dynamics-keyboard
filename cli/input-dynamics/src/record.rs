@@ -56,9 +56,10 @@ impl GeteventCapture {
             String::from("getevent"),
             String::from("-lt"),
         ];
+        let scoped_args = app.scoped_adb_args(&args)?;
         let child = spawn_process_to_files(
             app.adb_program(),
-            &args,
+            &scoped_args,
             &paths.getevent_raw,
             &paths.getevent_stderr,
         )?;

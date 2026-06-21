@@ -34,6 +34,11 @@ PKG=org.inputdynamics.ime.debug
 LOG_DIR=input_dynamics_logs
 ```
 
+If more than one Android device is connected, choose the target from
+`adb devices` and pass `--serial "$SERIAL"` to every `idk` command. The CLI
+fails rather than guessing when multiple devices are visible. Session runtime
+state is keyed by package and ADB serial.
+
 GitHub Release APKs are signed debug-variant APKs, so the default package is
 `org.inputdynamics.ime.debug`. Locally built non-debug APKs use the same
 receiver and action names with `PKG=org.inputdynamics.ime`.
@@ -50,6 +55,18 @@ idk() {
     input-dynamics "$@"
   else
     cargo run --quiet -p input-dynamics -- "$@"
+  fi
+}
+```
+
+For multi-device hosts, include the serial in the wrapper:
+
+```bash
+idk() {
+  if command -v input-dynamics >/dev/null 2>&1; then
+    input-dynamics --serial "$SERIAL" "$@"
+  else
+    cargo run --quiet -p input-dynamics -- --serial "$SERIAL" "$@"
   fi
 }
 ```
@@ -87,9 +104,10 @@ RUN_ID=run-YYYYMMDD-HHMMSS-local-android
 idk session start --run-id "$RUN_ID"
 ```
 
-Only one stateful session can be active for a package runtime. If `session
-start` returns `ok: false` with `busy: true`, do not retry with lower-level
-commands; inspect `idk session status` and wait for the active run to stop.
+Only one stateful session can be active for a package/device runtime. If
+`session start` returns `ok: false` with `busy: true`, do not retry with
+lower-level commands; inspect `idk session status` and wait for the active run
+to stop.
 
 Then use live commands while the session is active:
 
