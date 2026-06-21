@@ -56,6 +56,15 @@ Implemented event types:
 - `session_stop`
 - `field_enter`
 - `field_exit`
+- `input_view_start`
+- `input_view_finish`
+- `input_finish`
+- `ime_window_shown`
+- `ime_window_hidden`
+- `ime_hide_request`
+- `ime_hide_window_called`
+- `system_back_event`
+- `editor_action`
 - `pointer_sample`
 - `key_down`
 - `key_up`
@@ -109,6 +118,12 @@ Input-scoped non-password records can also include:
 - `target_package`
 - `input_type_class`
 - `input_type_variation`
+- `restarting`
+- `finishing_input`
+- `input_view_shown`
+- `dismissal_source_observed`
+- `dismissal_confidence`
+- `dismissal_evidence`
 - `password_field`
 
 `target_package` is the Android package name reported for the app that owns the
@@ -127,6 +142,14 @@ runs; when present, it is copied to every JSONL record in that session.
 
 These fields let later analysis compare human-observed sessions with other
 locally controlled sessions without changing the per-key timing schema.
+
+Lifecycle and dismissal-evidence records use the same non-password field
+boundary as key/touch records. They preserve the latest non-password field
+context long enough to record IME visibility and hide callbacks that may arrive
+after field cleanup. Observed dismissal evidence such as `ime_hide_request`,
+`ime_hide_window_called`, `system_back_event`, and `editor_action` should not be
+treated as a definitive app-side hide reason unless the record explicitly marks
+`dismissal_confidence` as `definitive`.
 
 Example record:
 

@@ -45,6 +45,7 @@ object ResearchSessionLogger {
     private val ioExecutor = Executors.newSingleThreadExecutor()
     @Volatile private var appContext: Context? = null
     @Volatile private var currentInputAttributes: InputAttributes? = null
+    @Volatile private var lifecycleFieldSnapshot: FieldSnapshot? = null
     @Volatile private var knownNonPasswordField = false
 
     @JvmStatic
@@ -150,6 +151,7 @@ object ResearchSessionLogger {
         val session = currentSessionSnapshot(appContext) ?: return null
         appendLifecycleEvent(appContext, session, "session_stop")
         appContext.prefs().edit(commit = true) { putBoolean(PREF_ACTIVE, false) }
+        lifecycleFieldSnapshot = null
         return session.sessionId
     }
 
@@ -158,6 +160,11 @@ object ResearchSessionLogger {
         val appContext = rememberContext(context)
         currentInputAttributes = inputAttributes
         knownNonPasswordField = inputAttributes != null && !inputAttributes.mIsPasswordField
+        lifecycleFieldSnapshot = if (knownNonPasswordField) {
+            FieldSnapshot(inputAttributes?.mTargetApplicationPackageName)
+        } else {
+            null
+        }
         if (!canLogInputEvent(appContext)) return
         val inputType = inputAttributes?.mInputType ?: 0
         val fields = mapOf(
@@ -177,6 +184,107 @@ object ResearchSessionLogger {
         }
         currentInputAttributes = null
         knownNonPasswordField = false
+    }
+
+    @JvmStatic
+    fun onInputViewStarted(context: Context, restarting: Boolean) {
+        logLifecycleObservation(
+            context,
+            "input_view_start",
+            mapOf("restarting" to restarting)
+        )
+    }
+
+    @JvmStatic
+    fun onInputViewFinished(context: Context, finishingInput: Boolean) {
+        logLifecycleObservation(
+            context,
+            "input_view_finish",
+            mapOf("finishing_input" to finishingInput)
+        )
+    }
+
+    @JvmStatic
+    fun onInputFinished(context: Context) {
+        logLifecycleObservation(context, "input_finish")
+    }
+
+    @JvmStatic
+    fun onImeWindowShown(context: Context, inputViewShown: Boolean) {
+        logLifecycleObservation(
+            context,
+            "ime_window_shown",
+            mapOf("input_view_shown" to inputViewShown)
+        )
+    }
+
+    @JvmStatic
+    fun onImeWindowHidden(context: Context) {
+        logLifecycleObservation(context, "ime_window_hidden")
+    }
+
+    @JvmStatic
+    fun onImeHideRequest(context: Context, flags: Int) {
+        logLifecycleObservation(
+            context,
+            "ime_hide_request",
+            mapOf(
+                "flags" to flags,
+                "dismissal_source_observed" to "ime_self_hide",
+                "dismissal_confidence" to "definitive",
+                "dismissal_evidence" to jsonArrayOf("requestHideSelf")
+            )
+        )
+    }
+
+    @JvmStatic
+    fun onImeHideWindowCalled(context: Context) {
+        logLifecycleObservation(
+            context,
+            "ime_hide_window_called",
+            mapOf(
+                "dismissal_source_observed" to "ime_hide_window_called",
+                "dismissal_confidence" to "high",
+                "dismissal_evidence" to jsonArrayOf("hideWindow")
+            )
+        )
+    }
+
+    @JvmStatic
+    fun onSystemBackKeyEvent(
+        context: Context,
+        keyAction: String,
+        keyCode: Int,
+        eventTime: Long,
+        repeatCount: Int,
+        canceled: Boolean
+    ) {
+        logLifecycleObservation(
+            context,
+            "system_back_event",
+            mapOf(
+                "key_action" to keyAction,
+                "key_code" to keyCode,
+                "t_event_uptime_ms" to eventTime,
+                "repeat_count" to repeatCount,
+                "canceled" to canceled,
+                "dismissal_source_observed" to "system_back",
+                "dismissal_confidence" to "high",
+                "dismissal_evidence" to jsonArrayOf("key_event")
+            )
+        )
+    }
+
+    @JvmStatic
+    fun onEditorAction(context: Context, actionId: Int) {
+        logLifecycleObservation(
+            context,
+            "editor_action",
+            mapOf(
+                "action_id" to actionId,
+                "dismissal_evidence" to jsonArrayOf("performEditorAction")
+            )
+        )
     }
 
     @JvmStatic
@@ -218,7 +326,7 @@ object ResearchSessionLogger {
             ))
         }
 
-        appendEvents(appContext, session, records, includeFieldState = true)
+        appendEvents(appContext, session, records, fieldSnapshot())
     }
 
     @JvmStatic
@@ -318,6 +426,18 @@ object ResearchSessionLogger {
         if (!canLogInputEvent(appContext)) return
         val session = currentSessionSnapshot(appContext) ?: return
         appendEvent(appContext, session, event, fields, includeFieldState = true)
+    }
+
+    private fun logLifecycleObservation(
+        context: Context,
+        event: String,
+        fields: Map<String, Any?> = emptyMap()
+    ) {
+        val appContext = rememberContext(context)
+        if (!isEnabled(appContext) || !isSessionActive(appContext)) return
+        val session = currentSessionSnapshot(appContext) ?: return
+        val fieldSnapshot = fieldSnapshot() ?: lifecycleFieldSnapshot ?: return
+        appendEvent(appContext, session, event, fields, fieldSnapshot)
     }
 
     fun logDirectory(context: Context): File =
@@ -453,7 +573,22 @@ object ResearchSessionLogger {
             context,
             session,
             listOf(PendingEvent(event, fields)),
-            includeFieldState
+            if (includeFieldState) fieldSnapshot() else null
+        )
+    }
+
+    private fun appendEvent(
+        context: Context,
+        session: SessionSnapshot,
+        event: String,
+        fields: Map<String, Any?>,
+        fieldSnapshot: FieldSnapshot
+    ) {
+        appendEvents(
+            context,
+            session,
+            listOf(PendingEvent(event, fields)),
+            fieldSnapshot
         )
     }
 
@@ -461,11 +596,10 @@ object ResearchSessionLogger {
         context: Context,
         session: SessionSnapshot,
         events: List<PendingEvent>,
-        includeFieldState: Boolean
+        fieldSnapshot: FieldSnapshot?
     ) {
         if (events.isEmpty()) return
         val appContext = context.applicationContext
-        val fieldSnapshot = if (includeFieldState) fieldSnapshot() else null
         ioExecutor.execute {
             val target = resolveLogDirectory(appContext)
             val file = File(target.directory, "session-${session.sessionId}.jsonl")
@@ -628,6 +762,14 @@ object ResearchSessionLogger {
             is Boolean, is Number, is String, is JSONObject, is JSONArray -> value
             else -> value.toString()
         }
+
+    private fun jsonArrayOf(vararg values: Any?): JSONArray {
+        val array = JSONArray()
+        values.forEach { value ->
+            array.put(jsonValue(value))
+        }
+        return array
+    }
 
     private fun logFilesJson(context: Context): JSONArray {
         val files = listLogFiles(context)

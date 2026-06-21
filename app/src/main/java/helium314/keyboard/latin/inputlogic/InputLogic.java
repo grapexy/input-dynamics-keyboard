@@ -51,6 +51,7 @@ import helium314.keyboard.latin.common.SuggestionSpanUtilsKt;
 import helium314.keyboard.latin.define.DebugFlags;
 import helium314.keyboard.latin.settings.Settings;
 import helium314.keyboard.latin.settings.SettingsValues;
+import helium314.keyboard.latin.research.ResearchSessionLogger;
 import helium314.keyboard.latin.settings.SpacingAndPunctuations;
 import helium314.keyboard.latin.suggestions.SuggestionStripViewAccessor;
 import helium314.keyboard.latin.utils.AsyncResultHolder;
@@ -2079,6 +2080,7 @@ public final class InputLogic {
      * @param actionId the action to perform
      */
     private void performEditorAction(final int actionId) {
+        ResearchSessionLogger.onEditorAction(mLatinIME, actionId);
         mConnection.performEditorAction(actionId);
     }
 

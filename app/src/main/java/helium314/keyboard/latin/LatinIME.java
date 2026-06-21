@@ -875,6 +875,7 @@ public class LatinIME extends InputMethodService implements
         }
         ResearchSessionLogger.onInputFieldStarted(this,
                 new InputAttributes(editorInfo, isFullscreenMode(), getPackageName()));
+        ResearchSessionLogger.onInputViewStarted(this, restarting);
 
         // In landscape mode, this method gets called without the input view being created.
         if (mainKeyboardView == null) {
@@ -998,6 +999,7 @@ public class LatinIME extends InputMethodService implements
     @Override
     public void onWindowShown() {
         super.onWindowShown();
+        ResearchSessionLogger.onImeWindowShown(this, isInputViewShown());
         if (isInputViewShown()) {
             setNavigationBarColor();
             workaroundForHuaweiStatusBarIssue();
@@ -1008,6 +1010,7 @@ public class LatinIME extends InputMethodService implements
     public void onWindowHidden() {
         super.onWindowHidden();
         Log.i(TAG, "onWindowHidden");
+        ResearchSessionLogger.onImeWindowHidden(this);
         final MainKeyboardView mainKeyboardView = mKeyboardSwitcher.getMainKeyboardView();
         if (mainKeyboardView != null) {
             mainKeyboardView.closing();
@@ -1018,6 +1021,7 @@ public class LatinIME extends InputMethodService implements
     void onFinishInputInternal() {
         super.onFinishInput();
         Log.i(TAG, "onFinishInput");
+        ResearchSessionLogger.onInputFinished(this);
         ResearchSessionLogger.onInputFieldFinished(this);
 
         mDictionaryFacilitator.onFinishInput();
@@ -1030,6 +1034,7 @@ public class LatinIME extends InputMethodService implements
     void onFinishInputViewInternal(final boolean finishingInput) {
         super.onFinishInputView(finishingInput);
         Log.i(TAG, "onFinishInputView");
+        ResearchSessionLogger.onInputViewFinished(this, finishingInput);
         cleanupInternalStateForFinishInput();
     }
 
@@ -1114,6 +1119,7 @@ public class LatinIME extends InputMethodService implements
     @Override
     public void hideWindow() {
         Log.i(TAG, "hideWindow");
+        ResearchSessionLogger.onImeHideWindowCalled(this);
         if (hasSuggestionStripView() && mSettings.getCurrent().mToolbarMode == ToolbarMode.EXPANDABLE)
             mSuggestionStripView.setToolbarVisibility(false);
         mKeyboardSwitcher.onHideWindow();
@@ -1128,8 +1134,9 @@ public class LatinIME extends InputMethodService implements
 
     @Override
     public void requestHideSelf(int flags) {
-        super.requestHideSelf(flags);
         Log.i(TAG, "requestHideSelf: " + flags);
+        ResearchSessionLogger.onImeHideRequest(this, flags);
+        super.requestHideSelf(flags);
     }
 
     @Override
@@ -1666,6 +1673,10 @@ public class LatinIME extends InputMethodService implements
     // Hooks for hardware keyboard
     @Override
     public boolean onKeyDown(final int keyCode, final KeyEvent keyEvent) {
+        if (keyCode == KeyEvent.KEYCODE_BACK) {
+            ResearchSessionLogger.onSystemBackKeyEvent(this, "down", keyCode,
+                    keyEvent.getEventTime(), keyEvent.getRepeatCount(), keyEvent.isCanceled());
+        }
         if (mKeyboardActionListener.onKeyDown(keyCode, keyEvent))
             return true;
         return super.onKeyDown(keyCode, keyEvent);
@@ -1673,6 +1684,10 @@ public class LatinIME extends InputMethodService implements
 
     @Override
     public boolean onKeyUp(final int keyCode, final KeyEvent keyEvent) {
+        if (keyCode == KeyEvent.KEYCODE_BACK) {
+            ResearchSessionLogger.onSystemBackKeyEvent(this, "up", keyCode,
+                    keyEvent.getEventTime(), keyEvent.getRepeatCount(), keyEvent.isCanceled());
+        }
         if (mKeyboardActionListener.onKeyUp(keyCode, keyEvent))
             return true;
         return super.onKeyUp(keyCode, keyEvent);

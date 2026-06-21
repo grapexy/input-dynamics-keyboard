@@ -13,6 +13,13 @@ Use this reference when validating logs or changing event fields.
 - `session_start` and `session_stop` records bracket a normal session.
 - `session_start` includes session-level provenance: `input_actor`,
   `input_controller`, and `input_cadence_policy`.
+- Lifecycle events include `input_view_start`, `input_view_finish`,
+  `input_finish`, `ime_window_shown`, and `ime_window_hidden`.
+- Dismissal-evidence events include `ime_hide_request`,
+  `ime_hide_window_called`, `system_back_event`, and `editor_action`.
+- Keep observed and inferred dismissal fields separate. Do not treat app-side
+  hide reasons as ground truth unless they are actually observed by the event
+  source.
 - `target_package` identifies the active editor package reported to the IME.
 - `password_field: true` records should not appear in pulled non-password
   validation logs; password-class contexts are the hard suppression boundary.
