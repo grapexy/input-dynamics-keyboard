@@ -35,7 +35,7 @@ Use this keyboard only in consented, local research settings.
 Build and install the debug APK:
 
 ```bash
-./gradlew :app:testDebugUnitTest :app:assembleDebug
+./gradlew :app:testRunTestsUnitTest :app:assembleDebug
 adb install -r app/build/outputs/apk/debug/InputDynamicsKeyboard_3.9-debug.apk
 PKG=org.inputdynamics.ime.debug
 IME_SERVICE="$(adb shell ime list -s | grep "^$PKG/" | head -n 1)"

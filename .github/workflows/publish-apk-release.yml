@@ -65,7 +65,7 @@ jobs:
         run: chmod +x gradlew
 
       - name: Test and build debug APK
-        run: ./gradlew :app:testDebugUnitTest :app:assembleDebug
+        run: ./gradlew :app:testRunTestsUnitTest :app:assembleDebug
 
       - name: Verify and package release assets
         shell: bash

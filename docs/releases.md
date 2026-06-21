@@ -34,7 +34,7 @@ completed.
 The workflow runs:
 
 ```bash
-./gradlew :app:testDebugUnitTest :app:assembleDebug
+./gradlew :app:testRunTestsUnitTest :app:assembleDebug
 ```
 
 It then checks the debug APK for absence of `android.permission.INTERNET` and

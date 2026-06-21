@@ -9,7 +9,7 @@ to `input_dynamics_control_status.json` next to the JSONL logs.
 Build and test the debug variant:
 
 ```bash
-./gradlew :app:testDebugUnitTest :app:assembleDebug
+./gradlew :app:testRunTestsUnitTest :app:assembleDebug
 ```
 
 Build debug and unsigned release APKs:

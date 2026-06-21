@@ -30,7 +30,7 @@ jobs:
         run: chmod +x gradlew
 
       - name: Build with Gradle
-        run: ./gradlew :app:testDebugUnitTest
+        run: ./gradlew :app:testRunTestsUnitTest
 
       - name: Archive reports for failed job
         uses: actions/upload-artifact@v4
