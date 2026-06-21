@@ -84,6 +84,23 @@ cargo run --quiet -p input-dynamics -- record --run-id "$RUN_ID" --out "runs/$RU
 When `--duration-ms` is omitted, press Enter in the terminal to stop capture
 cleanly. For scripted smoke tests, pass `--duration-ms <ms>`.
 
+For bounded agent-driven input, add `--with-input-controller`. This starts the
+persistent uinput controller for the record window and writes controller
+runtime metadata plus cleanup results into `manifest.json`. A second CLI
+process can send `tap`, `press`, `touch swipe`, `touch path`, or
+`hide-keyboard` commands while the timed record process is running:
+
+```bash
+RUN_ID=run-YYYYMMDD-HHMMSS-agent-android
+
+cargo run --quiet -p input-dynamics -- record \
+  --run-id "$RUN_ID" \
+  --out "runs/$RUN_ID" \
+  --duration-ms 10000 \
+  --with-input-controller \
+  --input-actor agent_adb
+```
+
 Lower-level session commands remain available for debugging:
 
 ```bash
@@ -177,7 +194,9 @@ scraping human-oriented text.
 - `validate <path> --run-id <id>`: validates JSONL lifecycle and safety fields.
 - `record --run-id <id> --out <dir>`: records a complete run with IME JSONL,
   ADB `getevent` raw touch stream, manifest, pull, and validation output. Use
-  `--duration-ms <ms>` for timed runs; otherwise press Enter to stop.
+  `--duration-ms <ms>` for timed runs; otherwise press Enter to stop. Add
+  `--with-input-controller` for bounded agent-driven runs that need persistent
+  uinput controller metadata in the manifest.
 
 Use semantic `press` commands for common non-letter keys. `tap --code=-7` still
 works for delete, and `tap --code -7` is also accepted, but semantic commands
@@ -205,6 +224,16 @@ of falling back to a second touch implementation.
     getevent.stderr.log
   derived/
 ```
+
+When `record` is run with `--with-input-controller`, `manifest.json` includes:
+
+- `input_controller_runtime.summary.input_backend`
+- `input_controller_runtime.summary.input_device_command`
+- `input_controller_runtime.summary.physical_touchscreen_profile_hash`
+- `input_controller_runtime.summary.physical_touchscreen`
+- `input_controller_runtime.summary.virtual_touchscreen`
+- `input_controller_runtime.summary.virtual_touchscreen_event_path`
+- `input_controller_runtime.summary.cleanup`
 
 The `adb/getevent.raw.log` stream is device-level touchscreen data. Keep it
 separate from IME-owned JSONL records when analyzing password-field suppression

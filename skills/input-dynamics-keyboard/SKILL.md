@@ -136,6 +136,27 @@ The command writes `manifest.json`, `validation.json`, `ime/`, `adb/`, and
 device-level touchscreen data and should be analyzed separately from IME-owned
 JSONL privacy guarantees.
 
+For a bounded agent-driven run that also needs persistent uinput controller
+metadata, run `record` with `--with-input-controller` and a duration. Then drive
+input from another CLI process while the record process is active:
+
+```bash
+RUN_ID=run-YYYYMMDD-HHMMSS-local-android
+idk record \
+  --run-id "$RUN_ID" \
+  --out "runs/$RUN_ID" \
+  --duration-ms 10000 \
+  --with-input-controller \
+  --input-actor agent_adb
+```
+
+The resulting manifest should include
+`input_controller_runtime.summary.input_backend`,
+`input_controller_runtime.summary.input_device_command`,
+`input_controller_runtime.summary.physical_touchscreen_profile_hash`,
+`input_controller_runtime.summary.virtual_touchscreen_event_path`, and
+`input_controller_runtime.summary.cleanup`.
+
 5. Use lower-level status and layout commands when debugging:
 
 ```bash

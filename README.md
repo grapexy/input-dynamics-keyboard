@@ -32,6 +32,8 @@ Use this keyboard only in consented, local research settings.
   screenshot-based coordinate discovery.
 - AOSP uinput-backed CLI touch commands for local agent-driven key presses,
   absolute taps, gesture paths, and edge-back keyboard dismissal.
+- Optional `record --with-input-controller` manifests with uinput controller
+  runtime metadata and cleanup results.
 - Single-owner stateful CLI sessions; competing starts return a non-destructive
   busy result.
 - Device-scoped CLI operation with `--serial` for multi-device hosts.

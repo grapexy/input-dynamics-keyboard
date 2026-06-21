@@ -136,6 +136,9 @@ pub(crate) enum Commands {
         /// Optional capture duration. If omitted, press Enter on stdin to stop.
         #[arg(long)]
         duration_ms: Option<u64>,
+        /// Start a persistent uinput controller during the record run.
+        #[arg(long)]
+        with_input_controller: bool,
         /// Session-level input actor provenance.
         #[arg(long, default_value = "human")]
         input_actor: String,
