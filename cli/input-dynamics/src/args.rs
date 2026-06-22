@@ -276,13 +276,13 @@ pub(crate) enum GeteventCommand {
 pub(crate) enum DeriveCommand {
     /// Derive touch gestures and dismissal inferences.
     Dismissals {
-        /// Experiment run directory.
+        /// Recording directory created by `input-dynamics record`.
         #[arg(long)]
-        run_dir: PathBuf,
+        recording_dir: PathBuf,
         /// Local derivation policy JSON used for analysis thresholds.
         #[arg(long)]
         policy: Option<PathBuf>,
-        /// Normalized `adb/getevent.jsonl` path. Defaults under `--run-dir`.
+        /// Normalized `adb/getevent.jsonl` path. Defaults under `--recording-dir`.
         #[arg(long)]
         getevent_jsonl: Option<PathBuf>,
         /// IME session JSONL path. Defaults to the single `ime/session-*.jsonl`.
@@ -294,6 +294,24 @@ pub(crate) enum DeriveCommand {
         /// Output path for dismissal inferences.
         #[arg(long)]
         dismissals_output: Option<PathBuf>,
+    },
+    /// Derive a cross-source recording timeline.
+    Timeline {
+        /// Recording directory created by `input-dynamics record`.
+        #[arg(long)]
+        recording_dir: PathBuf,
+        /// IME session JSONL path. Defaults to the single `ime/session-*.jsonl`.
+        #[arg(long)]
+        ime_jsonl: Option<PathBuf>,
+        /// Derived touch gesture JSONL path. Defaults under `--recording-dir`.
+        #[arg(long)]
+        touch_gestures_jsonl: Option<PathBuf>,
+        /// Derived dismissal inference JSONL path. Defaults under `--recording-dir`.
+        #[arg(long)]
+        dismissals_jsonl: Option<PathBuf>,
+        /// Timeline output directory. Defaults to `derived/timeline`.
+        #[arg(long)]
+        output_dir: Option<PathBuf>,
     },
 }
 

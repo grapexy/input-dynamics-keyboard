@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use input_dynamics_analysis::derivation::{
-    DeriveDismissalsConfig, derive_dismissals as run_derive_dismissals,
+    DeriveDismissalsConfig, DeriveTimelineConfig, derive_dismissals as run_derive_dismissals,
+    derive_timeline as run_derive_timeline,
 };
 use input_dynamics_analysis::getevent::{GETEVENT_SCHEMA, NormalizeStats, normalize_file};
 use serde_json::{Value, json};
@@ -206,17 +207,17 @@ fn run_record_command(app: &App, command: &Commands) -> CliResult<Value> {
 fn derive(command: DeriveCommand) -> CliResult<Value> {
     match command {
         DeriveCommand::Dismissals {
-            run_dir,
+            recording_dir,
             policy,
             getevent_jsonl,
             ime_jsonl,
             touch_gestures_output,
             dismissals_output,
         } => {
-            let screen = screen_config_from_run_manifest(&run_dir)?;
+            let screen = screen_config_from_run_manifest(&recording_dir)?;
             let loaded_policy = derivation_policy::load(policy.as_deref())?;
             run_derive_dismissals(&DeriveDismissalsConfig {
-                run_dir,
+                recording_dir,
                 getevent_jsonl,
                 ime_jsonl,
                 touch_gestures_output,
@@ -227,6 +228,20 @@ fn derive(command: DeriveCommand) -> CliResult<Value> {
             })
             .map_err(CliError::from)
         }
+        DeriveCommand::Timeline {
+            recording_dir,
+            ime_jsonl,
+            touch_gestures_jsonl,
+            dismissals_jsonl,
+            output_dir,
+        } => run_derive_timeline(&DeriveTimelineConfig {
+            recording_dir,
+            ime_jsonl,
+            touch_gestures_jsonl,
+            dismissals_jsonl,
+            output_dir,
+        })
+        .map_err(CliError::from),
     }
 }
 

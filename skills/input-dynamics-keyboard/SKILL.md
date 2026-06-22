@@ -212,12 +212,23 @@ should also include `evidence.enabled: true` and `evidence.policy: start_end`.
 To derive touch gestures and dismissal inferences from a completed run:
 
 ```bash
-idk derive dismissals --run-dir "runs/$RUN_ID"
+idk derive dismissals --recording-dir "runs/$RUN_ID"
 ```
 
 The CLI uses the bundled derivation policy by default. Pass `--policy <path>`
 only when a protocol requires a local classifier-threshold override. Do not use
 input profiles for derivation thresholds; profiles control generated input.
+
+To build an agent-readable cross-source recording timeline:
+
+```bash
+idk derive timeline --recording-dir "runs/$RUN_ID"
+```
+
+This writes `derived/timeline/index.json` and
+`derived/timeline/events.jsonl`. Use the timeline as an index over source
+records and evidence artifacts, not as the raw source of truth. Preserve clock
+domains and source references when reasoning from it.
 
 5. Use lower-level status and layout commands when debugging:
 

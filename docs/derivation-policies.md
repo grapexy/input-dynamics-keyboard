@@ -14,23 +14,23 @@ checkout to use the default policy.
 
 ## Use
 
-After recording a run with the current CLI:
+After creating a recording with the current CLI:
 
 ```bash
-input-dynamics derive dismissals --run-dir "runs/$RUN_ID"
+input-dynamics derive dismissals --recording-dir "runs/$RUN_ID"
 ```
 
 To use a local policy override:
 
 ```bash
 input-dynamics derive dismissals \
-  --run-dir "runs/$RUN_ID" \
+  --recording-dir "runs/$RUN_ID" \
   --policy ./policies/custom-derivation.json
 ```
 
 `derive dismissals` reads screen and keyboard coordinate facts from
 `manifest.json`. Do not pass screen width, screen height, or keyboard top by
-hand. If a run is missing `coordinate_frame`, record the run again with the
+hand. If a recording is missing `coordinate_frame`, record it again with the
 current CLI.
 
 ## Schema

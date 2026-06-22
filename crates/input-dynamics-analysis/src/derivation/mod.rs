@@ -3,6 +3,7 @@
 mod dismissal;
 mod error;
 mod jsonl;
+mod timeline;
 mod touch;
 
 use std::fs;
@@ -15,6 +16,7 @@ pub use error::{DeriveError, DeriveResult};
 
 use crate::derivation::dismissal::derive_dismissal_inferences;
 use crate::derivation::jsonl::{read_jsonl, write_jsonl};
+pub use crate::derivation::timeline::{DeriveTimelineConfig, derive_timeline};
 use crate::derivation::touch::derive_touch_gestures;
 
 /// Schema written to derived touch gesture JSONL records.
@@ -25,6 +27,12 @@ pub const DISMISSAL_INFERENCE_SCHEMA: &str = "input_dynamics_dismissal_inference
 
 /// Schema written to derivation command summaries.
 pub const DERIVATION_SUMMARY_SCHEMA: &str = "input_dynamics_derivation_summary.v1";
+
+/// Schema written to timeline event JSONL records.
+pub const TIMELINE_EVENT_SCHEMA: &str = "input_dynamics_timeline_event.v1";
+
+/// Schema written to timeline index JSON files.
+pub const TIMELINE_INDEX_SCHEMA: &str = "input_dynamics_timeline_index.v1";
 
 /// Schema for derivation policy JSON files.
 pub const DERIVATION_POLICY_SCHEMA: &str = "input_dynamics_derivation_policy.v1";
@@ -64,9 +72,9 @@ pub struct DismissalDerivationPolicy {
 /// Configuration for deriving dismissal records from a run directory.
 #[derive(Clone, Debug)]
 pub struct DeriveDismissalsConfig {
-    /// Experiment run directory.
-    pub run_dir: PathBuf,
-    /// Normalized `adb/getevent.jsonl` path. Defaults under `run_dir`.
+    /// Recording directory created by `input-dynamics record`.
+    pub recording_dir: PathBuf,
+    /// Normalized `adb/getevent.jsonl` path. Defaults under `recording_dir`.
     pub getevent_jsonl: Option<PathBuf>,
     /// IME session JSONL path. Defaults to the single `ime/session-*.jsonl`.
     pub ime_jsonl: Option<PathBuf>,
@@ -154,18 +162,20 @@ impl DerivePaths {
         let getevent_jsonl = config
             .getevent_jsonl
             .clone()
-            .unwrap_or_else(|| config.run_dir.join("adb").join("getevent.jsonl"));
+            .unwrap_or_else(|| config.recording_dir.join("adb").join("getevent.jsonl"));
         let ime_jsonl = match config.ime_jsonl.clone() {
             Some(path) => path,
-            None => find_ime_jsonl(&config.run_dir)?,
+            None => find_ime_jsonl(&config.recording_dir)?,
         };
-        let touch_gestures_output = config
-            .touch_gestures_output
-            .clone()
-            .unwrap_or_else(|| config.run_dir.join("derived").join("touch_gestures.jsonl"));
+        let touch_gestures_output = config.touch_gestures_output.clone().unwrap_or_else(|| {
+            config
+                .recording_dir
+                .join("derived")
+                .join("touch_gestures.jsonl")
+        });
         let dismissals_output = config.dismissals_output.clone().unwrap_or_else(|| {
             config
-                .run_dir
+                .recording_dir
                 .join("derived")
                 .join("dismissal_inferences.jsonl")
         });
@@ -185,7 +195,7 @@ pub fn derive_dismissals(config: &DeriveDismissalsConfig) -> DeriveResult<Value>
     validate_policy(config.policy)?;
     let getevent_records = read_jsonl(&paths.getevent_jsonl)?;
     let ime_records = read_jsonl(&paths.ime_jsonl)?;
-    let run_context = RunContext::from_records(&config.run_dir, &ime_records)?;
+    let run_context = RunContext::from_records(&config.recording_dir, &ime_records)?;
     let gestures = derive_touch_gestures(&getevent_records, config.screen, config.policy)?;
     let ime_events = read_ime_events(&ime_records);
     let dismissals =
@@ -203,7 +213,7 @@ pub fn derive_dismissals(config: &DeriveDismissalsConfig) -> DeriveResult<Value>
     Ok(json!({
         "ok": true,
         "schema": DERIVATION_SUMMARY_SCHEMA,
-        "run_dir": path_text(&config.run_dir),
+        "recording_dir": path_text(&config.recording_dir),
         "getevent_jsonl": path_text(&paths.getevent_jsonl),
         "ime_jsonl": path_text(&paths.ime_jsonl),
         "touch_gestures_output": path_text(&paths.touch_gestures_output),
@@ -244,7 +254,7 @@ impl RunContext {
     }
 }
 
-fn find_ime_jsonl(run_dir: &Path) -> DeriveResult<PathBuf> {
+pub(crate) fn find_ime_jsonl(run_dir: &Path) -> DeriveResult<PathBuf> {
     let ime_dir = run_dir.join("ime");
     let mut session_files = Vec::new();
     for entry_result in fs::read_dir(&ime_dir)? {
@@ -322,7 +332,7 @@ fn validate_non_negative(name: &str, value: i64) -> DeriveResult<()> {
     Ok(())
 }
 
-fn read_manifest(run_dir: &Path) -> DeriveResult<Value> {
+pub(crate) fn read_manifest(run_dir: &Path) -> DeriveResult<Value> {
     let manifest_path = run_dir.join("manifest.json");
     if manifest_path.exists() {
         let text = fs::read_to_string(manifest_path)?;
@@ -361,7 +371,7 @@ pub(crate) fn string_field(record: &Value, field: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn string_at(record: &Value, pointer: &str) -> Option<String> {
+pub(crate) fn string_at(record: &Value, pointer: &str) -> Option<String> {
     record
         .pointer(pointer)
         .and_then(Value::as_str)

@@ -276,10 +276,13 @@ scraping human-oriented text.
   that need persistent uinput controller metadata in the manifest. Add
   `--with-evidence` to capture start/end observation bundles containing
   accessibility XML, screenshot PNG, status, layout, state, and index JSON.
-- `derive dismissals --run-dir <dir>`: derives touch gestures and dismissal
-  inferences from a recorded run. The command reads coordinate facts from
+- `derive dismissals --recording-dir <dir>`: derives touch gestures and dismissal
+  inferences from a recording. The command reads coordinate facts from
   `manifest.json` and uses the bundled derivation policy by default. Pass
   `--policy <path>` for a local policy override.
+- `derive timeline --recording-dir <dir>`: writes a cross-source recording
+  timeline bundle under `derived/timeline/`. Timeline rows reference source
+  records and evidence artifacts; raw streams remain canonical.
 
 Use `type <text>` for ordinary text entry. Use semantic `press` commands for
 common non-letter keys and corrections. `tap --code=-7` still works for delete,
@@ -357,7 +360,7 @@ password-field suppression or keyboard-local privacy guarantees.
 After recording with the current CLI:
 
 ```bash
-input-dynamics derive dismissals --run-dir "runs/$RUN_ID"
+input-dynamics derive dismissals --recording-dir "runs/$RUN_ID"
 ```
 
 This writes:
@@ -365,16 +368,40 @@ This writes:
 - `derived/touch_gestures.jsonl`
 - `derived/dismissal_inferences.jsonl`
 
+To create a cross-source timeline index:
+
+```bash
+input-dynamics derive timeline --recording-dir "runs/$RUN_ID"
+```
+
+This writes:
+
+```text
+derived/
+  timeline/
+    index.json
+    events.jsonl
+```
+
+`derived/timeline/events.jsonl` contains semantic IME events, derived touch
+gestures, dismissal inferences, and optional evidence bundle markers. It does
+not copy low-level raw `getevent` rows by default and does not embed screenshot
+or accessibility payloads. Each row keeps source references and an explicit
+clock domain. `derived/timeline/index.json` records selected sources, counts,
+fingerprints, output paths, warnings, and the clock-alignment status.
+
 To use a local classifier-threshold policy:
 
 ```bash
 input-dynamics derive dismissals \
-  --run-dir "runs/$RUN_ID" \
+  --recording-dir "runs/$RUN_ID" \
   --policy ./policies/custom-derivation.json
 ```
 
 Input profiles and derivation policies are separate. `--input-profile` controls
-controller-generated input. `--policy` controls recorded-run interpretation.
+controller-generated input. `--policy` controls recording interpretation.
+Derived timeline artifacts are sensitive local recording data; keep them with
+the same care as raw JSONL, screenshots, and accessibility dumps.
 
 Use [adb-control.md](adb-control.md) when debugging the lower-level broadcast
 surface directly.
