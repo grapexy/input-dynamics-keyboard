@@ -6,17 +6,23 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
+use input_dynamics_analysis::derivation::{
+    DeriveDismissalsConfig, derive_dismissals as run_derive_dismissals,
+};
 use input_dynamics_analysis::getevent::{GETEVENT_SCHEMA, NormalizeStats, normalize_file};
 use serde_json::{Value, json};
 
 use crate::app::{App, LOG_DIR};
 use crate::args::{
-    Commands, ControllerCommand, EdgeSide, GeteventCommand, HideKeyboardMethod, PressKey,
-    SessionCommand, TouchCommand,
+    Commands, ControllerCommand, DeriveCommand, EdgeSide, GeteventCommand, HideKeyboardMethod,
+    ObserveCommand, PressKey, SessionCommand, TouchCommand,
 };
 use crate::controller::{self, RunConfig, SessionStartPermit};
+use crate::coordinate_frame::screen_config_from_run_manifest;
+use crate::derivation_policy;
 use crate::error::{CliError, CliResult};
 use crate::layout::{json_number_to_shell_arg, key_matches};
+use crate::observe;
 use crate::process::{FailureMode, run_process};
 use crate::profile::{
     self, InterKeyDelaySampling, KeyProfileContext, ProfileProvenance, RuntimeProfile,
@@ -83,6 +89,7 @@ pub(crate) fn run_command(app: &App, cli_command: Commands) -> CliResult<Value> 
             };
             layout(app, wait)
         }
+        Commands::Observe { command } => observe_command(app, command),
         ref hide_command @ Commands::HideKeyboard { .. } => {
             hide_keyboard_command(app, hide_command)
         }
@@ -91,26 +98,8 @@ pub(crate) fn run_command(app: &App, cli_command: Commands) -> CliResult<Value> 
         Commands::Pull { out } => pull_logs(app, &out),
         Commands::Validate { path, run_id } => validate_logs(&path, run_id.as_deref()),
         Commands::Getevent { command } => getevent(command),
-        Commands::Record {
-            run_id,
-            out,
-            duration_ms,
-            with_input_controller,
-            input_actor,
-            input_controller,
-            input_cadence_policy,
-        } => {
-            let config = RecordConfig {
-                run_id,
-                out,
-                duration_ms,
-                with_input_controller,
-                input_actor,
-                input_controller,
-                input_cadence_policy,
-            };
-            record_run(app, &config)
-        }
+        Commands::Derive { command } => derive(command),
+        ref record_command @ Commands::Record { .. } => run_record_command(app, record_command),
         Commands::Session {
             command: session_command,
         } => session(app, session_command),
@@ -126,6 +115,114 @@ pub(crate) fn run_command(app: &App, cli_command: Commands) -> CliResult<Value> 
         Commands::Controller {
             command: controller_command,
         } => run_controller_command(app, controller_command),
+    }
+}
+
+fn observe_command(app: &App, command: ObserveCommand) -> CliResult<Value> {
+    match command {
+        ObserveCommand::Accessibility { out, full } => observe::accessibility(
+            app,
+            out.as_deref(),
+            if full {
+                observe::AccessibilityDetail::Full
+            } else {
+                observe::AccessibilityDetail::Compressed
+            },
+        ),
+        ObserveCommand::Screenshot { out } => observe::screenshot(app, &out),
+        ObserveCommand::Layout {
+            wait_visible,
+            wait_hidden,
+        } => {
+            let wait = if wait_visible {
+                LayoutWait::Visible
+            } else if wait_hidden {
+                LayoutWait::Hidden
+            } else {
+                LayoutWait::Current
+            };
+            layout(app, wait)
+        }
+        ObserveCommand::State {
+            with_accessibility,
+            screenshot_out,
+            full_accessibility,
+        } => observe::state(
+            app,
+            observe::StateOptions {
+                include_accessibility: with_accessibility,
+                screenshot_out: screenshot_out.as_deref(),
+                accessibility_detail: if full_accessibility {
+                    observe::AccessibilityDetail::Full
+                } else {
+                    observe::AccessibilityDetail::Compressed
+                },
+            },
+        ),
+        ObserveCommand::All {
+            out_dir,
+            full_accessibility,
+        } => observe::all(
+            app,
+            &out_dir,
+            if full_accessibility {
+                observe::AccessibilityDetail::Full
+            } else {
+                observe::AccessibilityDetail::Compressed
+            },
+        ),
+    }
+}
+
+fn run_record_command(app: &App, command: &Commands) -> CliResult<Value> {
+    let &Commands::Record {
+        ref run_id,
+        ref out,
+        duration_ms,
+        with_input_controller,
+        ref input_actor,
+        ref input_controller,
+        ref input_cadence_policy,
+    } = command
+    else {
+        return Err(CliError::new("expected record command"));
+    };
+    let config = RecordConfig {
+        run_id: run_id.clone(),
+        out: out.clone(),
+        duration_ms,
+        with_input_controller,
+        input_actor: input_actor.clone(),
+        input_controller: input_controller.clone(),
+        input_cadence_policy: input_cadence_policy.clone(),
+    };
+    record_run(app, &config)
+}
+
+fn derive(command: DeriveCommand) -> CliResult<Value> {
+    match command {
+        DeriveCommand::Dismissals {
+            run_dir,
+            policy,
+            getevent_jsonl,
+            ime_jsonl,
+            touch_gestures_output,
+            dismissals_output,
+        } => {
+            let screen = screen_config_from_run_manifest(&run_dir)?;
+            let loaded_policy = derivation_policy::load(policy.as_deref())?;
+            run_derive_dismissals(&DeriveDismissalsConfig {
+                run_dir,
+                getevent_jsonl,
+                ime_jsonl,
+                touch_gestures_output,
+                dismissals_output,
+                screen,
+                policy: loaded_policy.policy,
+                policy_summary: Some(loaded_policy.summary),
+            })
+            .map_err(CliError::from)
+        }
     }
 }
 

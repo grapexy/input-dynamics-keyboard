@@ -1,0 +1,10 @@
+{
+  "schema": "input_dynamics_derivation_policy.v1",
+  "id": "default-derivation-v1",
+  "edge_ratio_ppm": 30000,
+  "edge_inward_ratio_ppm": 150000,
+  "max_edge_vertical_drift_ratio_ppm": 120000,
+  "tap_max_distance_px": 32,
+  "tap_max_duration_ms": 250,
+  "hide_correlation_window_ms": 1000
+}

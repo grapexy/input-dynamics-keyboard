@@ -81,6 +81,21 @@ The IME JSONL `session_start` record and controller state include
 `input_profile_source`, `input_profile_id`, `input_profile_schema`,
 `input_profile_hash`, and `input_profile_seed`.
 
+For agent observation, use `observe`. These commands do not start logging and
+do not inject input:
+
+```bash
+cargo run --quiet -p input-dynamics -- observe state --with-accessibility
+cargo run --quiet -p input-dynamics -- observe screenshot --out /tmp/screen.png
+cargo run --quiet -p input-dynamics -- observe accessibility --out /tmp/accessibility.xml
+cargo run --quiet -p input-dynamics -- observe all --out-dir /tmp/input-dynamics-evidence
+```
+
+`observe all` writes `status.json`, `layout.json`, `accessibility.xml`,
+`screenshot.png`, `state.json`, and `index.json`. Accessibility dumps and
+screenshots may contain visible screen content, so store them with the same care
+as run artifacts.
+
 For a complete bounded experiment capture, use `record`. It starts IME logging,
 captures a concurrent ADB touchscreen event stream with `getevent`, normalizes
 that stream to JSONL, stops the session, pulls IME logs, writes
@@ -197,6 +212,20 @@ scraping human-oriented text.
   screen-space key centers for coordinate calibration.
 - `layout --wait-visible` / `layout --wait-hidden`: waits for keyboard layout
   visibility state before returning.
+- `observe accessibility [--out <xml>] [--full]`: captures the current Android
+  accessibility hierarchy with `uiautomator dump`. Without `--out`, the XML is
+  included in JSON output. With `--out`, the XML is written to that path and
+  stdout includes a compact summary.
+- `observe screenshot --out <png>`: captures the current device screen with
+  `screencap`.
+- `observe layout [--wait-visible|--wait-hidden]`: reads the same keyboard
+  layout state as `layout` under the observation namespace.
+- `observe state [--with-accessibility] [--screenshot-out <png>]`: returns IME
+  status, keyboard layout, and optional accessibility/screenshot evidence in
+  one JSON object.
+- `observe all --out-dir <dir>`: writes a complete observation bundle with
+  status, layout, accessibility XML, screenshot PNG, state JSON, and bundle
+  index JSON.
 - `hide-keyboard`: dismisses the visible IME with a stateful uinput edge-back
   gesture and waits for hidden layout state. Options include
   `--method edge-back`, `--side left|right`, and ratio-based geometry overrides.
@@ -231,6 +260,10 @@ scraping human-oriented text.
   validation output. Use `--duration-ms <ms>` for timed runs; otherwise press
   Enter to stop. Add `--with-input-controller` for bounded agent-driven runs
   that need persistent uinput controller metadata in the manifest.
+- `derive dismissals --run-dir <dir>`: derives touch gestures and dismissal
+  inferences from a recorded run. The command reads coordinate facts from
+  `manifest.json` and uses the bundled derivation policy by default. Pass
+  `--policy <path>` for a local policy override.
 
 Use `type <text>` for ordinary text entry. Use semantic `press` commands for
 common non-letter keys and corrections. `tap --code=-7` still works for delete,
@@ -261,6 +294,11 @@ of falling back to a second touch implementation.
   derived/
 ```
 
+`manifest.json` also includes `coordinate_frame`, derived from the recorded
+physical touchscreen profile and keyboard layout snapshots. Analysis commands
+use this recorded frame instead of accepting screen geometry on the command
+line.
+
 When `record` is run with `--with-input-controller`, `manifest.json` includes:
 
 - `input_controller_runtime.summary.input_backend`
@@ -277,6 +315,30 @@ The `adb/getevent.raw.log` stream is device-level touchscreen data.
 `device_added`, `input_event`, and reconstructed `touch_frame` records. Keep ADB
 device-level records separate from IME-owned JSONL records when analyzing
 password-field suppression or keyboard-local privacy guarantees.
+
+## Derived Output
+
+After recording with the current CLI:
+
+```bash
+input-dynamics derive dismissals --run-dir "runs/$RUN_ID"
+```
+
+This writes:
+
+- `derived/touch_gestures.jsonl`
+- `derived/dismissal_inferences.jsonl`
+
+To use a local classifier-threshold policy:
+
+```bash
+input-dynamics derive dismissals \
+  --run-dir "runs/$RUN_ID" \
+  --policy ./policies/custom-derivation.json
+```
+
+Input profiles and derivation policies are separate. `--input-profile` controls
+controller-generated input. `--policy` controls recorded-run interpretation.
 
 Use [adb-control.md](adb-control.md) when debugging the lower-level broadcast
 surface directly.

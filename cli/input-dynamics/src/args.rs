@@ -80,6 +80,11 @@ pub(crate) enum Commands {
         #[arg(long, conflicts_with = "wait_visible")]
         wait_hidden: bool,
     },
+    /// Observe current device, screen, accessibility, and keyboard state.
+    Observe {
+        #[command(subcommand)]
+        command: ObserveCommand,
+    },
     /// Hide the currently visible soft keyboard.
     HideKeyboard {
         /// Dismissal method to attempt.
@@ -129,6 +134,11 @@ pub(crate) enum Commands {
     Getevent {
         #[command(subcommand)]
         command: GeteventCommand,
+    },
+    /// Derive higher-level analysis artifacts from recorded run data.
+    Derive {
+        #[command(subcommand)]
+        command: DeriveCommand,
     },
     /// Record a bounded research run with IME logs and ADB touch events.
     Record {
@@ -195,6 +205,55 @@ pub(crate) enum Commands {
 }
 
 #[derive(Debug, Subcommand)]
+pub(crate) enum ObserveCommand {
+    /// Dump the current accessibility hierarchy.
+    Accessibility {
+        /// Local XML output path. If omitted, XML is included in JSON output.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Request the full hierarchy instead of Android's compressed dump.
+        #[arg(long)]
+        full: bool,
+    },
+    /// Capture a current screenshot.
+    Screenshot {
+        /// Local PNG output path.
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Read the keyboard layout through the IME control surface.
+    Layout {
+        /// Wait until the keyboard layout is visible.
+        #[arg(long, conflicts_with = "wait_hidden")]
+        wait_visible: bool,
+        /// Wait until the keyboard layout is hidden.
+        #[arg(long, conflicts_with = "wait_visible")]
+        wait_hidden: bool,
+    },
+    /// Read a compact current state snapshot.
+    State {
+        /// Include an accessibility hierarchy summary.
+        #[arg(long)]
+        with_accessibility: bool,
+        /// Capture a screenshot to this local PNG path and include its path.
+        #[arg(long)]
+        screenshot_out: Option<PathBuf>,
+        /// Request the full accessibility hierarchy when --with-accessibility is used.
+        #[arg(long)]
+        full_accessibility: bool,
+    },
+    /// Capture status, layout, accessibility, and screenshot evidence into a directory.
+    All {
+        /// Local evidence output directory.
+        #[arg(long)]
+        out_dir: PathBuf,
+        /// Request the full accessibility hierarchy instead of Android's compressed dump.
+        #[arg(long)]
+        full_accessibility: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub(crate) enum GeteventCommand {
     /// Normalize raw `adb shell getevent -lt` output to JSONL.
     Normalize {
@@ -204,6 +263,31 @@ pub(crate) enum GeteventCommand {
         /// Normalized JSONL output file.
         #[arg(long)]
         output: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum DeriveCommand {
+    /// Derive touch gestures and dismissal inferences.
+    Dismissals {
+        /// Experiment run directory.
+        #[arg(long)]
+        run_dir: PathBuf,
+        /// Local derivation policy JSON used for analysis thresholds.
+        #[arg(long)]
+        policy: Option<PathBuf>,
+        /// Normalized `adb/getevent.jsonl` path. Defaults under `--run-dir`.
+        #[arg(long)]
+        getevent_jsonl: Option<PathBuf>,
+        /// IME session JSONL path. Defaults to the single `ime/session-*.jsonl`.
+        #[arg(long)]
+        ime_jsonl: Option<PathBuf>,
+        /// Output path for derived touch gestures.
+        #[arg(long)]
+        touch_gestures_output: Option<PathBuf>,
+        /// Output path for dismissal inferences.
+        #[arg(long)]
+        dismissals_output: Option<PathBuf>,
     },
 }
 

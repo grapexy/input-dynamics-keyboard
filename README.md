@@ -30,6 +30,8 @@ Use this keyboard only in consented, local research settings.
 - Request-correlated local ADB controls for session coordination.
 - Live keyboard layout snapshots for calibration and layout validation without
   screenshot-based coordinate discovery.
+- CLI observation bundles for current status, keyboard layout, accessibility
+  hierarchy, and screenshot evidence when screen context is needed.
 - AOSP uinput-backed CLI touch commands for local agent-driven key presses,
   layout-aware text entry, absolute taps, gesture paths, and edge-back keyboard
   dismissal.
@@ -94,6 +96,7 @@ metadata and asset names include the HeliBoard base version for provenance. See
 - [Documentation index](docs/README.md)
 - [Host CLI for agents and local runs](docs/cli.md)
 - [Input dynamics mode, privacy boundary, and schema](docs/input-dynamics-mode.md)
+- [Derivation policies for recorded-run analysis](docs/derivation-policies.md)
 - [ADB control and validation](docs/adb-control.md)
 - [APK release process](docs/releases.md)
 - [Contribution guidelines](CONTRIBUTING.md)

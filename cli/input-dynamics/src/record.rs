@@ -13,8 +13,10 @@ use serde_json::{Value, json};
 use crate::app::{App, LOG_DIR};
 use crate::commands::{normalize_stats_json, path_string, pull_logs};
 use crate::controller::{self, SessionStartPermit};
+use crate::coordinate_frame::manifest_coordinate_frame;
 use crate::error::{CliError, CliResult};
 use crate::process::{FailureMode, spawn_process_to_files};
+use crate::uinput;
 use crate::validate::validate_logs;
 
 const DEFAULT_RECORD_INPUT_CONTROLLER: &str = "input-dynamics-cli";
@@ -227,9 +229,12 @@ pub(crate) fn record_run(app: &App, config: &RecordConfig) -> CliResult<Value> {
         start,
         mut input_controller,
     } = active;
+    let touchscreen_profile = touchscreen_profile_snapshot(app);
+    let layout_before_capture = layout_snapshot(app);
     let mut capture = start_getevent_capture_or_cleanup(app, &paths, &mut input_controller)?;
     let wait = wait_for_stop_or_cleanup(app, config, &mut capture, &mut input_controller)?;
     let capture_stop = stop_capture_or_cleanup(app, capture, &mut input_controller)?;
+    let layout_after_capture = layout_snapshot(app);
     let input_controller_stop = input_controller.stop();
     let stop = app.broadcast("STOP", Vec::new())?;
     let pull = pull_logs(app, &paths.ime_pull_tmp)?;
@@ -253,6 +258,9 @@ pub(crate) fn record_run(app: &App, config: &RecordConfig) -> CliResult<Value> {
         capture_stop,
         pre_stop,
         clear,
+        touchscreen_profile,
+        layout_before_capture,
+        layout_after_capture,
         input_controller: input_controller.to_json(),
         input_controller_stop,
         stop,
@@ -376,6 +384,40 @@ fn start_record_session(app: &App, config: &RecordConfig) -> CliResult<Value> {
     app.broadcast("START", extras)
 }
 
+fn touchscreen_profile_snapshot(app: &App) -> Value {
+    match uinput::discover_touchscreen_profile(app) {
+        Ok(profile) => {
+            let hash = uinput::profile_hash(&profile).map_or_else(
+                |error| json!({"ok": false, "error": error.to_string()}),
+                |hash| json!({"ok": true, "value": hash}),
+            );
+            json!({
+                "ok": true,
+                "physical_touchscreen": uinput::profile_summary(&profile),
+                "physical_touchscreen_profile_hash": hash
+                    .get("value")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                "profile_hash_result": hash,
+            })
+        }
+        Err(error) => json!({
+            "ok": false,
+            "error": error.to_string(),
+        }),
+    }
+}
+
+fn layout_snapshot(app: &App) -> Value {
+    app.broadcast("KEYBOARD_LAYOUT", Vec::new())
+        .unwrap_or_else(|error| {
+            json!({
+                "ok": false,
+                "error": error.to_string(),
+            })
+        })
+}
+
 fn ensure_command_ok(value: &Value, action: &str) -> CliResult<()> {
     if value.get("ok").and_then(Value::as_bool) == Some(true) {
         return Ok(());
@@ -478,6 +520,9 @@ struct ManifestParts {
     capture_stop: Value,
     pre_stop: Value,
     clear: Value,
+    touchscreen_profile: Value,
+    layout_before_capture: Value,
+    layout_after_capture: Value,
     input_controller: Value,
     input_controller_stop: Value,
     stop: Value,
@@ -520,12 +565,22 @@ fn manifest_json(
             .pointer("/summary/input_device_command")
             .cloned()
             .unwrap_or(Value::Null),
+        "coordinate_frame": manifest_coordinate_frame(
+            &parts.touchscreen_profile,
+            &[
+                ("layout_before_capture", &parts.layout_before_capture),
+                ("layout_after_capture", &parts.layout_after_capture),
+            ],
+        ),
         "commands": {
             "start": parts.start,
             "wait": parts.wait,
             "capture_stop": parts.capture_stop,
             "pre_stop": parts.pre_stop,
             "clear": parts.clear,
+            "touchscreen_profile": parts.touchscreen_profile,
+            "layout_before_capture": parts.layout_before_capture,
+            "layout_after_capture": parts.layout_after_capture,
             "input_controller_stop": parts.input_controller_stop,
             "stop": parts.stop,
             "pull": parts.pull,

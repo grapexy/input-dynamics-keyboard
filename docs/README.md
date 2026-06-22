@@ -8,6 +8,8 @@ Public documentation for Input Dynamics Keyboard is split by purpose:
   scripted runs.
 - [Input profiles](input-profiles.md): bundled baseline and local profile JSON
   schema for stateful controller-driven input.
+- [Derivation policies](derivation-policies.md): bundled defaults and local
+  policy JSON for recorded-run analysis.
 - [ADB control and validation](adb-control.md): raw local control commands, log
   pull paths, and validation checks.
 - [APK releases](releases.md): GitHub Release assets and release verification.

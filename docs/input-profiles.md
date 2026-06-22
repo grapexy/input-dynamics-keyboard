@@ -113,3 +113,6 @@ Example:
 Profile values describe generator intent. IME JSONL records and device-level
 `getevent` captures remain the source of truth for what Android actually
 received and delivered.
+
+Input profiles do not configure recorded-run analysis thresholds. Use
+[derivation policies](derivation-policies.md) for classifier policy.

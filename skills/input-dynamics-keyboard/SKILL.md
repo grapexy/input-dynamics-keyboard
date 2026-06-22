@@ -1,6 +1,6 @@
 ---
 name: input-dynamics-keyboard
-description: Run and validate local Android Input Dynamics Keyboard sessions over ADB. Use when Codex needs to download or build the Android IME APK, install it on a device, enable or select it, record a bounded input dynamics run with an external run_id, inspect status or keyboard layout data, avoid screenshot-dependent automation, pull JSONL logs, or validate the password-field suppression boundary.
+description: Run and validate local Android Input Dynamics Keyboard sessions over ADB. Use when Codex needs to download or build the Android IME APK, install it on a device, enable or select it, record a bounded input dynamics run with an external run_id, inspect status, keyboard layout, accessibility, or screenshot evidence, avoid screenshot-dependent keyboard automation, pull JSONL logs, or validate the password-field suppression boundary.
 ---
 
 # Input Dynamics Keyboard
@@ -21,6 +21,9 @@ instrumentation surface. Keep workflows app-neutral, offline, and ADB-driven.
   fallback if the app reports that external storage is unavailable.
 - Do not rely on UiAutomator to inspect soft-keyboard keys. Use
   the CLI layout and press/tap commands when a non-screenshot path is needed.
+- Use `observe` commands for optional screen-context evidence. Accessibility
+  dumps and screenshots may contain visible screen content; store them with the
+  same care as local run artifacts.
 - Use the CLI's AOSP uinput-backed touch path for scripted key presses,
   absolute taps, and gestures. Do not use `adb shell input tap` for normal
   agent-driven input.
@@ -83,6 +86,17 @@ Check the local touchscreen input backend:
 ```bash
 idk touch doctor
 ```
+
+For current screen context without starting a run, use `observe`:
+
+```bash
+idk observe state --with-accessibility
+idk observe all --out-dir "/tmp/input-dynamics-evidence"
+```
+
+`observe all` writes status, keyboard layout, accessibility XML, screenshot
+PNG, state JSON, and index JSON. Prefer `layout` for keyboard-key coordinates;
+use observation evidence to understand surrounding screen state.
 
 2. Install the latest published debug APK:
 
@@ -151,7 +165,8 @@ cleanly. Agents should use `--duration-ms <ms>` for scripted smoke tests.
 The command writes `manifest.json`, `validation.json`, `ime/`, `adb/`, and
 `derived/` under the output directory. The `adb/getevent.raw.log` stream is
 device-level touchscreen data and should be analyzed separately from IME-owned
-JSONL privacy guarantees.
+JSONL privacy guarantees. Current manifests include `coordinate_frame`, derived
+from recorded touchscreen profile and layout snapshots.
 
 For a bounded agent-driven run that also needs persistent uinput controller
 metadata, run `record` with `--with-input-controller` and a duration. Then drive
@@ -169,12 +184,23 @@ idk record \
 ```
 
 The resulting manifest should include
+`coordinate_frame`,
 `input_controller_runtime.summary.input_backend`,
 `input_controller_runtime.summary.input_device_command`,
 `input_controller_runtime.summary.input_profile`,
 `input_controller_runtime.summary.physical_touchscreen_profile_hash`,
 `input_controller_runtime.summary.virtual_touchscreen_event_path`, and
 `input_controller_runtime.summary.cleanup`.
+
+To derive touch gestures and dismissal inferences from a completed run:
+
+```bash
+idk derive dismissals --run-dir "runs/$RUN_ID"
+```
+
+The CLI uses the bundled derivation policy by default. Pass `--policy <path>`
+only when a protocol requires a local classifier-threshold override. Do not use
+input profiles for derivation thresholds; profiles control generated input.
 
 5. Use lower-level status and layout commands when debugging:
 

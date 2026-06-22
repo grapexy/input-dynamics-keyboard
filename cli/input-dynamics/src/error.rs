@@ -46,6 +46,12 @@ impl From<input_dynamics_analysis::getevent::NormalizeError> for CliError {
     }
 }
 
+impl From<input_dynamics_analysis::derivation::DeriveError> for CliError {
+    fn from(error: input_dynamics_analysis::derivation::DeriveError) -> Self {
+        Self::new(format!("derivation error: {error}"))
+    }
+}
+
 impl From<std::string::FromUtf8Error> for CliError {
     fn from(error: std::string::FromUtf8Error) -> Self {
         Self::new(format!("UTF-8 error: {error}"))
