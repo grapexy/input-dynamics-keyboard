@@ -32,12 +32,18 @@ Use this reference when validating logs or changing event fields.
 - `editor_action` records include the performed `action_id` plus the current
   field's editor metadata, using `field_action_id` for the app-provided
   `EditorInfo.actionId`.
+- Text-edit operation events currently include `commit_text`, `set_composing_text`,
+  `finish_composing_text`, `delete_surrounding_text`, `set_selection`,
+  `set_composing_region`, `send_key_event`, and `commit_completion`.
+  These records are emitted only for non-password fields and include
+  before/after expected selection and composing-state snapshots where available.
 - `password_field: true` records should not appear in pulled non-password
   validation logs; password-class contexts are the hard suppression boundary.
 
 ## Common Fields
 
-Minimum fields expected across typing/touch records include:
+Fields that may appear across typing, touch, lifecycle, and text-edit records
+include:
 
 - `schema`
 - `session_id`
@@ -53,6 +59,18 @@ Minimum fields expected across typing/touch records include:
 - `ime_action_name`
 - `action_label`
 - `action_id`
+- `commit_text`
+- `commit_text_length`
+- `commit_text_code_point_count`
+- `composing_text`
+- `composing_text_before`
+- `composing_text_after`
+- `delete_before_count`
+- `delete_after_count`
+- `selection_start_before`
+- `selection_end_before`
+- `selection_start_after`
+- `selection_end_after`
 - `press_id`
 - `gesture_id`
 - `pointer_id`

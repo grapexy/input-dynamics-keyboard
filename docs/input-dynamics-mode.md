@@ -166,6 +166,19 @@ Input-scoped non-password records can also include:
 - `action_id`
 - `field_action_id`
 - `editor_field_id`
+- `commit_text`
+- `commit_text_length`
+- `commit_text_code_point_count`
+- `composing_text`
+- `composing_text_before`
+- `composing_text_after`
+- `delete_before_count`
+- `delete_after_count`
+- `selection_start_before`
+- `selection_end_before`
+- `selection_start_after`
+- `selection_end_after`
+- `input_connection_result`
 - `restarting`
 - `finishing_input`
 - `input_view_shown`
@@ -216,6 +229,14 @@ treated as a definitive app-side hide reason unless the record explicitly marks
 `action_label`, `action_id`, and `editor_field_id`. `editor_action` records use
 `action_id` for the performed action and `field_action_id` for the app-provided
 field action id.
+
+Text-edit operation records are emitted from the keyboard's `InputConnection`
+wrapper for non-password fields. Current operation events include
+`commit_text`, `set_composing_text`, `finish_composing_text`,
+`delete_surrounding_text`, `set_selection`, `set_composing_region`,
+`send_key_event`, and `commit_completion`. They include operation-specific
+fields plus before/after expected selection and composing-text snapshots where
+the keyboard has them.
 
 `press_id` correlates pointer samples with key down/up/commit records from the
 same touch sequence. `gesture_id` currently matches `press_id` for ordinary key

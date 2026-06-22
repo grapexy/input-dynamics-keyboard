@@ -37,6 +37,7 @@ import helium314.keyboard.latin.common.StringUtils;
 import helium314.keyboard.latin.common.StringUtilsKt;
 import helium314.keyboard.latin.common.UnicodeSurrogate;
 import helium314.keyboard.latin.inputlogic.PrivateCommandPerformer;
+import helium314.keyboard.latin.research.ResearchSessionLogger;
 import helium314.keyboard.latin.settings.SpacingAndPunctuations;
 import helium314.keyboard.latin.utils.CapsModeUtils;
 import helium314.keyboard.latin.utils.DebugLogUtils;
@@ -44,6 +45,8 @@ import helium314.keyboard.latin.utils.NgramContextUtils;
 import helium314.keyboard.latin.utils.StatsUtils;
 import helium314.keyboard.latin.utils.TextRange;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -294,17 +297,72 @@ public final class RichInputConnection implements PrivateCommandPerformer {
         }
     }
 
+    private EditStateSnapshot editStateSnapshot() {
+        return new EditStateSnapshot(mExpectedSelStart, mExpectedSelEnd, mComposingText);
+    }
+
+    private void logTextEditOperation(final String event, final EditStateSnapshot before,
+            final Map<String, Object> operationFields) {
+        final Map<String, Object> fields = new LinkedHashMap<>();
+        if (before != null) {
+            before.writeTo(fields, "before");
+        }
+        editStateSnapshot().writeTo(fields, "after");
+        fields.put("input_connection_connected", isConnected());
+        fields.putAll(operationFields);
+        ResearchSessionLogger.logEvent(mParent, event, fields);
+    }
+
+    private static void putTextFields(final Map<String, Object> fields, final String prefix,
+            final CharSequence text) {
+        final String value = text == null ? null : text.toString();
+        fields.put(prefix, value);
+        if (value == null) {
+            fields.put(prefix + "_length", null);
+            fields.put(prefix + "_code_point_count", null);
+            return;
+        }
+        fields.put(prefix + "_length", value.length());
+        fields.put(prefix + "_code_point_count", value.codePointCount(0, value.length()));
+    }
+
+    private static final class EditStateSnapshot {
+        private final int selectionStart;
+        private final int selectionEnd;
+        private final String composingText;
+
+        private EditStateSnapshot(final int selectionStart, final int selectionEnd,
+                final CharSequence composingText) {
+            this.selectionStart = selectionStart;
+            this.selectionEnd = selectionEnd;
+            this.composingText = composingText == null ? "" : composingText.toString();
+        }
+
+        private void writeTo(final Map<String, Object> fields, final String suffix) {
+            fields.put("selection_start_" + suffix, selectionStart);
+            fields.put("selection_end_" + suffix, selectionEnd);
+            fields.put("has_selection_" + suffix,
+                    selectionStart >= 0 && selectionEnd >= 0 && selectionStart != selectionEnd);
+            putTextFields(fields, "composing_text_" + suffix, composingText);
+        }
+    }
+
     public void finishComposingText() {
         if (DEBUG_BATCH_NESTING) checkBatchEdit();
         if (DEBUG_PREVIOUS_TEXT) checkConsistencyForDebug();
+        final EditStateSnapshot before = editStateSnapshot();
         // TODO: this is not correct! The cursor is not necessarily after the composing text.
         // In the practice right now this is only called when input ends so it will be reset so
         // it works, but it's wrong and should be fixed.
         mCommittedTextBeforeComposingText.append(mComposingText);
         mComposingText.setLength(0);
+        Boolean inputConnectionResult = null;
         if (isConnected()) {
-            mIC.finishComposingText();
+            inputConnectionResult = mIC.finishComposingText();
         }
+        final Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put("input_connection_result", inputConnectionResult);
+        logTextEditOperation("finish_composing_text", before, fields);
     }
 
     public void commitCodePoint(final int codePoint) {
@@ -322,6 +380,7 @@ public final class RichInputConnection implements PrivateCommandPerformer {
         if (DEBUG_PREVIOUS_TEXT) checkConsistencyForDebug();
         if (DebugFlags.DEBUG_ENABLED)
             Log.d(TAG, "committing "+text.length()+" characters");
+        final EditStateSnapshot before = editStateSnapshot();
         mCommittedTextBeforeComposingText.append(text);
         // TODO: the following is exceedingly error-prone. Right now when the cursor is in the
         //  middle of the composing word mComposingText only holds the part of the composing text
@@ -329,6 +388,7 @@ public final class RichInputConnection implements PrivateCommandPerformer {
         mExpectedSelStart += text.length() - mComposingText.length();
         mExpectedSelEnd = mExpectedSelStart;
         mComposingText.setLength(0);
+        Boolean inputConnectionResult = null;
         if (isConnected()) {
             mTempObjectForCommitText.clear();
             mTempObjectForCommitText.append(text);
@@ -351,8 +411,13 @@ public final class RichInputConnection implements PrivateCommandPerformer {
                     }
                 }
             }
-            mIC.commitText(mTempObjectForCommitText, newCursorPosition);
+            inputConnectionResult = mIC.commitText(mTempObjectForCommitText, newCursorPosition);
         }
+        final Map<String, Object> fields = new LinkedHashMap<>();
+        putTextFields(fields, "commit_text", text);
+        fields.put("new_cursor_position", newCursorPosition);
+        fields.put("input_connection_result", inputConnectionResult);
+        logTextEditOperation("commit_text", before, fields);
     }
 
     @Nullable
@@ -560,6 +625,7 @@ public final class RichInputConnection implements PrivateCommandPerformer {
 
     public void deleteTextBeforeCursor(final int beforeLength) {
         if (DEBUG_BATCH_NESTING) checkBatchEdit();
+        final EditStateSnapshot before = editStateSnapshot();
         // TODO: the following is incorrect if the cursor is not immediately after the composition.
         //  Right now we never come here in this case because we reset the composing state before we
         //  come here in this case, but we need to fix this.
@@ -584,9 +650,15 @@ public final class RichInputConnection implements PrivateCommandPerformer {
             mExpectedSelEnd -= mExpectedSelStart;
             mExpectedSelStart = 0;
         }
+        Boolean inputConnectionResult = null;
         if (isConnected()) {
-            mIC.deleteSurroundingText(beforeLength, 0);
+            inputConnectionResult = mIC.deleteSurroundingText(beforeLength, 0);
         }
+        final Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put("delete_before_count", beforeLength);
+        fields.put("delete_after_count", 0);
+        fields.put("input_connection_result", inputConnectionResult);
+        logTextEditOperation("delete_surrounding_text", before, fields);
         if (DEBUG_PREVIOUS_TEXT) checkConsistencyForDebug();
     }
 
@@ -601,6 +673,8 @@ public final class RichInputConnection implements PrivateCommandPerformer {
         if (DEBUG_BATCH_NESTING) checkBatchEdit();
         if (DebugFlags.DEBUG_ENABLED) // no details, might be too sensitive
             Log.d(TAG, "key event with action "+keyEvent.getAction()+", is control: "+Character.isISOControl(keyEvent.getUnicodeChar()));
+        final EditStateSnapshot before = editStateSnapshot();
+        String effectiveText = null;
         if (keyEvent.getAction() == KeyEvent.ACTION_DOWN) {
             if (DEBUG_PREVIOUS_TEXT) checkConsistencyForDebug();
             // This method is only called for enter or backspace when speaking to old applications
@@ -611,6 +685,7 @@ public final class RichInputConnection implements PrivateCommandPerformer {
             // mistakenly catch them to do some stuff.
             switch (keyEvent.getKeyCode()) {
             case KeyEvent.KEYCODE_ENTER:
+                effectiveText = "\n";
                 mCommittedTextBeforeComposingText.append("\n");
                 mExpectedSelStart += 1;
                 mExpectedSelEnd = mExpectedSelStart;
@@ -633,6 +708,7 @@ public final class RichInputConnection implements PrivateCommandPerformer {
                 break;
             case KeyEvent.KEYCODE_UNKNOWN:
                 if (null != keyEvent.getCharacters()) {
+                    effectiveText = keyEvent.getCharacters();
                     mCommittedTextBeforeComposingText.append(keyEvent.getCharacters());
                     mExpectedSelStart += keyEvent.getCharacters().length();
                     mExpectedSelEnd = mExpectedSelStart;
@@ -643,20 +719,34 @@ public final class RichInputConnection implements PrivateCommandPerformer {
                 if (Character.isISOControl(codePoint))
                     break; // don't append text if there is no actual text
                 final String text = StringUtils.newSingleCodePointString(codePoint);
+                effectiveText = text;
                 mCommittedTextBeforeComposingText.append(text);
                 mExpectedSelStart += text.length();
                 mExpectedSelEnd = mExpectedSelStart;
                 break;
             }
         }
+        Boolean inputConnectionResult = null;
         if (isConnected()) {
-            mIC.sendKeyEvent(keyEvent);
+            inputConnectionResult = mIC.sendKeyEvent(keyEvent);
         }
+        final Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put("key_event_action", keyEvent.getAction());
+        fields.put("key_event_key_code", keyEvent.getKeyCode());
+        fields.put("key_event_unicode_char", keyEvent.getUnicodeChar());
+        fields.put("key_event_repeat_count", keyEvent.getRepeatCount());
+        fields.put("key_event_meta_state", keyEvent.getMetaState());
+        fields.put("key_event_is_control", Character.isISOControl(keyEvent.getUnicodeChar()));
+        putTextFields(fields, "key_event_characters", keyEvent.getCharacters());
+        putTextFields(fields, "key_event_effective_text", effectiveText);
+        fields.put("input_connection_result", inputConnectionResult);
+        logTextEditOperation("send_key_event", before, fields);
     }
 
     public void setComposingRegion(final int start, final int end) {
         if (DEBUG_BATCH_NESTING) checkBatchEdit();
         if (DEBUG_PREVIOUS_TEXT) checkConsistencyForDebug();
+        final EditStateSnapshot before = editStateSnapshot();
         final int moveBy = mExpectedSelStart - start; // determine now, as mExpectedSelStart may change in getTextBeforeCursor
         final CharSequence textBeforeCursor =
                 getTextBeforeCursor(Constants.EDITOR_CONTENTS_CACHE_SIZE + (end - start), 0);
@@ -675,9 +765,15 @@ public final class RichInputConnection implements PrivateCommandPerformer {
             mCommittedTextBeforeComposingText.append(
                     textBeforeCursor.subSequence(0, indexOfStartOfComposingText));
         }
+        Boolean inputConnectionResult = null;
         if (isConnected()) {
-            mIC.setComposingRegion(start, end);
+            inputConnectionResult = mIC.setComposingRegion(start, end);
         }
+        final Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put("composing_region_start", start);
+        fields.put("composing_region_end", end);
+        fields.put("input_connection_result", inputConnectionResult);
+        logTextEditOperation("set_composing_region", before, fields);
     }
 
     // return whether the text was (probably) set correctly
@@ -685,16 +781,19 @@ public final class RichInputConnection implements PrivateCommandPerformer {
     public boolean setComposingText(final CharSequence text, final int newCursorPosition) {
         if (DEBUG_BATCH_NESTING) checkBatchEdit();
         if (DEBUG_PREVIOUS_TEXT) checkConsistencyForDebug();
+        final EditStateSnapshot before = editStateSnapshot();
         mExpectedSelStart += text.length() - mComposingText.length();
         mExpectedSelEnd = mExpectedSelStart;
         mComposingText.setLength(0);
         mComposingText.append(text);
         // TODO: support values of newCursorPosition != 1. At this time, this is never called with
         //  newCursorPosition != 1.
+        Boolean inputConnectionResult = null;
+        boolean sanityCheckPassed = true;
         if (isConnected()) {
             if (DebugFlags.DEBUG_ENABLED)
                 Log.d(TAG, "setting composing text of length "+text.length()); // don't log actual text
-            mIC.setComposingText(text, newCursorPosition);
+            inputConnectionResult = mIC.setComposingText(text, newCursorPosition);
             if (!Settings.getValues().mInputAttributes.mShouldShowSuggestions && text.length() > 0) {
                 // We have a field that disables suggestions, but still committed text is set.
                 // This might lead to weird bugs (e.g. https://github.com/Helium314/HeliBoard/issues/225), so better do
@@ -703,10 +802,23 @@ public final class RichInputConnection implements PrivateCommandPerformer {
                 final CharSequence lastChar = mIC.getTextBeforeCursor(1, 0);
                 if (lastChar == null || lastChar.length() == 0 || text.charAt(text.length() - 1) != lastChar.charAt(0)) {
                     Log.w(TAG, "did set " + text + ", but got " + mIC.getTextBeforeCursor(text.length(), 0) + " as last character");
+                    sanityCheckPassed = false;
+                    final Map<String, Object> fields = new LinkedHashMap<>();
+                    putTextFields(fields, "composing_text", text);
+                    fields.put("new_cursor_position", newCursorPosition);
+                    fields.put("input_connection_result", inputConnectionResult);
+                    fields.put("sanity_check_passed", false);
+                    logTextEditOperation("set_composing_text", before, fields);
                     return false;
                 }
             }
         }
+        final Map<String, Object> fields = new LinkedHashMap<>();
+        putTextFields(fields, "composing_text", text);
+        fields.put("new_cursor_position", newCursorPosition);
+        fields.put("input_connection_result", inputConnectionResult);
+        fields.put("sanity_check_passed", sanityCheckPassed);
+        logTextEditOperation("set_composing_text", before, fields);
         if (DEBUG_PREVIOUS_TEXT) checkConsistencyForDebug();
         return true;
     }
@@ -727,8 +839,16 @@ public final class RichInputConnection implements PrivateCommandPerformer {
         if (DEBUG_PREVIOUS_TEXT) checkConsistencyForDebug();
         if (DebugFlags.DEBUG_ENABLED)
             Log.d(TAG, "setting selection from "+start+" to "+end);
+        final EditStateSnapshot before = editStateSnapshot();
 
         if (start < 0 || end < 0) {
+            final Map<String, Object> fields = new LinkedHashMap<>();
+            fields.put("selection_start_requested", start);
+            fields.put("selection_end_requested", end);
+            fields.put("operation_rejected", true);
+            fields.put("input_connection_result", null);
+            fields.put("reload_text_cache_result", null);
+            logTextEditOperation("set_selection", before, fields);
             return false;
         }
         if (start > end) {
@@ -738,13 +858,30 @@ public final class RichInputConnection implements PrivateCommandPerformer {
             mExpectedSelStart = start;
             mExpectedSelEnd = end;
         }
+        Boolean inputConnectionResult = null;
         if (isConnected()) {
-            final boolean isIcValid = mIC.setSelection(start, end);
+            inputConnectionResult = mIC.setSelection(start, end);
+            final boolean isIcValid = inputConnectionResult;
             if (!isIcValid) {
+                final Map<String, Object> fields = new LinkedHashMap<>();
+                fields.put("selection_start_requested", start);
+                fields.put("selection_end_requested", end);
+                fields.put("operation_rejected", false);
+                fields.put("input_connection_result", false);
+                fields.put("reload_text_cache_result", null);
+                logTextEditOperation("set_selection", before, fields);
                 return false;
             }
         }
-        return reloadTextCache();
+        final boolean reloadResult = reloadTextCache();
+        final Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put("selection_start_requested", start);
+        fields.put("selection_end_requested", end);
+        fields.put("operation_rejected", false);
+        fields.put("input_connection_result", inputConnectionResult);
+        fields.put("reload_text_cache_result", reloadResult);
+        logTextEditOperation("set_selection", before, fields);
+        return reloadResult;
     }
 
     public void selectAll() {
@@ -802,6 +939,7 @@ public final class RichInputConnection implements PrivateCommandPerformer {
     public void commitCompletion(final CompletionInfo completionInfo) {
         if (DEBUG_BATCH_NESTING) checkBatchEdit();
         if (DEBUG_PREVIOUS_TEXT) checkConsistencyForDebug();
+        final EditStateSnapshot before = editStateSnapshot();
         CharSequence text = completionInfo.getText();
         if (DebugFlags.DEBUG_ENABLED)
             Log.d(TAG, "committing completion of length "+text.length()); // don't log actual text
@@ -811,9 +949,19 @@ public final class RichInputConnection implements PrivateCommandPerformer {
         mExpectedSelStart += text.length() - mComposingText.length();
         mExpectedSelEnd = mExpectedSelStart;
         mComposingText.setLength(0);
+        Boolean inputConnectionResult = null;
         if (isConnected()) {
-            mIC.commitCompletion(completionInfo);
+            inputConnectionResult = mIC.commitCompletion(completionInfo);
         }
+        final Map<String, Object> fields = new LinkedHashMap<>();
+        putTextFields(fields, "completion_text", text);
+        fields.put("completion_position", completionInfo.getPosition());
+        fields.put("completion_id", completionInfo.getId());
+        fields.put("completion_label", completionInfo.getLabel() == null
+                ? null
+                : completionInfo.getLabel().toString());
+        fields.put("input_connection_result", inputConnectionResult);
+        logTextEditOperation("commit_completion", before, fields);
         if (DEBUG_PREVIOUS_TEXT) checkConsistencyForDebug();
     }
 

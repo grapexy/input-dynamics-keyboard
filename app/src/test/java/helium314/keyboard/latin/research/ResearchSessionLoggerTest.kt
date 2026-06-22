@@ -167,6 +167,39 @@ class ResearchSessionLoggerTest {
         assertFalse(manualProbe.getBoolean("password_field"))
     }
 
+    @Test
+    fun `text edit operation records are field scoped and password suppressed`() {
+        ResearchSessionLogger.setEnabled(context, true)
+        val sessionId = ResearchSessionLogger.startSession(context, "run-text-edit-test")
+        ResearchSessionLogger.onInputFieldStarted(context, textAttributes())
+        ResearchSessionLogger.logEvent(context, "commit_text", mapOf(
+            "commit_text" to "ab",
+            "commit_text_length" to 2,
+            "new_cursor_position" to 1,
+            "selection_start_before" to 0,
+            "selection_end_before" to 0,
+            "selection_start_after" to 2,
+            "selection_end_after" to 2
+        ))
+        ResearchSessionLogger.onInputFieldFinished(context)
+        ResearchSessionLogger.onInputFieldStarted(context, passwordAttributes())
+        ResearchSessionLogger.logEvent(context, "delete_surrounding_text", mapOf(
+            "delete_before_count" to 1,
+            "delete_after_count" to 0
+        ))
+        ResearchSessionLogger.stopSession(context)
+        ResearchSessionLogger.waitForPendingWrites()
+
+        val records = readRecords(sessionId)
+        val commitText = records.first { it.getString("event") == "commit_text" }
+        assertEquals("ab", commitText.getString("commit_text"))
+        assertEquals(2, commitText.getInt("commit_text_length"))
+        assertEquals(1, commitText.getLong("field_episode_id"))
+        assertEquals("org.example.input", commitText.getString("target_package"))
+        assertFalse(commitText.getBoolean("password_field"))
+        assertFalse(records.any { it.getString("event") == "delete_surrounding_text" })
+    }
+
     private fun textAttributes(
         imeOptions: Int = 0,
         actionId: Int = 0,
