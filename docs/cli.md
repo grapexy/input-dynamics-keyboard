@@ -214,8 +214,9 @@ scraping human-oriented text.
 - `session status`: returns IME status plus local input-controller status. When
   the uinput controller is active, `input.state` includes the physical
   touchscreen profile hash, input profile summary, mirrored virtual touchscreen
-  event path, Event Hub device metadata, and Input Reader device metadata when
-  Android exposes them.
+  event path, Event Hub device metadata, Input Reader device metadata when
+  Android exposes them, and compact controller command diagnostics:
+  `current_command`, `last_command`, `last_error`, and `command_sequence`.
 - `session stop`: stops the local input controller, verifies normal runtime
   cleanup, verifies that the mirrored virtual touchscreen event path has
   disappeared when it was detected, then stops IME logging. If a previous
@@ -370,6 +371,10 @@ When `record` is run with `--with-input-controller`, `manifest.json` includes:
 - `input_controller_runtime.summary.physical_touchscreen`
 - `input_controller_runtime.summary.virtual_touchscreen`
 - `input_controller_runtime.summary.virtual_touchscreen_event_path`
+- `input_controller_runtime.summary.command_sequence`
+- `input_controller_runtime.summary.current_command`
+- `input_controller_runtime.summary.last_command`
+- `input_controller_runtime.summary.last_error`
 - `input_controller_runtime.summary.cleanup`
 
 The `adb/getevent.raw.log` stream is device-level touchscreen data.

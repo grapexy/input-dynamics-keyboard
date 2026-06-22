@@ -102,6 +102,54 @@ impl ControllerRequest {
             Self::Stop => "stop",
         }
     }
+
+    const fn tracked(&self) -> bool {
+        !matches!(*self, Self::Status)
+    }
+
+    fn summary_json(&self) -> Value {
+        match *self {
+            Self::Status | Self::Stop => json!({
+                "command": self.name(),
+            }),
+            Self::Tap { fallback, .. } => json!({
+                "command": self.name(),
+                "tap": {
+                    "x": fallback.x,
+                    "y": fallback.y,
+                    "hold_ms": fallback.hold_ms,
+                    "pressure": fallback.pressure,
+                    "touch_major_px": fallback.touch_major_px,
+                    "touch_minor_px": fallback.touch_minor_px,
+                    "orientation": fallback.orientation,
+                },
+            }),
+            Self::Path { ref spec } => json!({
+                "command": self.name(),
+                "path": {
+                    "point_count": spec.points.len(),
+                    "duration_ms": spec.duration_ms,
+                    "first": spec.points.first().copied().map(touch_point_json),
+                    "last": spec.points.last().copied().map(touch_point_json),
+                },
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ControllerCommandMark {
+    sequence: u64,
+    command_name: &'static str,
+    started_wall_ms: u128,
+    started: Instant,
+}
+
+#[derive(Debug)]
+struct ControllerRuntimeState {
+    path: PathBuf,
+    value: Value,
+    sequence: u64,
 }
 
 pub(crate) fn acquire_session_start(app: &App, run_id: &str) -> CliResult<SessionStartPermit> {
@@ -221,7 +269,7 @@ pub(crate) fn start(
 
 pub(crate) fn status(app: &App) -> CliResult<Value> {
     let paths = RuntimePaths::for_app(app)?;
-    match send_request(&paths.socket, &ControllerRequest::Status) {
+    match send_request(&paths, &ControllerRequest::Status) {
         Ok(response) => Ok(json!({
             "ok": true,
             "active": response.get("ok").and_then(Value::as_bool).unwrap_or(false),
@@ -268,7 +316,7 @@ pub(crate) fn stop(app: &App) -> CliResult<Value> {
         }));
     }
 
-    let response = send_request(&paths.socket, &ControllerRequest::Stop)?;
+    let response = send_request(&paths, &ControllerRequest::Stop)?;
     remove_stale_runtime(&paths)?;
     let cleanup = cleanup_report(app, &paths, virtual_event_path.as_deref());
     Ok(json!({
@@ -291,7 +339,7 @@ pub(crate) fn tap(app: &App, spec: ControllerTapSpec) -> CliResult<Value> {
         ));
     }
     let response = send_request(
-        &paths.socket,
+        &paths,
         &ControllerRequest::Tap {
             fallback: spec.fallback,
             key_context: spec.key_context,
@@ -313,7 +361,7 @@ pub(crate) fn path(app: &App, spec: PathSpec) -> CliResult<Value> {
             "no active input session; run `input-dynamics session start --run-id <id>`",
         ));
     }
-    let response = send_request(&paths.socket, &ControllerRequest::Path { spec })?;
+    let response = send_request(&paths, &ControllerRequest::Path { spec })?;
     Ok(json!({
         "ok": response.get("ok").and_then(Value::as_bool).unwrap_or(false),
         "input_backend": "uinput",
@@ -338,13 +386,20 @@ pub(crate) fn run(app: &App, config: &RunConfig) -> CliResult<Value> {
 
     let virtual_touchscreen = virtual_touchscreen_report(app, &profile, &before_profiles);
     let state = controller_state(app, config, &profile, &virtual_touchscreen)?;
-    write_json_file(&config.state, &state)?;
+    let mut runtime_state = ControllerRuntimeState::new(config.state.clone(), state);
+    runtime_state.write()?;
 
     let mut stopped = false;
     let mut generator = config.input_profile.clone().map(ProfileGenerator::new);
     for stream_result in listener.incoming() {
         let stream = stream_result?;
-        if handle_stream(stream, &mut uinput_process, &profile, generator.as_mut())? {
+        if handle_stream(
+            stream,
+            &mut uinput_process,
+            &profile,
+            generator.as_mut(),
+            &mut runtime_state,
+        )? {
             stopped = true;
             break;
         }
@@ -437,11 +492,26 @@ fn handle_stream(
     uinput_process: &mut StdinProcess,
     profile: &uinput::TouchscreenProfile,
     generator: Option<&mut ProfileGenerator>,
+    runtime_state: &mut ControllerRuntimeState,
 ) -> CliResult<bool> {
     let mut request_text = String::new();
     stream.read_to_string(&mut request_text)?;
     let request: ControllerRequest = serde_json::from_str(request_text.trim())?;
-    let response = handle_request(&request, uinput_process, profile, generator)?;
+    let command_mark = runtime_state.start_request(&request)?;
+    let response = match handle_request(&request, uinput_process, profile, generator) {
+        Ok(response) => {
+            if let Some(mark) = command_mark.as_ref() {
+                runtime_state.finish_success(mark, &request, &response)?;
+            }
+            response
+        }
+        Err(error) => {
+            if let Some(mark) = command_mark.as_ref() {
+                runtime_state.finish_failure(mark, &request, &error)?;
+            }
+            return Err(error);
+        }
+    };
     serde_json::to_writer(&mut stream, &response)?;
     stream.write_all(b"\n")?;
     stream.flush()?;
@@ -524,27 +594,27 @@ fn handle_request(
     }
 }
 
-fn send_request(socket: &Path, request: &ControllerRequest) -> CliResult<Value> {
-    let mut stream = UnixStream::connect(socket)?;
+fn send_request(paths: &RuntimePaths, request: &ControllerRequest) -> CliResult<Value> {
+    let mut stream = UnixStream::connect(&paths.socket)?;
     stream.set_read_timeout(Some(REQUEST_TIMEOUT))?;
     stream.set_write_timeout(Some(REQUEST_TIMEOUT))?;
     serde_json::to_writer(&mut stream, request).map_err(|error| {
         if json_io_timed_out(&error) {
-            request_timeout_error(socket, request, "write")
+            request_timeout_error(paths, request, "write")
         } else {
             CliError::from(error)
         }
     })?;
     stream.write_all(b"\n").map_err(|error| {
         if io_timed_out(&error) {
-            request_timeout_error(socket, request, "write")
+            request_timeout_error(paths, request, "write")
         } else {
             CliError::from(error)
         }
     })?;
     stream.flush().map_err(|error| {
         if io_timed_out(&error) {
-            request_timeout_error(socket, request, "write")
+            request_timeout_error(paths, request, "write")
         } else {
             CliError::from(error)
         }
@@ -553,7 +623,7 @@ fn send_request(socket: &Path, request: &ControllerRequest) -> CliResult<Value> 
     let mut response_text = String::new();
     stream.read_to_string(&mut response_text).map_err(|error| {
         if io_timed_out(&error) {
-            request_timeout_error(socket, request, "read")
+            request_timeout_error(paths, request, "read")
         } else {
             CliError::from(error)
         }
@@ -561,13 +631,67 @@ fn send_request(socket: &Path, request: &ControllerRequest) -> CliResult<Value> 
     Ok(serde_json::from_str(response_text.trim())?)
 }
 
-fn request_timeout_error(socket: &Path, request: &ControllerRequest, phase: &str) -> CliError {
+fn request_timeout_error(
+    paths: &RuntimePaths,
+    request: &ControllerRequest,
+    phase: &str,
+) -> CliError {
+    let state = read_state_json(&paths.state);
     CliError::new(format!(
-        "timed out during {phase} for controller {} request after {} ms; socket={}",
+        "timed out during {phase} for controller {} request after {} ms; socket={}; state={}; {}",
         request.name(),
         millis_u64(REQUEST_TIMEOUT),
-        path_string_lossy(socket),
+        path_string_lossy(&paths.socket),
+        path_string_lossy(&paths.state),
+        timeout_state_summary(&state),
     ))
+}
+
+fn timeout_state_summary(state: &Value) -> String {
+    format!(
+        "current_command={}; last_command={}; last_error={}",
+        command_brief(state.get("current_command")),
+        command_brief(state.get("last_command")),
+        error_brief(state.get("last_error")),
+    )
+}
+
+fn command_brief(command: Option<&Value>) -> String {
+    let Some(value) = command else {
+        return String::from("null");
+    };
+    if value.is_null() {
+        return String::from("null");
+    }
+    let name = value
+        .get("command")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let status = value
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let sequence = value
+        .get("sequence")
+        .and_then(Value::as_u64)
+        .map_or_else(|| String::from("?"), |number| number.to_string());
+    let duration = value
+        .get("duration_ms")
+        .and_then(Value::as_u64)
+        .map_or_else(String::new, |millis| format!(",duration_ms={millis}"));
+    format!("{name}#{sequence}:{status}{duration}")
+}
+
+fn error_brief(error: Option<&Value>) -> String {
+    let Some(value) = error else {
+        return String::from("null");
+    };
+    if value.is_null() {
+        return String::from("null");
+    }
+    value
+        .as_str()
+        .map_or_else(|| value.to_string(), String::from)
 }
 
 fn json_io_timed_out(error: &serde_json::Error) -> bool {
@@ -644,10 +768,203 @@ fn controller_state(
             .input_profile
             .as_ref()
             .map(RuntimeProfile::summary_json),
+        "command_sequence": 0_u64,
+        "current_command": Value::Null,
+        "last_command": Value::Null,
+        "last_error": Value::Null,
         "physical_touchscreen_profile_hash": uinput::profile_hash(profile)?,
         "physical_touchscreen": uinput::profile_summary(profile),
         "virtual_touchscreen": virtual_touchscreen,
     }))
+}
+
+impl ControllerRuntimeState {
+    const fn new(path: PathBuf, value: Value) -> Self {
+        Self {
+            path,
+            value,
+            sequence: 0,
+        }
+    }
+
+    fn write(&self) -> CliResult<()> {
+        write_json_file(&self.path, &self.value)
+    }
+
+    fn start_request(
+        &mut self,
+        request: &ControllerRequest,
+    ) -> CliResult<Option<ControllerCommandMark>> {
+        if !request.tracked() {
+            return Ok(None);
+        }
+        let sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| CliError::new("controller command sequence overflow"))?;
+        self.sequence = sequence;
+        let mark = ControllerCommandMark {
+            sequence,
+            command_name: request.name(),
+            started_wall_ms: wall_time_ms(),
+            started: Instant::now(),
+        };
+        self.set_command_fields(
+            Some(command_started_json(&mark, request)),
+            None,
+            None,
+            Some(sequence),
+        )?;
+        self.write()?;
+        Ok(Some(mark))
+    }
+
+    fn finish_success(
+        &mut self,
+        mark: &ControllerCommandMark,
+        request: &ControllerRequest,
+        response: &Value,
+    ) -> CliResult<()> {
+        let ok = response.get("ok").and_then(Value::as_bool).unwrap_or(false);
+        let error = if ok {
+            Value::Null
+        } else {
+            response
+                .get("error")
+                .cloned()
+                .unwrap_or_else(|| json!("controller command returned ok:false"))
+        };
+        self.set_command_fields(
+            Some(Value::Null),
+            Some(command_finished_json(mark, request, &error, response)),
+            Some(error),
+            None,
+        )?;
+        self.write()
+    }
+
+    fn finish_failure(
+        &mut self,
+        mark: &ControllerCommandMark,
+        request: &ControllerRequest,
+        error: &CliError,
+    ) -> CliResult<()> {
+        let error_value = json!(error.to_string());
+        self.set_command_fields(
+            Some(Value::Null),
+            Some(command_failed_json(mark, request, &error_value)),
+            Some(error_value),
+            None,
+        )?;
+        self.write()
+    }
+
+    fn set_command_fields(
+        &mut self,
+        current_command: Option<Value>,
+        last_command: Option<Value>,
+        last_error: Option<Value>,
+        command_sequence: Option<u64>,
+    ) -> CliResult<()> {
+        let object = self
+            .value
+            .as_object_mut()
+            .ok_or_else(|| CliError::new("controller state root was not an object"))?;
+        if let Some(value) = current_command {
+            object.insert(String::from("current_command"), value);
+        }
+        if let Some(value) = last_command {
+            object.insert(String::from("last_command"), value);
+        }
+        if let Some(value) = last_error {
+            object.insert(String::from("last_error"), value);
+        }
+        if let Some(value) = command_sequence {
+            object.insert(String::from("command_sequence"), json!(value));
+        }
+        Ok(())
+    }
+}
+
+fn command_started_json(mark: &ControllerCommandMark, request: &ControllerRequest) -> Value {
+    json!({
+        "schema": "input_dynamics_controller_command.v1",
+        "sequence": mark.sequence,
+        "command": mark.command_name,
+        "status": "in_progress",
+        "started_wall_ms": mark.started_wall_ms,
+        "request": request.summary_json(),
+    })
+}
+
+fn command_finished_json(
+    mark: &ControllerCommandMark,
+    request: &ControllerRequest,
+    error: &Value,
+    response: &Value,
+) -> Value {
+    let ok = response.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    json!({
+        "schema": "input_dynamics_controller_command.v1",
+        "sequence": mark.sequence,
+        "command": mark.command_name,
+        "status": "completed",
+        "ok": ok,
+        "error": error,
+        "started_wall_ms": mark.started_wall_ms,
+        "completed_wall_ms": wall_time_ms(),
+        "duration_ms": millis_u64(mark.started.elapsed()),
+        "request": request.summary_json(),
+        "response": controller_response_summary(response),
+    })
+}
+
+fn command_failed_json(
+    mark: &ControllerCommandMark,
+    request: &ControllerRequest,
+    error: &Value,
+) -> Value {
+    json!({
+        "schema": "input_dynamics_controller_command.v1",
+        "sequence": mark.sequence,
+        "command": mark.command_name,
+        "status": "failed",
+        "ok": false,
+        "error": error,
+        "started_wall_ms": mark.started_wall_ms,
+        "completed_wall_ms": wall_time_ms(),
+        "duration_ms": millis_u64(mark.started.elapsed()),
+        "request": request.summary_json(),
+        "response": Value::Null,
+    })
+}
+
+fn controller_response_summary(response: &Value) -> Value {
+    let path = response.get("path").map_or(Value::Null, |path| {
+        json!({
+            "point_count": path.get("point_count").cloned().unwrap_or(Value::Null),
+            "duration_ms": path.get("duration_ms").cloned().unwrap_or(Value::Null),
+        })
+    });
+    json!({
+        "ok": response.get("ok").cloned().unwrap_or(Value::Null),
+        "active": response.get("active").cloned().unwrap_or(Value::Null),
+        "input_backend": response.get("input_backend").cloned().unwrap_or(Value::Null),
+        "tap": response.get("tap").cloned().unwrap_or(Value::Null),
+        "path": path,
+        "inter_key_delay_ms": response
+            .get("inter_key_delay_ms")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "stopping": response.get("stopping").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn touch_point_json(point: uinput::TouchPoint) -> Value {
+    json!({
+        "x": point.x,
+        "y": point.y,
+    })
 }
 
 fn virtual_touchscreen_report(
@@ -1066,7 +1383,7 @@ fn read_state_json(path: &Path) -> Value {
 }
 
 fn remove_stale_runtime(paths: &RuntimePaths) -> CliResult<()> {
-    if paths.socket.exists() && send_request(&paths.socket, &ControllerRequest::Status).is_err() {
+    if paths.socket.exists() && send_request(paths, &ControllerRequest::Status).is_err() {
         remove_file_if_exists(&paths.socket)?;
     }
     if paths.state.exists() && !paths.socket.exists() {
@@ -1268,9 +1585,11 @@ mod tests {
     use proptest::strategy::Strategy;
 
     use crate::controller::{
-        RuntimePaths, parse_dumpsys_input, parse_i64_list, sanitize_path_component,
+        ControllerRequest, RuntimePaths, controller_response_summary, parse_dumpsys_input,
+        parse_i64_list, sanitize_path_component, timeout_state_summary,
         virtual_event_path_from_status,
     };
+    use crate::uinput::{PathSpec, TouchPoint};
 
     const SAMPLE_DUMPSYS_INPUT: &str = r"
 Event Hub State:
@@ -1405,6 +1724,112 @@ Input Reader State (Nums of device: 4):
             virtual_event_path_from_status(&status),
             Some(String::from("/dev/input/event5")),
             "stale lock state should still support cleanup reporting"
+        );
+    }
+
+    #[test]
+    fn controller_path_request_summary_keeps_only_endpoints() {
+        let request = ControllerRequest::Path {
+            spec: PathSpec::new(
+                vec![
+                    TouchPoint::new(1, 2),
+                    TouchPoint::new(3, 4),
+                    TouchPoint::new(5, 6),
+                ],
+                120,
+            ),
+        };
+
+        let summary = request.summary_json();
+
+        assert_eq!(
+            summary
+                .pointer("/path/point_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(3),
+            "path summary should include point count"
+        );
+        assert_eq!(
+            summary
+                .pointer("/path/first/x")
+                .and_then(serde_json::Value::as_i64),
+            Some(1),
+            "path summary should include first endpoint"
+        );
+        assert_eq!(
+            summary
+                .pointer("/path/last/y")
+                .and_then(serde_json::Value::as_i64),
+            Some(6),
+            "path summary should include last endpoint"
+        );
+        assert!(
+            summary.pointer("/path/points").is_none(),
+            "path summary should not copy the full point list"
+        );
+    }
+
+    #[test]
+    fn controller_response_summary_keeps_path_compact() {
+        let response = serde_json::json!({
+            "ok": true,
+            "active": true,
+            "input_backend": "uinput",
+            "path": {
+                "points": [
+                    {"x": 1_i32, "y": 2_i32},
+                    {"x": 3_i32, "y": 4_i32}
+                ],
+                "point_count": 2_u64,
+                "duration_ms": 80_u64
+            }
+        });
+
+        let summary = controller_response_summary(&response);
+
+        assert_eq!(
+            summary
+                .pointer("/path/point_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(2),
+            "response summary should include path point count"
+        );
+        assert!(
+            summary.pointer("/path/points").is_none(),
+            "response summary should not copy full path points"
+        );
+    }
+
+    #[test]
+    fn timeout_state_summary_reports_current_last_and_error() {
+        let state = serde_json::json!({
+            "current_command": {
+                "sequence": 2_u64,
+                "command": "path",
+                "status": "in_progress"
+            },
+            "last_command": {
+                "sequence": 1_u64,
+                "command": "tap",
+                "status": "completed",
+                "duration_ms": 37_u64
+            },
+            "last_error": "previous failure"
+        });
+
+        let summary = timeout_state_summary(&state);
+
+        assert!(
+            summary.contains("current_command=path#2:in_progress"),
+            "current command should be present: {summary}"
+        );
+        assert!(
+            summary.contains("last_command=tap#1:completed,duration_ms=37"),
+            "last command should be present: {summary}"
+        );
+        assert!(
+            summary.contains("last_error=previous failure"),
+            "last error should be present: {summary}"
         );
     }
 

@@ -695,6 +695,14 @@ fn input_controller_summary(status_after_start: &Value, stop: &Value) -> Value {
         .cloned()
         .or_else(|| status_after_start.pointer("/controller/state").cloned())
         .unwrap_or(Value::Null);
+    let command_state = stop
+        .pointer("/status_before_stop/state")
+        .cloned()
+        .or_else(|| {
+            stop.pointer("/status_before_stop/controller/state")
+                .cloned()
+        })
+        .unwrap_or_else(|| state.clone());
     json!({
         "input_backend": state
             .get("input_backend")
@@ -722,6 +730,22 @@ fn input_controller_summary(status_after_start: &Value, stop: &Value) -> Value {
             .unwrap_or(Value::Null),
         "virtual_touchscreen_event_path": state
             .pointer("/virtual_touchscreen/profile/event_path")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "command_sequence": command_state
+            .get("command_sequence")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "current_command": command_state
+            .get("current_command")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "last_command": command_state
+            .get("last_command")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "last_error": command_state
+            .get("last_error")
             .cloned()
             .unwrap_or(Value::Null),
         "cleanup": stop
@@ -822,6 +846,17 @@ mod tests {
             }
         });
         let stop = json!({
+            "status_before_stop": {
+                "state": {
+                    "command_sequence": 2_u64,
+                    "current_command": null,
+                    "last_command": {
+                        "command": "path",
+                        "status": "completed"
+                    },
+                    "last_error": null
+                }
+            },
             "stop": {
                 "cleanup": {
                     "virtual_touchscreen": {
@@ -857,6 +892,18 @@ mod tests {
                 .and_then(Value::as_bool)
                 == Some(false),
             "summary should expose virtual-device cleanup state"
+        );
+        assert_eq!(
+            summary.get("command_sequence").and_then(Value::as_u64),
+            Some(2),
+            "summary should expose the latest command sequence"
+        );
+        assert_eq!(
+            summary
+                .pointer("/last_command/command")
+                .and_then(Value::as_str),
+            Some("path"),
+            "summary should expose the latest controller command"
         );
     }
 

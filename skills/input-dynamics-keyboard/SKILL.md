@@ -150,7 +150,9 @@ idk session stop
 
 If a controller process is interrupted, use `idk session stop` as the repair
 path. It removes stale runtime files, stops IME logging, and reports whether
-the saved virtual touchscreen event path is gone.
+the saved virtual touchscreen event path is gone. For controller timing or
+socket failures, inspect `idk session status`; `input.state` exposes
+`current_command`, `last_command`, `last_error`, and `command_sequence`.
 
 4. For bounded capture, use `record` with an external run id:
 
@@ -205,7 +207,11 @@ The resulting manifest should include
 `input_controller_runtime.summary.input_device_command`,
 `input_controller_runtime.summary.input_profile`,
 `input_controller_runtime.summary.physical_touchscreen_profile_hash`,
-`input_controller_runtime.summary.virtual_touchscreen_event_path`, and
+`input_controller_runtime.summary.virtual_touchscreen_event_path`,
+`input_controller_runtime.summary.command_sequence`,
+`input_controller_runtime.summary.current_command`,
+`input_controller_runtime.summary.last_command`,
+`input_controller_runtime.summary.last_error`, and
 `input_controller_runtime.summary.cleanup`. If `--with-evidence` was used, it
 should also include `evidence.enabled: true` and `evidence.policy: start_end`.
 
