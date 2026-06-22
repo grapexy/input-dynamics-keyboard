@@ -57,10 +57,17 @@ struct TimelineInspection {
     exists: bool,
 }
 
+#[derive(Default)]
+struct RunSummaryInspection {
+    stale_reasons: Vec<String>,
+    exists: bool,
+}
+
 struct FlagInputs<'a> {
     manifest: Option<&'a Value>,
     session: &'a SessionSelection,
     validation: &'a ValidationInspection,
+    run_summary: &'a RunSummaryInspection,
     timeline: &'a TimelineInspection,
     artifacts: &'a Value,
     note_flags: &'a Value,
@@ -80,6 +87,7 @@ pub(crate) fn inspect_recording(dir: &Path) -> CliResult<Value> {
     });
     let session = select_session_jsonl(dir)?;
     let validation = inspect_validation(dir, &validation_path, external_run_id.as_deref());
+    let run_summary = inspect_run_summary(dir)?;
     let timeline = inspect_timeline(dir)?;
     let artifacts = artifact_map(dir, &artifact_specs(dir, session.selected.as_deref()))?;
     let note_flags = note_flags(dir)?;
@@ -87,13 +95,14 @@ pub(crate) fn inspect_recording(dir: &Path) -> CliResult<Value> {
         manifest: manifest_ref,
         session: &session,
         validation: &validation,
+        run_summary: &run_summary,
         timeline: &timeline,
         artifacts: &artifacts,
         note_flags: &note_flags,
     };
     let flags = flags_json(&flag_inputs);
     let next_actions = next_actions(dir, external_run_id.as_deref(), &flags)?;
-    let warnings = warnings(&session, &validation, &timeline);
+    let warnings = warnings(&session, &validation, &run_summary, &timeline);
 
     Ok(json!({
         "ok": true,
@@ -116,6 +125,10 @@ pub(crate) fn inspect_recording(dir: &Path) -> CliResult<Value> {
             "stored": validation.stored,
             "current": validation.current,
             "stale_reasons": validation.stale_reasons,
+        },
+        "run_summary": {
+            "exists": run_summary.exists,
+            "stale_reasons": run_summary.stale_reasons,
         },
         "timeline": {
             "exists": timeline.exists,
@@ -161,6 +174,73 @@ fn inspect_validation(
         current,
         stored: stored.unwrap_or(Value::Null),
         stale_reasons,
+    }
+}
+
+fn inspect_run_summary(dir: &Path) -> CliResult<RunSummaryInspection> {
+    let summary_path = dir.join("derived").join("run_summary.json");
+    if !summary_path.exists() {
+        return Ok(RunSummaryInspection {
+            exists: false,
+            stale_reasons: vec![String::from("run summary is missing")],
+        });
+    }
+    let Some(summary) = read_optional_json(&summary_path)? else {
+        return Ok(RunSummaryInspection {
+            exists: false,
+            stale_reasons: vec![String::from("run summary is missing")],
+        });
+    };
+    let mut stale_reasons = Vec::new();
+    if summary.get("schema").and_then(Value::as_str) != Some("input_dynamics_run_summary.v1") {
+        stale_reasons.push(String::from("run summary schema is unsupported"));
+    }
+    stale_reasons.extend(run_summary_source_stale_reasons(dir, &summary)?);
+    Ok(RunSummaryInspection {
+        exists: true,
+        stale_reasons,
+    })
+}
+
+fn run_summary_source_stale_reasons(dir: &Path, summary: &Value) -> CliResult<Vec<String>> {
+    let mut reasons = Vec::new();
+    let Some(path_text_value) = summary.pointer("/source_ref/path").and_then(Value::as_str) else {
+        reasons.push(String::from("run summary has no source path"));
+        return Ok(reasons);
+    };
+    let source_path = source_path(dir, path_text_value);
+    if !source_path.exists() {
+        reasons.push(format!("run summary source is missing: {path_text_value}"));
+        return Ok(reasons);
+    }
+    let current = file_fingerprint(&source_path)?;
+    let recorded_sha = summary
+        .pointer("/source_ref/fingerprint/sha256")
+        .and_then(Value::as_str);
+    let current_sha = current.get("sha256").and_then(Value::as_str);
+    if recorded_sha.is_some() && recorded_sha != current_sha {
+        reasons.push(format!(
+            "run summary source fingerprint changed: {path_text_value}"
+        ));
+    }
+    let recorded_count = summary
+        .pointer("/source_ref/record_count")
+        .and_then(Value::as_u64);
+    let current_count = count_nonempty_lines(&source_path)?;
+    if recorded_count.is_some() && recorded_count != Some(current_count) {
+        reasons.push(format!(
+            "run summary source record count changed: {path_text_value}"
+        ));
+    }
+    Ok(reasons)
+}
+
+fn source_path(dir: &Path, path_text_value: &str) -> PathBuf {
+    let path = PathBuf::from(path_text_value);
+    if path.is_absolute() {
+        path
+    } else {
+        dir.join(path)
     }
 }
 
@@ -295,11 +375,17 @@ fn adb_artifact_specs(dir: &Path) -> [ArtifactSpec; 3] {
     ]
 }
 
-fn derived_artifact_specs(dir: &Path) -> [ArtifactSpec; 5] {
+fn derived_artifact_specs(dir: &Path) -> [ArtifactSpec; 6] {
     [
         artifact(
             "press_summaries",
             dir.join("derived").join("press_summaries.jsonl"),
+            ArtifactRequirement::Optional,
+            ArtifactSensitivity::Sensitive,
+        ),
+        artifact(
+            "run_summary",
+            dir.join("derived").join("run_summary.json"),
             ArtifactRequirement::Optional,
             ArtifactSensitivity::Sensitive,
         ),
@@ -468,6 +554,8 @@ fn flags_json(inputs: &FlagInputs<'_>) -> Value {
     let has_evidence = artifact_exists(inputs.artifacts, "evidence_start_index")
         || artifact_exists(inputs.artifacts, "evidence_end_index");
     let needs_derivation = !has_touch_gestures || !has_dismissals;
+    let needs_run_summary =
+        !inputs.run_summary.exists || !inputs.run_summary.stale_reasons.is_empty();
     let needs_timeline = !inputs.timeline.exists || !inputs.timeline.stale_reasons.is_empty();
     let incomplete_or_superseded = !inputs.validation.current_ok
         || inputs
@@ -488,6 +576,7 @@ fn flags_json(inputs: &FlagInputs<'_>) -> Value {
         "needs_validation": !inputs.validation.stored_present
             || !inputs.validation.stale_reasons.is_empty(),
         "needs_press_summaries": !has_press_summaries,
+        "needs_run_summary": needs_run_summary,
         "needs_derivation": needs_derivation,
         "needs_timeline": needs_timeline,
         "has_sensitive_evidence": has_evidence,
@@ -520,6 +609,16 @@ fn next_actions(dir: &Path, external_run_id: Option<&str>, flags: &Value) -> Cli
             "reason": "derive or refresh per-press timing and pointer summaries",
         }));
     }
+    if bool_at(flags, "/needs_run_summary") {
+        actions.push(json!({
+            "kind": "derive_summary",
+            "command": format!(
+                "input-dynamics derive summary --recording-dir {}",
+                shellish(dir)?
+            ),
+            "reason": "derive or refresh the run-level press summary",
+        }));
+    }
     if bool_at(flags, "/needs_derivation") {
         actions.push(json!({
             "kind": "derive_dismissals",
@@ -546,10 +645,12 @@ fn next_actions(dir: &Path, external_run_id: Option<&str>, flags: &Value) -> Cli
 fn warnings(
     session: &SessionSelection,
     validation: &ValidationInspection,
+    run_summary: &RunSummaryInspection,
     timeline: &TimelineInspection,
 ) -> Vec<String> {
     let mut warnings = session.warnings.clone();
     warnings.extend(validation.stale_reasons.iter().cloned());
+    warnings.extend(run_summary.stale_reasons.iter().cloned());
     warnings.extend(timeline.stale_reasons.iter().cloned());
     warnings
 }

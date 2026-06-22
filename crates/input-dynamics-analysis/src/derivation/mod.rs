@@ -4,6 +4,7 @@ mod dismissal;
 mod error;
 mod jsonl;
 mod press;
+mod summary;
 mod timeline;
 mod touch;
 
@@ -18,6 +19,7 @@ pub use error::{DeriveError, DeriveResult};
 use crate::derivation::dismissal::derive_dismissal_inferences;
 use crate::derivation::jsonl::{read_jsonl, write_jsonl};
 pub use crate::derivation::press::{DerivePressesConfig, derive_press_summaries};
+pub use crate::derivation::summary::{DeriveRunSummaryConfig, derive_run_summary};
 pub use crate::derivation::timeline::{DeriveTimelineConfig, derive_timeline};
 use crate::derivation::touch::derive_touch_gestures;
 
@@ -38,6 +40,9 @@ pub const TIMELINE_EVENT_SCHEMA: &str = "input_dynamics_timeline_event.v1";
 
 /// Schema written to timeline index JSON files.
 pub const TIMELINE_INDEX_SCHEMA: &str = "input_dynamics_timeline_index.v1";
+
+/// Schema written to run summary JSON files.
+pub const RUN_SUMMARY_SCHEMA: &str = "input_dynamics_run_summary.v1";
 
 /// Schema for derivation policy JSON files.
 pub const DERIVATION_POLICY_SCHEMA: &str = "input_dynamics_derivation_policy.v1";

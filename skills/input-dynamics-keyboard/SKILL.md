@@ -220,6 +220,17 @@ hold/flight timing, landing geometry, pointer movement, and pressure/contact
 ranges. It groups IME records by `press_id`; do not treat it as a direct raw
 `getevent` correlation unless a later artifact explicitly adds clock alignment.
 
+Then derive a run-level press summary:
+
+```bash
+idk derive summary --recording-dir "runs/$RUN_ID"
+```
+
+This writes `derived/run_summary.json`. Use it for aggregate press counts,
+semantic key counts, timing distributions, pointer/contact ranges, target
+package coverage counts, session provenance, and source freshness. It is derived from
+`derived/press_summaries.jsonl`; rerun it after regenerating press summaries.
+
 Then derive touch gestures and dismissal inferences:
 
 ```bash
@@ -248,11 +259,12 @@ idk recording inspect --dir "runs/$RUN_ID"
 ```
 
 Use `flags.valid_for_analysis`, `flags.needs_validation`,
-`flags.needs_press_summaries`, `flags.needs_derivation`, and
-`flags.needs_timeline` to decide the next step. If `next_actions` is non-empty,
-prefer those CLI commands over ad hoc file inspection. The inspection output
-fingerprints source artifacts and reports stale timelines, but it does not
-rewrite validation or derived files.
+`flags.needs_press_summaries`, `flags.needs_run_summary`,
+`flags.needs_derivation`, and `flags.needs_timeline` to decide the next step.
+If `next_actions` is non-empty, prefer those CLI commands over ad hoc file
+inspection. The inspection output fingerprints source artifacts and reports
+stale summaries and timelines, but it does not rewrite validation or derived
+files.
 
 5. Use lower-level status and layout commands when debugging:
 

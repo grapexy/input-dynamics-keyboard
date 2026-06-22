@@ -44,6 +44,13 @@ fn inspect_reports_ready_recording_and_next_timeline_action() {
     );
     assert_eq!(
         result
+            .pointer("/flags/needs_run_summary")
+            .and_then(Value::as_bool),
+        Some(false),
+        "run summary is present and fresh"
+    );
+    assert_eq!(
+        result
             .pointer("/flags/needs_timeline")
             .and_then(Value::as_bool),
         Some(true),
@@ -55,6 +62,46 @@ fn inspect_reports_ready_recording_and_next_timeline_action() {
             .and_then(Value::as_str),
         Some("ime/session-test.jsonl"),
         "single session should be selected"
+    );
+    let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
+}
+
+#[test]
+fn inspect_detects_run_summary_source_staleness() {
+    let root = unique_temp_dir("recording-inspect-summary-stale");
+    let Some(()) = assert_ok(create_fixture(&root, FixtureShape::DerivedOnly), "fixture") else {
+        return;
+    };
+    let source_path = root.join("derived").join("press_summaries.jsonl");
+    let mutation_result = fs::write(
+        &source_path,
+        concat!(
+            "{\"schema\":\"input_dynamics_press_summary.v1\",\"event\":\"press_summary\"}\n",
+            "{\"schema\":\"input_dynamics_press_summary.v1\",\"event\":\"press_summary\"}\n"
+        ),
+    );
+    let Some(()) = assert_ok(mutation_result, "mutate source") else {
+        return;
+    };
+
+    let Some(result) = assert_ok(inspect_recording(&root), "inspect recording") else {
+        return;
+    };
+
+    assert_eq!(
+        result
+            .pointer("/flags/needs_run_summary")
+            .and_then(Value::as_bool),
+        Some(true),
+        "changed press summary source should stale run summary"
+    );
+    let stale_count = result
+        .pointer("/run_summary/stale_reasons")
+        .and_then(Value::as_array)
+        .map_or(0_usize, Vec::len);
+    assert!(
+        stale_count > 0,
+        "stale reasons should explain why run summary needs refresh"
     );
     let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
 }
@@ -157,6 +204,7 @@ fn create_fixture(root: &Path, shape: FixtureShape) -> TestResult<()> {
         &root.join("derived").join("press_summaries.jsonl"),
         &[json!({"schema": "input_dynamics_press_summary.v1", "event": "press_summary"})],
     )?;
+    create_run_summary_fixture(root)?;
     write_jsonl(
         &root.join("derived").join("dismissal_inferences.jsonl"),
         &[
@@ -179,6 +227,23 @@ fn create_fixture(root: &Path, shape: FixtureShape) -> TestResult<()> {
         create_timeline_fixture(root)?;
     }
     Ok(())
+}
+
+fn create_run_summary_fixture(root: &Path) -> TestResult<()> {
+    let source_path = root.join("derived").join("press_summaries.jsonl");
+    let fingerprint = file_fingerprint(&source_path)?;
+    write_json(
+        &root.join("derived").join("run_summary.json"),
+        &json!({
+            "schema": "input_dynamics_run_summary.v1",
+            "event": "run_summary",
+            "source_ref": {
+                "path": "derived/press_summaries.jsonl",
+                "record_count": 1_u64,
+                "fingerprint": fingerprint,
+            },
+        }),
+    )
 }
 
 fn create_timeline_fixture(root: &Path) -> TestResult<()> {

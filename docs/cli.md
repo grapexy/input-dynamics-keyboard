@@ -280,6 +280,9 @@ scraping human-oriented text.
   JSONL records. The output includes key timing, hold/flight timing, landing
   geometry, pointer movement, and pressure/contact ranges. It does not infer
   raw `getevent` correlation; clock alignment is explicitly `not_estimated`.
+- `derive summary --recording-dir <dir>`: derives a run-level JSON summary from
+  `derived/press_summaries.jsonl`, including aggregate counts, timing/contact
+  ranges, provenance, and source freshness metadata.
 - `derive dismissals --recording-dir <dir>`: derives touch gestures and dismissal
   inferences from a recording. The command reads coordinate facts from
   `manifest.json` and uses the bundled derivation policy by default. Pass
@@ -319,6 +322,7 @@ of falling back to a second touch implementation.
     getevent.jsonl
     getevent.stderr.log
   derived/
+    run_summary.json
   evidence/        # only when --with-evidence is used
     start/
       accessibility.xml
@@ -374,9 +378,9 @@ input-dynamics recording inspect --dir "runs/$RUN_ID"
 This command is read-only. It reports the selected IME session JSONL file,
 record counts, artifact fingerprints, stored-versus-current validation state,
 timeline source staleness, and boolean flags such as `valid_for_analysis`,
-`needs_validation`, `needs_press_summaries`, `needs_derivation`, and
-`needs_timeline`. `next_actions` contains local CLI commands an agent can run
-to refresh missing or stale artifacts.
+`needs_validation`, `needs_press_summaries`, `needs_run_summary`,
+`needs_derivation`, and `needs_timeline`. `next_actions` contains local CLI
+commands an agent can run to refresh missing or stale artifacts.
 
 After recording with the current CLI:
 
@@ -394,6 +398,21 @@ source line indexes, reports `hold_ms`, `down_to_commit_ms`,
 `flight_since_previous_commit_ms`, key landing geometry, pointer movement, and
 pressure/contact statistics. `clock_alignment.getevent` is `not_estimated`
 because raw device events do not carry `press_id`.
+
+```bash
+input-dynamics derive summary --recording-dir "runs/$RUN_ID"
+```
+
+This writes:
+
+- `derived/run_summary.json`
+
+`run_summary.json` aggregates `press_summary` rows into run-level press counts,
+semantic key counts, hold/flight/pointer timing distributions, pressure and
+contact ranges, landing summaries, target package coverage counts, session
+provenance, and a fingerprint of the source `press_summaries.jsonl`.
+`recording inspect` reports the summary as stale if the press-summary source
+changes.
 
 ```bash
 input-dynamics derive dismissals --recording-dir "runs/$RUN_ID"

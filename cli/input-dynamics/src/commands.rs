@@ -7,9 +7,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use input_dynamics_analysis::derivation::{
-    DeriveDismissalsConfig, DerivePressesConfig, DeriveTimelineConfig,
+    DeriveDismissalsConfig, DerivePressesConfig, DeriveRunSummaryConfig, DeriveTimelineConfig,
     derive_dismissals as run_derive_dismissals,
-    derive_press_summaries as run_derive_press_summaries, derive_timeline as run_derive_timeline,
+    derive_press_summaries as run_derive_press_summaries, derive_run_summary,
+    derive_timeline as run_derive_timeline,
 };
 use input_dynamics_analysis::getevent::{GETEVENT_SCHEMA, NormalizeStats, normalize_file};
 use serde_json::{Value, json};
@@ -222,6 +223,16 @@ fn derive(command: DeriveCommand) -> CliResult<Value> {
         } => run_derive_press_summaries(&DerivePressesConfig {
             recording_dir,
             ime_jsonl,
+            output,
+        })
+        .map_err(CliError::from),
+        DeriveCommand::Summary {
+            recording_dir,
+            press_summaries_jsonl,
+            output,
+        } => derive_run_summary(&DeriveRunSummaryConfig {
+            recording_dir,
+            press_summaries_jsonl,
             output,
         })
         .map_err(CliError::from),

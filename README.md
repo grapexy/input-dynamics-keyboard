@@ -36,6 +36,9 @@ Use this keyboard only in consented, local research settings.
   runs that need screen context.
 - Derived press summaries for per-key timing, landing geometry, pointer
   movement, and pressure/contact ranges from IME JSONL records.
+- Derived run summaries for aggregate press counts, timing distributions,
+  pointer/contact ranges, target package coverage, provenance, and source
+  freshness.
 - Derived recording timelines that index IME events, gesture derivations,
   dismissal inferences, and evidence bundle references without embedding raw
   evidence payloads.

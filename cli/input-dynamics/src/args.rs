@@ -291,6 +291,18 @@ pub(crate) enum DeriveCommand {
         #[arg(long)]
         output: Option<PathBuf>,
     },
+    /// Derive a run-level summary from press summaries.
+    Summary {
+        /// Recording directory created by `input-dynamics record`.
+        #[arg(long)]
+        recording_dir: PathBuf,
+        /// Derived press summary JSONL path. Defaults under `--recording-dir`.
+        #[arg(long)]
+        press_summaries_jsonl: Option<PathBuf>,
+        /// Output path for run summary JSON. Defaults under `--recording-dir`.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
     /// Derive touch gestures and dismissal inferences.
     Dismissals {
         /// Recording directory created by `input-dynamics record`.
