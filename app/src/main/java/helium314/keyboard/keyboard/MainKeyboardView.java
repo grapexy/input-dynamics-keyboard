@@ -583,7 +583,7 @@ public final class MainKeyboardView extends KeyboardView implements DrawingProxy
         if (getKeyboard() == null) {
             return false;
         }
-        ResearchSessionLogger.logMotionEvent(getContext(), event);
+        ResearchSessionLogger.logMotionEvent(getContext(), event, this);
         if (mNonDistinctMultitouchHelper != null) {
             if (event.getPointerCount() > 1 && mTimerHandler.isInKeyRepeat()) {
                 // Key repeating timer will be canceled if 2 or popup keys are in action.

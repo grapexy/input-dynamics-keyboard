@@ -45,6 +45,10 @@ Input dynamics timing uses Android input timestamps from touch events:
 - `MotionEvent.getDownTime()` for gesture start time
 - `MotionEvent.getHistoricalEventTime()` for coalesced move history
 - `MotionEvent.getPressure()` and `MotionEvent.getSize()` when available
+- `MotionEvent` action, pointer, source, device, tool-type, and classification
+  metadata for reconstructing touch phases
+- Keyboard-view coordinate frame and display metrics for aligning IME-local touch
+  records with device-level event streams
 
 Millisecond event time is the primary comparable signal.
 
@@ -99,6 +103,17 @@ Input-scoped non-password records can also include:
 - `gesture_id`
 - `t_event_uptime_ms`
 - `pointer_id`
+- `pointer_index`
+- `pointer_count`
+- `motion_action`
+- `motion_action_name`
+- `motion_action_index`
+- `motion_source`
+- `input_device_id`
+- `tool_type`
+- `tool_type_name`
+- `classification`
+- `classification_name`
 - `key_code`
 - `key_code_printable`
 - `key_label`
@@ -117,6 +132,28 @@ Input-scoped non-password records can also include:
 - `key_center_offset_y_px`
 - `pressure`
 - `size`
+- `touch_major_px`
+- `touch_minor_px`
+- `tool_major_px`
+- `tool_minor_px`
+- `orientation`
+- `coordinate_space`
+- `coordinate_frame_available`
+- `keyboard_view_visible`
+- `keyboard_view_width_px`
+- `keyboard_view_height_px`
+- `keyboard_view_left_screen_px`
+- `keyboard_view_top_screen_px`
+- `keyboard_view_right_screen_px`
+- `keyboard_view_bottom_screen_px`
+- `keyboard_visible_top_y_screen_px`
+- `keyboard_visible_height_px`
+- `display_width_px`
+- `display_height_px`
+- `display_rotation`
+- `display_rotation_name`
+- `x_screen_px`
+- `y_screen_px`
 - `target_package`
 - `input_type_class`
 - `input_type_variation`
@@ -164,6 +201,17 @@ treated as a definitive app-side hide reason unless the record explicitly marks
 same touch sequence. `gesture_id` currently matches `press_id` for ordinary key
 touches; it is included so later gesture-level analysis can group richer
 multi-sample interactions without changing existing records.
+
+Pointer samples keep the original legacy `action`, `action_name`, `source`, and
+`device_id` fields for compatibility. New records also include the clearer
+aliases `motion_action`, `motion_action_name`, `motion_source`, and
+`input_device_id`.
+
+`x_px` and `y_px` are local to the keyboard view when they appear on key and
+pointer records. `x_screen_px` and `y_screen_px` are the same point translated
+into screen pixels using the logged keyboard-view frame. Display and keyboard
+frame fields are included on pointer, key, and IME lifecycle records when the
+keyboard view is available.
 
 Example record:
 

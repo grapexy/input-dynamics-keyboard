@@ -16,30 +16,41 @@ object ResearchKeyboardLayoutSnapshot {
         val keyboardView = switcher.mainKeyboardView
         val keyboard = switcher.keyboard
         val packageName = context.applicationContext.packageName
+        val coordinateFrame = ResearchCoordinateFrameSnapshot.fromView(context, keyboardView)
 
         if (keyboardView == null) {
-            return unavailable(packageName, "main_keyboard_view_unavailable")
+            return putCoordinateFrame(
+                unavailable(packageName, "main_keyboard_view_unavailable"),
+                coordinateFrame
+            )
         }
         if (keyboard == null) {
-            return unavailable(packageName, "keyboard_unavailable")
-                .put("keyboard_view_visible", keyboardView.isShown)
+            return putCoordinateFrame(
+                unavailable(packageName, "keyboard_unavailable")
+                    .put("keyboard_view_visible", keyboardView.isShown),
+                coordinateFrame
+            )
         }
 
         val locationOnScreen = IntArray(2)
         keyboardView.getLocationOnScreen(locationOnScreen)
         val visible = keyboardView.isShown
         if (!visible) {
-            return unavailable(packageName, "keyboard_view_not_shown")
-                .put("keyboard_view_visible", false)
-                .put("keyboard_view_width_px", keyboardView.width)
-                .put("keyboard_view_height_px", keyboardView.height)
-                .put("keyboard_view_location_on_screen_x_px", locationOnScreen[0])
-                .put("keyboard_view_location_on_screen_y_px", locationOnScreen[1])
-                .put("keyboard_id", keyboard.mId.toString())
+            return putCoordinateFrame(
+                unavailable(packageName, "keyboard_view_not_shown")
+                    .put("keyboard_view_visible", false)
+                    .put("keyboard_view_width_px", keyboardView.width)
+                    .put("keyboard_view_height_px", keyboardView.height)
+                    .put("keyboard_view_location_on_screen_x_px", locationOnScreen[0])
+                    .put("keyboard_view_location_on_screen_y_px", locationOnScreen[1])
+                    .put("keyboard_id", keyboard.mId.toString()),
+                coordinateFrame
+            )
         }
         val keys = keysJson(keyboard, locationOnScreen)
 
-        return JSONObject()
+        return putCoordinateFrame(
+            JSONObject()
             .put("available", true)
             .put("unavailable_reason", JSONObject.NULL)
             .put("package_name", packageName)
@@ -64,7 +75,9 @@ object ResearchKeyboardLayoutSnapshot {
             .put("most_common_key_width_px", keyboard.mMostCommonKeyWidth)
             .put("most_common_key_height_px", keyboard.mMostCommonKeyHeight)
             .put("key_count", keys.length())
-            .put("keys", keys)
+            .put("keys", keys),
+            coordinateFrame
+        )
     }
 
     private fun unavailable(packageName: String, reason: String): JSONObject =
@@ -75,6 +88,18 @@ object ResearchKeyboardLayoutSnapshot {
             .put("coordinate_space", "screen_px_and_keyboard_view_local_px")
             .put("key_count", 0)
             .put("keys", JSONArray())
+
+    private fun putCoordinateFrame(
+        json: JSONObject,
+        coordinateFrame: ResearchCoordinateFrameSnapshot.CoordinateFrameSnapshot
+    ): JSONObject {
+        coordinateFrame.fields().forEach { (key, value) ->
+            if (!json.has(key)) {
+                json.put(key, jsonValue(value))
+            }
+        }
+        return json
+    }
 
     private fun keysJson(keyboard: Keyboard, locationOnScreen: IntArray): JSONArray {
         val keys = JSONArray()

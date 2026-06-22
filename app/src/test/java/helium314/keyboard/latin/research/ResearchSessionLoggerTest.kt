@@ -2,6 +2,8 @@
 package helium314.keyboard.latin.research
 
 import android.text.InputType
+import android.view.MotionEvent
+import android.view.View
 import android.view.inputmethod.EditorInfo
 import androidx.test.core.app.ApplicationProvider
 import helium314.keyboard.ShadowInputMethodManager2
@@ -73,6 +75,41 @@ class ResearchSessionLoggerTest {
         }
     }
 
+    @Test
+    fun `pointer samples include motion and coordinate frame metadata`() {
+        ResearchSessionLogger.setEnabled(context, true)
+        val sessionId = ResearchSessionLogger.startSession(context, "run-pointer-frame-test")
+        ResearchSessionLogger.onInputFieldStarted(context, textAttributes())
+        val keyboardView = View(context).apply {
+            layout(0, 0, 100, 200)
+        }
+        val event = motionEvent()
+        try {
+            ResearchSessionLogger.logMotionEvent(context, event, keyboardView)
+        } finally {
+            event.recycle()
+        }
+        ResearchSessionLogger.stopSession(context)
+        ResearchSessionLogger.waitForPendingWrites()
+
+        val pointerSample = readRecords(sessionId)
+            .first { it.getString("event") == "pointer_sample" }
+        assertEquals("down", pointerSample.getString("motion_action_name"))
+        assertEquals(MotionEvent.ACTION_DOWN, pointerSample.getInt("motion_action"))
+        assertEquals(0, pointerSample.getInt("motion_action_index"))
+        assertEquals(1, pointerSample.getInt("pointer_count"))
+        assertEquals(MotionEvent.TOOL_TYPE_FINGER, pointerSample.getInt("tool_type"))
+        assertEquals("finger", pointerSample.getString("tool_type_name"))
+        assertEquals("keyboard_view_local_px", pointerSample.getString("coordinate_space"))
+        assertTrue(pointerSample.getBoolean("coordinate_frame_available"))
+        assertEquals(100, pointerSample.getInt("keyboard_view_width_px"))
+        assertEquals(200, pointerSample.getInt("keyboard_view_height_px"))
+        assertEquals(12.0, pointerSample.getDouble("x_screen_px"))
+        assertEquals(34.0, pointerSample.getDouble("y_screen_px"))
+        assertTrue(pointerSample.has("display_width_px"))
+        assertTrue(pointerSample.has("display_height_px"))
+    }
+
     private fun textAttributes(): InputAttributes =
         InputAttributes(
             EditorInfo().apply {
@@ -92,6 +129,39 @@ class ResearchSessionLoggerTest {
             false,
             context.packageName
         )
+
+    private fun motionEvent(): MotionEvent {
+        val pointerProperties = arrayOf(
+            MotionEvent.PointerProperties().apply {
+                id = 0
+                toolType = MotionEvent.TOOL_TYPE_FINGER
+            }
+        )
+        val pointerCoords = arrayOf(
+            MotionEvent.PointerCoords().apply {
+                x = 12f
+                y = 34f
+                pressure = 0.5f
+                size = 0.25f
+            }
+        )
+        return MotionEvent.obtain(
+            1_000L,
+            1_010L,
+            MotionEvent.ACTION_DOWN,
+            1,
+            pointerProperties,
+            pointerCoords,
+            0,
+            0,
+            1f,
+            1f,
+            7,
+            0,
+            0,
+            0
+        )
+    }
 
     private fun readRecords(sessionId: String): List<JSONObject> {
         val file = ResearchSessionLogger.logDirectory(context).resolve("session-$sessionId.jsonl")

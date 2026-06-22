@@ -8,6 +8,7 @@ import android.os.SystemClock
 import android.system.Os
 import android.text.InputType
 import android.view.MotionEvent
+import android.view.View
 import androidx.core.content.edit
 import helium314.keyboard.keyboard.Key
 import helium314.keyboard.keyboard.internal.PopupKeySpec
@@ -344,6 +345,11 @@ object ResearchSessionLogger {
 
     @JvmStatic
     fun logMotionEvent(context: Context, event: MotionEvent) {
+        logMotionEvent(context, event, null)
+    }
+
+    @JvmStatic
+    fun logMotionEvent(context: Context, event: MotionEvent, keyboardView: View?) {
         val appContext = rememberContext(context)
         if (!canLogInputEvent(appContext)) return
         val session = currentSessionSnapshot(appContext) ?: return
@@ -351,6 +357,7 @@ object ResearchSessionLogger {
         val actionName = motionActionName(actionMasked)
         val pointerCount = event.pointerCount
         val actionIndex = event.actionIndex
+        val coordinateFrame = ResearchCoordinateFrameSnapshot.fromView(context, keyboardView)
         updatePressIdsForMotionAction(event, actionMasked, actionIndex, pointerCount)
         val records = ArrayList<PendingEvent>(pointerCount * (event.historySize + 1))
 
@@ -366,7 +373,8 @@ object ResearchSessionLogger {
                     historicalTime,
                     "historical",
                     historyIndex,
-                    pointerPressIds[event.getPointerId(pointerIndex)]
+                    pointerPressIds[event.getPointerId(pointerIndex)],
+                    coordinateFrame
                 ))
             }
         }
@@ -380,7 +388,8 @@ object ResearchSessionLogger {
                 event.eventTime,
                 "current",
                 null,
-                pointerPressIds[event.getPointerId(pointerIndex)]
+                pointerPressIds[event.getPointerId(pointerIndex)],
+                coordinateFrame
             ))
         }
 
@@ -409,6 +418,7 @@ object ResearchSessionLogger {
         val appContext = this.appContext ?: return
         if (!canLogInputEvent(appContext)) return
         val session = currentSessionSnapshot(appContext) ?: return
+        val coordinateFrame = ResearchCoordinateFrameSnapshot.current(appContext)
         val fields = mutableMapOf<String, Any?>(
             "pointer_id" to pointerId,
             "press_id" to pointerPressIds[pointerId],
@@ -418,6 +428,7 @@ object ResearchSessionLogger {
             "y_px" to y,
             "key_present" to (key != null)
         )
+        fields += coordinateFrame.fieldsForLocalPoint(x, y)
         if (key != null) {
             val code = key.code
             val keyX = key.x
@@ -507,7 +518,13 @@ object ResearchSessionLogger {
         if (!isEnabled(appContext) || !isSessionActive(appContext)) return
         val session = currentSessionSnapshot(appContext) ?: return
         val fieldSnapshot = fieldSnapshot() ?: lifecycleFieldSnapshot ?: return
-        appendEvent(appContext, session, event, fields, fieldSnapshot)
+        appendEvent(
+            appContext,
+            session,
+            event,
+            fields + ResearchCoordinateFrameSnapshot.current(appContext).fields(),
+            fieldSnapshot
+        )
     }
 
     fun logDirectory(context: Context): File =
@@ -756,7 +773,8 @@ object ResearchSessionLogger {
         eventTime: Long,
         sampleKind: String,
         historyIndex: Int?,
-        pressId: Long?
+        pressId: Long?,
+        coordinateFrame: ResearchCoordinateFrameSnapshot.CoordinateFrameSnapshot
     ): PendingEvent {
         val x = if (historyIndex == null) {
             event.getX(pointerIndex)
@@ -803,13 +821,19 @@ object ResearchSessionLogger {
         } else {
             event.getHistoricalOrientation(pointerIndex, historyIndex)
         }
+        val toolType = event.getToolType(pointerIndex)
         val fields = mutableMapOf<String, Any?>(
             "sample_kind" to sampleKind,
             "action" to actionMasked,
             "action_name" to actionName,
+            "motion_action" to actionMasked,
+            "motion_action_name" to actionName,
             "action_index" to actionIndex,
+            "motion_action_index" to actionIndex,
             "device_id" to event.deviceId,
             "source" to event.source,
+            "input_device_id" to event.deviceId,
+            "motion_source" to event.source,
             "button_state" to event.buttonState,
             "meta_state" to event.metaState,
             "edge_flags" to event.edgeFlags,
@@ -819,7 +843,8 @@ object ResearchSessionLogger {
             "press_id" to pressId,
             "gesture_id" to pressId,
             "pointer_index" to pointerIndex,
-            "tool_type" to event.getToolType(pointerIndex),
+            "tool_type" to toolType,
+            "tool_type_name" to toolTypeName(toolType),
             "t_event_uptime_ms" to eventTime,
             "t_down_uptime_ms" to event.downTime,
             "x_px" to x,
@@ -832,8 +857,10 @@ object ResearchSessionLogger {
             "tool_minor_px" to toolMinor,
             "orientation" to orientation
         )
+        fields += coordinateFrame.fieldsForLocalPoint(x, y)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             fields["classification"] = event.classification
+            fields["classification_name"] = motionClassificationName(event.classification)
         }
         if (historyIndex != null) {
             fields["history_index"] = historyIndex
@@ -968,6 +995,28 @@ object ResearchSessionLogger {
             MotionEvent.ACTION_HOVER_ENTER -> "hover_enter"
             MotionEvent.ACTION_HOVER_EXIT -> "hover_exit"
             else -> "other"
+        }
+
+    private fun toolTypeName(toolType: Int): String =
+        when (toolType) {
+            MotionEvent.TOOL_TYPE_UNKNOWN -> "unknown"
+            MotionEvent.TOOL_TYPE_FINGER -> "finger"
+            MotionEvent.TOOL_TYPE_STYLUS -> "stylus"
+            MotionEvent.TOOL_TYPE_MOUSE -> "mouse"
+            MotionEvent.TOOL_TYPE_ERASER -> "eraser"
+            else -> "other"
+        }
+
+    private fun motionClassificationName(classification: Int): String =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            when (classification) {
+                MotionEvent.CLASSIFICATION_NONE -> "none"
+                MotionEvent.CLASSIFICATION_AMBIGUOUS_GESTURE -> "ambiguous_gesture"
+                MotionEvent.CLASSIFICATION_DEEP_PRESS -> "deep_press"
+                else -> "other"
+            }
+        } else {
+            "unavailable"
         }
 
     private fun keyClass(key: Key): String {

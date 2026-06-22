@@ -192,6 +192,8 @@ scraping human-oriented text.
   controller process was interrupted, `session stop` also removes stale runtime
   files and reports cleanup from the saved state.
 - `layout`: returns status including `keyboard_layout` when the IME is visible.
+  Layout output includes keyboard-view bounds, display size/rotation, and
+  screen-space key centers for coordinate calibration.
 - `layout --wait-visible` / `layout --wait-hidden`: waits for keyboard layout
   visibility state before returning.
 - `hide-keyboard`: dismisses the visible IME with a stateful uinput edge-back
