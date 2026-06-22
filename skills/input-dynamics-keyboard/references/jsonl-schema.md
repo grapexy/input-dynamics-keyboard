@@ -24,6 +24,14 @@ Use this reference when validating logs or changing event fields.
   hide reasons as ground truth unless they are actually observed by the event
   source.
 - `target_package` identifies the active editor package reported to the IME.
+- `field_episode_id` groups field-scoped records that appear to belong to one
+  visible editing episode. It is a logger heuristic, not app-provided truth.
+- `field_enter` records include editor metadata such as `ime_options`,
+  `effective_ime_options`, `ime_action`, `ime_action_name`, `action_label`,
+  `action_id`, and `editor_field_id`.
+- `editor_action` records include the performed `action_id` plus the current
+  field's editor metadata, using `field_action_id` for the app-provided
+  `EditorInfo.actionId`.
 - `password_field: true` records should not appear in pulled non-password
   validation logs; password-class contexts are the hard suppression boundary.
 
@@ -38,6 +46,13 @@ Minimum fields expected across typing/touch records include:
 - `t_uptime_ms`
 - `t_wall_ms`
 - `target_package`
+- `field_episode_id`
+- `ime_options`
+- `effective_ime_options`
+- `ime_action`
+- `ime_action_name`
+- `action_label`
+- `action_id`
 - `press_id`
 - `gesture_id`
 - `pointer_id`

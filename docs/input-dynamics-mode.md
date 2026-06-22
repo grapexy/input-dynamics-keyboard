@@ -155,8 +155,17 @@ Input-scoped non-password records can also include:
 - `x_screen_px`
 - `y_screen_px`
 - `target_package`
+- `field_episode_id`
 - `input_type_class`
 - `input_type_variation`
+- `ime_options`
+- `effective_ime_options`
+- `ime_action`
+- `ime_action_name`
+- `action_label`
+- `action_id`
+- `field_action_id`
+- `editor_field_id`
 - `restarting`
 - `finishing_input`
 - `input_view_shown`
@@ -168,6 +177,11 @@ Input-scoped non-password records can also include:
 `target_package` is the Android package name reported for the app that owns the
 current input field. It is useful for session provenance and layout/input-type
 debugging, and should be treated as sensitive context in exports.
+
+`field_episode_id` is a logger-generated grouping key for non-password
+field-scoped records that appear to belong to one visible editing episode.
+Rapid finish/start churn for the same field signature may reuse an episode id.
+Treat it as an analysis aid, not app-provided ground truth.
 
 `session_id` is generated internally for each logging session.
 `external_run_id` is optional caller-provided metadata for coordinating local
@@ -196,6 +210,12 @@ after field cleanup. Observed dismissal evidence such as `ime_hide_request`,
 `ime_hide_window_called`, `system_back_event`, and `editor_action` should not be
 treated as a definitive app-side hide reason unless the record explicitly marks
 `dismissal_confidence` as `definitive`.
+
+`field_enter` records include editor metadata from Android `EditorInfo`:
+`ime_options`, `effective_ime_options`, `ime_action`, `ime_action_name`,
+`action_label`, `action_id`, and `editor_field_id`. `editor_action` records use
+`action_id` for the performed action and `field_action_id` for the app-provided
+field action id.
 
 `press_id` correlates pointer samples with key down/up/commit records from the
 same touch sequence. `gesture_id` currently matches `press_id` for ordinary key

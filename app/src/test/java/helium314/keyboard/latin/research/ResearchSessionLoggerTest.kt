@@ -9,6 +9,7 @@ import androidx.test.core.app.ApplicationProvider
 import helium314.keyboard.ShadowInputMethodManager2
 import helium314.keyboard.latin.App
 import helium314.keyboard.latin.InputAttributes
+import helium314.keyboard.latin.utils.InputTypeUtils
 import org.json.JSONObject
 import org.junit.Before
 import org.junit.runner.RunWith
@@ -50,6 +51,7 @@ class ResearchSessionLoggerTest {
         assertTrue(records.any { it.getString("event") == "session_start" })
         assertTrue(records.any { it.getString("event") == "session_stop" })
         assertTrue(records.any { it.optString("target_package") == "org.example.input" })
+        assertTrue(records.any { it.has("field_episode_id") })
         records.forEach { record ->
             assertEquals("input_dynamics_event.v1", record.getString("schema"))
             assertEquals("run-test-001", record.getString("external_run_id"))
@@ -110,11 +112,75 @@ class ResearchSessionLoggerTest {
         assertTrue(pointerSample.has("display_height_px"))
     }
 
-    private fun textAttributes(): InputAttributes =
+    @Test
+    fun `field episode id and editor metadata are written for non-password fields`() {
+        ResearchSessionLogger.setEnabled(context, true)
+        val sessionId = ResearchSessionLogger.startSession(context, "run-field-episode-test")
+        val attributes = textAttributes(
+            imeOptions = EditorInfo.IME_ACTION_SEARCH,
+            actionId = 77,
+            actionLabel = "Search",
+            fieldId = 42
+        )
+        ResearchSessionLogger.onInputFieldStarted(context, attributes)
+        ResearchSessionLogger.onEditorAction(context, EditorInfo.IME_ACTION_SEARCH)
+        ResearchSessionLogger.onInputFieldFinished(context)
+        ResearchSessionLogger.onInputFieldStarted(context, attributes)
+        ResearchSessionLogger.stopSession(context)
+        ResearchSessionLogger.waitForPendingWrites()
+
+        val records = readRecords(sessionId)
+        val fieldEnterRecords = records.filter { it.getString("event") == "field_enter" }
+        assertEquals(2, fieldEnterRecords.size)
+        val episodeId = fieldEnterRecords.first().getLong("field_episode_id")
+        assertTrue(episodeId > 0)
+        assertEquals(episodeId, fieldEnterRecords.last().getLong("field_episode_id"))
+        assertEquals(EditorInfo.IME_ACTION_SEARCH, fieldEnterRecords.first().getInt("ime_options"))
+        assertEquals(InputTypeUtils.IME_ACTION_CUSTOM_LABEL, fieldEnterRecords.first().getInt("ime_action"))
+        assertEquals("actionCustomLabel", fieldEnterRecords.first().getString("ime_action_name"))
+        assertEquals("Search", fieldEnterRecords.first().getString("action_label"))
+        assertEquals(77, fieldEnterRecords.first().getInt("action_id"))
+        assertEquals(42, fieldEnterRecords.first().getInt("editor_field_id"))
+
+        val editorAction = records.first { it.getString("event") == "editor_action" }
+        assertEquals(episodeId, editorAction.getLong("field_episode_id"))
+        assertEquals(EditorInfo.IME_ACTION_SEARCH, editorAction.getInt("action_id"))
+        assertEquals("actionSearch", editorAction.getString("action_name"))
+        assertEquals(EditorInfo.IME_ACTION_SEARCH, editorAction.getInt("ime_options"))
+        assertEquals(InputTypeUtils.IME_ACTION_CUSTOM_LABEL, editorAction.getInt("ime_action"))
+        assertEquals("Search", editorAction.getString("action_label"))
+        assertEquals(77, editorAction.getInt("field_action_id"))
+    }
+
+    @Test
+    fun `starting session preserves already active non-password field snapshot`() {
+        ResearchSessionLogger.setEnabled(context, true)
+        ResearchSessionLogger.onInputFieldStarted(context, textAttributes())
+        val sessionId = ResearchSessionLogger.startSession(context, "run-active-field-test")
+        ResearchSessionLogger.logEvent(context, "manual_probe")
+        ResearchSessionLogger.stopSession(context)
+        ResearchSessionLogger.waitForPendingWrites()
+
+        val manualProbe = readRecords(sessionId).first { it.getString("event") == "manual_probe" }
+        assertEquals("org.example.input", manualProbe.getString("target_package"))
+        assertEquals(1, manualProbe.getLong("field_episode_id"))
+        assertFalse(manualProbe.getBoolean("password_field"))
+    }
+
+    private fun textAttributes(
+        imeOptions: Int = 0,
+        actionId: Int = 0,
+        actionLabel: CharSequence? = null,
+        fieldId: Int = 0
+    ): InputAttributes =
         InputAttributes(
             EditorInfo().apply {
                 packageName = "org.example.input"
                 inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_NORMAL
+                this.imeOptions = imeOptions
+                this.actionId = actionId
+                this.actionLabel = actionLabel
+                this.fieldId = fieldId
             },
             false,
             context.packageName

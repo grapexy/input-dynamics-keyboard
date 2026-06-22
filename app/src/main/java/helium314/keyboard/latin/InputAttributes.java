@@ -46,6 +46,12 @@ public final class InputAttributes {
     final public boolean mDisableGestureFloatingPreviewText;
     final public boolean mIsGeneralTextInput;
     final public int mInputType;
+    final public int mImeOptions;
+    final public int mEffectiveImeOptions;
+    final public int mImeAction;
+    final public int mEditorActionId;
+    final public String mEditorActionLabel;
+    final public int mEditorFieldId;
     final private EditorInfo mEditorInfo;
     final private String mPackageNameForPrivateImeOptions;
 
@@ -55,6 +61,16 @@ public final class InputAttributes {
         mPackageNameForPrivateImeOptions = packageNameForPrivateImeOptions;
         mTargetApplicationPackageName = null != editorInfo ? editorInfo.packageName : null;
         mInputType = AppWorkarounds.INSTANCE.adjustInputType(null != editorInfo ? editorInfo.inputType : 0, mTargetApplicationPackageName);
+        mImeOptions = null != editorInfo ? editorInfo.imeOptions : 0;
+        mEffectiveImeOptions = AppWorkarounds.INSTANCE.adjustImeOptions(mImeOptions, mTargetApplicationPackageName);
+        mImeAction = null != editorInfo
+                ? InputTypeUtils.getImeOptionsActionIdFromEditorInfo(editorInfo)
+                : EditorInfo.IME_ACTION_NONE;
+        mEditorActionId = null != editorInfo ? editorInfo.actionId : 0;
+        mEditorActionLabel = null != editorInfo && null != editorInfo.actionLabel
+                ? editorInfo.actionLabel.toString()
+                : null;
+        mEditorFieldId = null != editorInfo ? editorInfo.fieldId : 0;
         final int inputClass = mInputType & InputType.TYPE_MASK_CLASS;
         mIsPasswordField = InputTypeUtils.isPasswordInputType(mInputType)
                 || InputTypeUtils.isVisiblePasswordInputType(mInputType);

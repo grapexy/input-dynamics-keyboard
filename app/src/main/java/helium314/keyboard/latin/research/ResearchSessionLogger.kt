@@ -9,13 +9,16 @@ import android.system.Os
 import android.text.InputType
 import android.view.MotionEvent
 import android.view.View
+import android.view.inputmethod.EditorInfo
 import androidx.core.content.edit
+import helium314.keyboard.compat.EditorInfoCompatUtils
 import helium314.keyboard.keyboard.Key
 import helium314.keyboard.keyboard.internal.PopupKeySpec
 import helium314.keyboard.keyboard.internal.keyboard_parser.floris.KeyCode
 import helium314.keyboard.latin.BuildConfig
 import helium314.keyboard.latin.InputAttributes
 import helium314.keyboard.latin.common.Constants
+import helium314.keyboard.latin.utils.InputTypeUtils
 import helium314.keyboard.latin.utils.prefs
 import org.json.JSONArray
 import org.json.JSONObject
@@ -52,13 +55,20 @@ object ResearchSessionLogger {
     private const val DEFAULT_INPUT_ACTOR = "human"
     private const val DEFAULT_INPUT_CADENCE_POLICY = "manual"
     private const val CHEAP_RECORD_COUNT_MAX_BYTES = 10L * 1024L * 1024L
+    private const val FIELD_EPISODE_REUSE_WINDOW_MS = 1_500L
 
     private val ioExecutor = Executors.newSingleThreadExecutor()
     private val pressIdCounter = AtomicLong(0)
+    private val fieldEpisodeCounter = AtomicLong(0)
     private val pointerPressIds = ConcurrentHashMap<Int, Long>()
     @Volatile private var appContext: Context? = null
     @Volatile private var currentInputAttributes: InputAttributes? = null
     @Volatile private var lifecycleFieldSnapshot: FieldSnapshot? = null
+    @Volatile private var currentFieldEpisodeId: Long? = null
+    @Volatile private var currentFieldSignature: String? = null
+    @Volatile private var lastFinishedFieldEpisodeId: Long? = null
+    @Volatile private var lastFinishedFieldSignature: String? = null
+    @Volatile private var lastFinishedFieldUptimeMs: Long = 0L
     @Volatile private var knownNonPasswordField = false
 
     @JvmStatic
@@ -158,8 +168,12 @@ object ResearchSessionLogger {
         val normalizedInputProfileHash = inputProfileHash?.trim()?.takeIf { it.isNotEmpty() }
         val normalizedInputProfileSeed = inputProfileSeed?.trim()?.takeIf { it.isNotEmpty() }
         pressIdCounter.set(0)
+        fieldEpisodeCounter.set(0)
         pointerPressIds.clear()
-        lifecycleFieldSnapshot = fieldSnapshot()
+        resetFieldEpisodeIds()
+        lifecycleFieldSnapshot = currentInputAttributes
+            ?.takeIf { knownNonPasswordField }
+            ?.let { beginFieldEpisode(it) }
         appContext.prefs().edit(commit = true) {
             putBoolean(PREF_ACTIVE, true)
             putString(PREF_SESSION_ID, sessionId)
@@ -207,28 +221,29 @@ object ResearchSessionLogger {
         val session = currentSessionSnapshot(appContext) ?: return null
         appendLifecycleEvent(appContext, session, "session_stop")
         appContext.prefs().edit(commit = true) { putBoolean(PREF_ACTIVE, false) }
-        lifecycleFieldSnapshot = null
+        clearFieldEpisodeState(clearLastFinished = true)
         return session.sessionId
     }
 
     @JvmStatic
     fun onInputFieldStarted(context: Context, inputAttributes: InputAttributes?) {
         val appContext = rememberContext(context)
-        currentInputAttributes = inputAttributes
-        knownNonPasswordField = inputAttributes != null && !inputAttributes.mIsPasswordField
-        lifecycleFieldSnapshot = if (knownNonPasswordField) {
-            FieldSnapshot(inputAttributes?.mTargetApplicationPackageName)
-        } else {
-            null
+        val nonPasswordAttributes = inputAttributes?.takeUnless { it.mIsPasswordField }
+        if (nonPasswordAttributes == null) {
+            clearFieldEpisodeState(clearLastFinished = true)
+            return
         }
+        currentInputAttributes = nonPasswordAttributes
+        knownNonPasswordField = true
+        lifecycleFieldSnapshot = beginFieldEpisode(nonPasswordAttributes)
         if (!canLogInputEvent(appContext)) return
-        val inputType = inputAttributes?.mInputType ?: 0
+        val inputType = nonPasswordAttributes.mInputType
         val fields = mapOf(
             "input_type" to inputType,
             "input_type_class" to (inputType and InputType.TYPE_MASK_CLASS),
             "input_type_variation" to (inputType and InputType.TYPE_MASK_VARIATION),
             "input_type_flags" to (inputType and InputType.TYPE_MASK_FLAGS)
-        )
+        ) + editorInfoFields(nonPasswordAttributes, includeFieldActionId = true)
         logEvent(appContext, "field_enter", fields)
     }
 
@@ -238,8 +253,11 @@ object ResearchSessionLogger {
         if (canLogInputEvent(appContext)) {
             logEvent(appContext, "field_exit")
         }
+        rememberFinishedFieldEpisode()
         currentInputAttributes = null
         knownNonPasswordField = false
+        currentFieldEpisodeId = null
+        currentFieldSignature = null
     }
 
     @JvmStatic
@@ -338,8 +356,9 @@ object ResearchSessionLogger {
             "editor_action",
             mapOf(
                 "action_id" to actionId,
+                "action_name" to editorActionName(actionId),
                 "dismissal_evidence" to jsonArrayOf("performEditorAction")
-            )
+            ) + editorInfoFields(currentInputAttributes, includeFieldActionId = false)
         )
     }
 
@@ -751,6 +770,7 @@ object ResearchSessionLogger {
                         record
                             .put("password_field", false)
                             .put("target_package", jsonValue(fieldSnapshot.targetPackage))
+                            .put("field_episode_id", fieldSnapshot.fieldEpisodeId)
                     }
 
                     event.fields.forEach { (key, value) ->
@@ -924,8 +944,107 @@ object ResearchSessionLogger {
     private fun fieldSnapshot(): FieldSnapshot? {
         val inputAttributes = currentInputAttributes ?: return null
         if (!knownNonPasswordField) return null
-        return FieldSnapshot(inputAttributes.mTargetApplicationPackageName)
+        val episodeId = currentFieldEpisodeId ?: return null
+        return FieldSnapshot(inputAttributes.mTargetApplicationPackageName, episodeId)
     }
+
+    private fun beginFieldEpisode(inputAttributes: InputAttributes): FieldSnapshot {
+        val signature = fieldSignature(inputAttributes)
+        val now = SystemClock.uptimeMillis()
+        val existingEpisodeId = currentFieldEpisodeId
+        val episodeId = when {
+            existingEpisodeId != null && currentFieldSignature == signature -> existingEpisodeId
+            lastFinishedFieldEpisodeId != null &&
+                    lastFinishedFieldSignature == signature &&
+                    now - lastFinishedFieldUptimeMs <= FIELD_EPISODE_REUSE_WINDOW_MS ->
+                lastFinishedFieldEpisodeId ?: nextFieldEpisodeId()
+            else -> nextFieldEpisodeId()
+        }
+        currentFieldEpisodeId = episodeId
+        currentFieldSignature = signature
+        return FieldSnapshot(inputAttributes.mTargetApplicationPackageName, episodeId)
+    }
+
+    private fun rememberFinishedFieldEpisode() {
+        val episodeId = currentFieldEpisodeId ?: return
+        val signature = currentFieldSignature ?: return
+        lifecycleFieldSnapshot = fieldSnapshot()
+        lastFinishedFieldEpisodeId = episodeId
+        lastFinishedFieldSignature = signature
+        lastFinishedFieldUptimeMs = SystemClock.uptimeMillis()
+    }
+
+    private fun clearFieldEpisodeState(clearLastFinished: Boolean) {
+        currentFieldEpisodeId = null
+        currentFieldSignature = null
+        lifecycleFieldSnapshot = null
+        currentInputAttributes = null
+        knownNonPasswordField = false
+        if (clearLastFinished) {
+            lastFinishedFieldEpisodeId = null
+            lastFinishedFieldSignature = null
+            lastFinishedFieldUptimeMs = 0L
+        }
+    }
+
+    private fun resetFieldEpisodeIds() {
+        currentFieldEpisodeId = null
+        currentFieldSignature = null
+        lastFinishedFieldEpisodeId = null
+        lastFinishedFieldSignature = null
+        lastFinishedFieldUptimeMs = 0L
+        lifecycleFieldSnapshot = null
+    }
+
+    private fun nextFieldEpisodeId(): Long =
+        fieldEpisodeCounter.incrementAndGet()
+
+    private fun fieldSignature(inputAttributes: InputAttributes): String =
+        listOf(
+            inputAttributes.mTargetApplicationPackageName.orEmpty(),
+            inputAttributes.mInputType.toString(),
+            inputAttributes.mImeOptions.toString(),
+            inputAttributes.mEffectiveImeOptions.toString(),
+            inputAttributes.mImeAction.toString(),
+            inputAttributes.mEditorActionId.toString(),
+            inputAttributes.mEditorActionLabel.orEmpty(),
+            inputAttributes.mEditorFieldId.toString()
+        ).joinToString("|")
+
+    private fun editorInfoFields(
+        inputAttributes: InputAttributes?,
+        includeFieldActionId: Boolean
+    ): Map<String, Any?> {
+        if (inputAttributes == null) return emptyMap()
+        val fields = mutableMapOf<String, Any?>(
+            "ime_options" to inputAttributes.mImeOptions,
+            "effective_ime_options" to inputAttributes.mEffectiveImeOptions,
+            "ime_action" to inputAttributes.mImeAction,
+            "ime_action_name" to editorActionName(inputAttributes.mImeAction),
+            "action_label" to inputAttributes.mEditorActionLabel,
+            "editor_field_id" to inputAttributes.mEditorFieldId
+        )
+        if (includeFieldActionId) {
+            fields["action_id"] = inputAttributes.mEditorActionId
+        } else {
+            fields["field_action_id"] = inputAttributes.mEditorActionId
+        }
+        return fields
+    }
+
+    private fun editorActionName(actionId: Int): String =
+        when (actionId) {
+            InputTypeUtils.IME_ACTION_CUSTOM_LABEL -> "actionCustomLabel"
+            EditorInfo.IME_ACTION_UNSPECIFIED,
+            EditorInfo.IME_ACTION_NONE,
+            EditorInfo.IME_ACTION_GO,
+            EditorInfo.IME_ACTION_SEARCH,
+            EditorInfo.IME_ACTION_SEND,
+            EditorInfo.IME_ACTION_NEXT,
+            EditorInfo.IME_ACTION_DONE,
+            EditorInfo.IME_ACTION_PREVIOUS -> EditorInfoCompatUtils.imeActionName(actionId)
+            else -> "actionUnknown($actionId)"
+        }
 
     private fun resolveLogDirectory(context: Context): LogDirectory {
         val external = context.getExternalFilesDir(LOG_DIR_NAME)
@@ -1120,6 +1239,7 @@ object ResearchSessionLogger {
     )
 
     private data class FieldSnapshot(
-        val targetPackage: String?
+        val targetPackage: String?,
+        val fieldEpisodeId: Long
     )
 }
