@@ -57,7 +57,9 @@ struct InputControllerCapture<'a> {
     enabled: bool,
     start: Value,
     status_after_start: Value,
+    ready: Value,
     stop: Value,
+    session_lock: Option<controller::SessionStartLock>,
     stopped: bool,
 }
 
@@ -128,12 +130,14 @@ impl<'a> InputControllerCapture<'a> {
                 enabled: false,
                 start: Value::Null,
                 status_after_start: Value::Null,
+                ready: Value::Null,
                 stop: Value::Null,
+                session_lock: None,
                 stopped: true,
             });
         }
 
-        let mut session_lock = match controller::acquire_session_start(app, &config.run_id)? {
+        let session_lock = match controller::acquire_session_start(app, &config.run_id)? {
             SessionStartPermit::Acquired(session_lock) => session_lock,
             SessionStartPermit::Busy(status) => {
                 return Err(CliError::new(format!(
@@ -143,16 +147,51 @@ impl<'a> InputControllerCapture<'a> {
         };
         let start = controller::start(app, &config.run_id, None)?;
         ensure_command_ok(&start, "start record input controller")?;
-        session_lock.activate(&start)?;
         let status_after_start = controller::status(app)?;
         Ok(Self {
             app,
             enabled: true,
             start,
             status_after_start,
+            ready: Value::Null,
             stop: Value::Null,
+            session_lock: Some(session_lock),
             stopped: false,
         })
+    }
+
+    fn mark_ready(&mut self) -> CliResult<Value> {
+        if !self.enabled {
+            self.ready = json!({
+                "ok": true,
+                "enabled": false,
+                "requested": false,
+            });
+            return Ok(self.ready.clone());
+        }
+        let Some(mut session_lock) = self.session_lock.take() else {
+            self.ready = json!({
+                "ok": true,
+                "enabled": true,
+                "requested": true,
+                "already_ready": true,
+                "status": controller::status(self.app)?,
+            });
+            return Ok(self.ready.clone());
+        };
+        session_lock.activate(&self.start)?;
+        let status = controller::status(self.app)?;
+        self.ready = json!({
+            "ok": status
+                .get("ready_for_input")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            "enabled": true,
+            "requested": true,
+            "status": status,
+        });
+        ensure_command_ok(&self.ready, "mark record input controller ready")?;
+        Ok(self.ready.clone())
     }
 
     fn stop(&mut self) -> Value {
@@ -217,6 +256,7 @@ impl<'a> InputControllerCapture<'a> {
             "requested": true,
             "start": self.start,
             "status_after_start": self.status_after_start,
+            "ready": self.ready,
             "stop": self.stop,
             "summary": input_controller_summary(&self.status_after_start, &self.stop),
         })
@@ -238,6 +278,7 @@ pub(crate) fn record_run(app: &App, config: &RecordConfig) -> CliResult<Value> {
     let evidence_start =
         capture_evidence_or_cleanup(app, config, &paths, "start", &mut input_controller)?;
     let mut capture = start_getevent_capture_or_cleanup(app, &paths, &mut input_controller)?;
+    mark_input_controller_ready_or_cleanup(app, &mut capture, &mut input_controller)?;
     let wait = wait_for_stop_or_cleanup(app, config, &mut capture, &mut input_controller)?;
     let capture_stop = stop_capture_or_cleanup(app, capture, &mut input_controller)?;
     let layout_after_capture = layout_snapshot(app);
@@ -343,6 +384,19 @@ fn start_getevent_capture_or_cleanup(
         let cleanup = cleanup_after_record_failure(app, None, input_controller);
         CliError::new(format!(
             "failed to start getevent capture: {error}; cleanup attempted: {cleanup}"
+        ))
+    })
+}
+
+fn mark_input_controller_ready_or_cleanup(
+    app: &App,
+    capture: &mut GeteventCapture,
+    input_controller: &mut InputControllerCapture<'_>,
+) -> CliResult<Value> {
+    input_controller.mark_ready().map_err(|error| {
+        let cleanup = cleanup_after_record_failure(app, Some(capture), input_controller);
+        CliError::new(format!(
+            "failed to mark record input controller ready: {error}; cleanup attempted: {cleanup}"
         ))
     })
 }

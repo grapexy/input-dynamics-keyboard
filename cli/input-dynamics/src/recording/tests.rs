@@ -67,6 +67,39 @@ fn inspect_reports_ready_recording_and_next_timeline_action() {
 }
 
 #[test]
+fn inspect_selects_session_jsonl_from_pulled_log_layout() {
+    let root = unique_temp_dir("recording-inspect-pulled-log-layout");
+    let Some(()) = assert_ok(create_fixture(&root, FixtureShape::DerivedOnly), "fixture") else {
+        return;
+    };
+    let flat_session = root.join("ime").join("session-test.jsonl");
+    let nested_dir = root.join("ime").join("input_dynamics_logs");
+    let nested_session = nested_dir.join("session-test.jsonl");
+    let Some(()) = assert_ok(fs::create_dir_all(&nested_dir), "create nested ime dir") else {
+        return;
+    };
+    let Some(()) = assert_ok(
+        fs::rename(&flat_session, &nested_session),
+        "move session jsonl",
+    ) else {
+        return;
+    };
+
+    let Some(result) = assert_ok(inspect_recording(&root), "inspect recording") else {
+        return;
+    };
+
+    assert_eq!(
+        result
+            .pointer("/session_jsonl/selected")
+            .and_then(Value::as_str),
+        Some("ime/input_dynamics_logs/session-test.jsonl"),
+        "single pulled session should be selected recursively"
+    );
+    let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
+}
+
+#[test]
 fn inspect_detects_run_summary_source_staleness() {
     let root = unique_temp_dir("recording-inspect-summary-stale");
     let Some(()) = assert_ok(create_fixture(&root, FixtureShape::DerivedOnly), "fixture") else {

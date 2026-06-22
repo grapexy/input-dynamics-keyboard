@@ -35,6 +35,8 @@ pub(crate) fn validate_logs(path: &Path, run_id: Option<&str>) -> CliResult<Valu
     }
 
     let valid = counts.is_valid();
+    let failure_reasons = counts.failure_reasons();
+    let diagnostic_reasons = counts.diagnostic_reasons();
 
     Ok(json!({
         "ok": valid,
@@ -46,6 +48,9 @@ pub(crate) fn validate_logs(path: &Path, run_id: Option<&str>) -> CliResult<Valu
         "session_start_count": counts.session_start_count,
         "session_stop_count": counts.session_stop_count,
         "session_start_provenance_count": counts.session_start_provenance_count,
+        "input_scope_record_count": counts.input_scope_record_count,
+        "field_enter_count": counts.field_enter_count,
+        "key_record_count": counts.key_record_count,
         "target_package_seen": counts.target_package_seen,
         "invalid_schema_count": counts.invalid_schema_count,
         "missing_required_field_count": counts.missing_required_field_count,
@@ -57,6 +62,8 @@ pub(crate) fn validate_logs(path: &Path, run_id: Option<&str>) -> CliResult<Valu
         "session_id_mismatch_count": counts.session_id_mismatch_count,
         "event_order_violation_count": counts.event_order_violation_count,
         "password_record_count": counts.password_record_count,
+        "failure_reasons": failure_reasons,
+        "diagnostic_reasons": diagnostic_reasons,
     }))
 }
 
@@ -88,6 +95,9 @@ struct ValidationCounts {
     session_start_count: u64,
     session_stop_count: u64,
     session_start_provenance_count: u64,
+    input_scope_record_count: u64,
+    field_enter_count: u64,
+    key_record_count: u64,
     target_package_seen: bool,
     invalid_schema_count: u64,
     missing_required_field_count: u64,
@@ -119,10 +129,13 @@ impl ValidationCounts {
                 increment(&mut self.session_start_count)?;
                 self.validate_session_start_provenance(value)?;
             }
+            Some("field_enter") => increment(&mut self.field_enter_count)?,
+            Some(event) if event.starts_with("key_") => increment(&mut self.key_record_count)?,
             Some("session_stop") => increment(&mut self.session_stop_count)?,
             Some(_) | None => {}
         }
         if value.get("target_package").is_some() {
+            increment(&mut self.input_scope_record_count)?;
             self.target_package_seen = true;
         }
         if value.get("password_field").and_then(Value::as_bool) == Some(true) {
@@ -146,6 +159,73 @@ impl ValidationCounts {
             && self.session_id_mismatch_count == 0
             && self.event_order_violation_count == 0
             && self.password_record_count == 0
+    }
+
+    fn failure_reasons(&self) -> Vec<&'static str> {
+        let mut reasons = Vec::new();
+        if self.selected_count == 0 {
+            reasons.push("no_matching_records");
+        }
+        if self.session_start_count == 0 {
+            reasons.push("missing_session_start");
+        }
+        if self.session_stop_count == 0 {
+            reasons.push("missing_session_stop");
+        }
+        if self.session_start_provenance_count != self.session_start_count {
+            reasons.push("invalid_session_start_provenance");
+        }
+        if !self.target_package_seen {
+            reasons.push("no_input_scope_records");
+        }
+        if self.invalid_schema_count > 0 {
+            reasons.push("invalid_schema_records");
+        }
+        if self.missing_required_field_count > 0 {
+            reasons.push("missing_required_fields");
+        }
+        if self.invalid_required_field_count > 0 {
+            reasons.push("invalid_required_fields");
+        }
+        if self.invalid_provenance_count > 0 {
+            reasons.push("invalid_provenance_fields");
+        }
+        if self.missing_press_id_count > 0 {
+            reasons.push("missing_press_id");
+        }
+        if self.missing_gesture_id_count > 0 {
+            reasons.push("missing_gesture_id");
+        }
+        if self.session_id_mismatch_count > 0 {
+            reasons.push("session_id_mismatch");
+        }
+        if self.event_order_violation_count > 0 {
+            reasons.push("event_order_violation");
+        }
+        if self.password_record_count > 0 {
+            reasons.push("password_field_records");
+        }
+        reasons
+    }
+
+    fn diagnostic_reasons(&self) -> Vec<&'static str> {
+        let mut reasons = self.failure_reasons();
+        let lifecycle_count = self
+            .session_start_count
+            .checked_add(self.session_stop_count);
+        if self.selected_count > 0 && lifecycle_count == Some(self.selected_count) {
+            reasons.push("only_session_lifecycle_records");
+        }
+        if self.field_enter_count == 0 {
+            reasons.push("no_field_enter_records");
+        }
+        if self.key_record_count == 0 {
+            reasons.push("no_key_records");
+        }
+        if self.touch_sequence_record_count == 0 {
+            reasons.push("no_touch_sequence_records");
+        }
+        reasons
     }
 
     fn validate_required_fields(&mut self, value: &Value) -> CliResult<()> {
@@ -383,6 +463,55 @@ mod tests {
         assert_eq!(
             counts.invalid_provenance_count, 1,
             "invalid provenance count should increment"
+        );
+    }
+
+    #[test]
+    fn validation_counts_diagnose_lifecycle_only_records() {
+        let mut counts = ValidationCounts::default();
+        let start_record = json!({
+            "schema": "input_dynamics_event.v1",
+            "session_id": "session-1",
+            "event": "session_start",
+            "t_wall_ms": 1_u64,
+            "t_uptime_ms": 1_u64,
+            "input_actor": "human",
+            "input_controller": null,
+            "input_cadence_policy": "manual"
+        });
+        let stop_record = json!({
+            "schema": "input_dynamics_event.v1",
+            "session_id": "session-1",
+            "event": "session_stop",
+            "t_wall_ms": 2_u64,
+            "t_uptime_ms": 2_u64
+        });
+
+        assert!(
+            counts.update(&start_record).is_ok(),
+            "session_start should update counts"
+        );
+        assert!(
+            counts.update(&stop_record).is_ok(),
+            "session_stop should update counts"
+        );
+
+        assert!(
+            !counts.is_valid(),
+            "lifecycle-only session should not validate"
+        );
+        let diagnostics = counts.diagnostic_reasons();
+        assert!(
+            diagnostics.contains(&"only_session_lifecycle_records"),
+            "diagnostics should explain missing input records"
+        );
+        assert!(
+            diagnostics.contains(&"no_input_scope_records"),
+            "diagnostics should explain missing field scope"
+        );
+        assert!(
+            diagnostics.contains(&"no_touch_sequence_records"),
+            "diagnostics should explain missing touch/key timing records"
         );
     }
 

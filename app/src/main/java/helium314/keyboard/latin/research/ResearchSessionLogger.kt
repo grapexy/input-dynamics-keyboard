@@ -218,6 +218,16 @@ object ResearchSessionLogger {
             ),
             "session_start"
         )
+        val currentFieldAttributes = currentInputAttributes
+        val currentFieldSnapshot = lifecycleFieldSnapshot
+        if (currentFieldAttributes != null && knownNonPasswordField && currentFieldSnapshot != null) {
+            logFieldEnter(
+                appContext,
+                currentFieldAttributes,
+                currentFieldSnapshot,
+                "session_start_current_field"
+            )
+        }
         return sessionId
     }
 
@@ -244,14 +254,7 @@ object ResearchSessionLogger {
         knownNonPasswordField = true
         lifecycleFieldSnapshot = beginFieldEpisode(nonPasswordAttributes)
         if (!canLogInputEvent(appContext)) return
-        val inputType = nonPasswordAttributes.mInputType
-        val fields = mapOf(
-            "input_type" to inputType,
-            "input_type_class" to (inputType and InputType.TYPE_MASK_CLASS),
-            "input_type_variation" to (inputType and InputType.TYPE_MASK_VARIATION),
-            "input_type_flags" to (inputType and InputType.TYPE_MASK_FLAGS)
-        ) + editorInfoFields(nonPasswordAttributes, includeFieldActionId = true)
-        logEvent(appContext, "field_enter", fields)
+        logFieldEnter(appContext, nonPasswordAttributes, fieldSnapshot())
     }
 
     @JvmStatic
@@ -612,6 +615,7 @@ object ResearchSessionLogger {
         val resultFile = requestId?.let {
             File(logDirectory, controlResultFileName(it))
         }
+        val inputScope = inputScopeStatus(appContext, active)
         val json = JSONObject()
             .put("package_name", appContext.packageName)
             .put("request_id", jsonValue(requestId))
@@ -633,6 +637,10 @@ object ResearchSessionLogger {
             .put("input_profile_schema", jsonValue(currentInputProfileSchema(appContext)))
             .put("input_profile_hash", jsonValue(currentInputProfileHash(appContext)))
             .put("input_profile_seed", jsonValue(currentInputProfileSeed(appContext)))
+            .put("input_scope_ready", inputScope.ready)
+            .put("input_scope_state", inputScope.state)
+            .put("current_target_package", jsonValue(inputScope.fieldSnapshot?.targetPackage))
+            .put("current_field_episode_id", jsonValue(inputScope.fieldSnapshot?.fieldEpisodeId))
             .put("log_directory", logDirectory.absolutePath)
             .put("current_log_file_path", jsonValue(currentLogFile?.absolutePath))
             .put("last_log_file_path", jsonValue(lastLogFile?.absolutePath))
@@ -721,6 +729,19 @@ object ResearchSessionLogger {
             emptyMap()
         }
         appendEvent(context, session, event, fields, includeFieldState = false)
+    }
+
+    private fun logFieldEnter(
+        context: Context,
+        inputAttributes: InputAttributes,
+        fieldSnapshot: FieldSnapshot?,
+        source: String? = null
+    ) {
+        val snapshot = fieldSnapshot ?: return
+        val sourceField = source?.let { mapOf("field_enter_source" to it) }.orEmpty()
+        val fields = inputFieldFields(inputAttributes) + sourceField
+        val session = currentSessionSnapshot(context) ?: return
+        appendEvent(context, session, "field_enter", fields, snapshot)
     }
 
     private fun appendEvent(
@@ -1118,6 +1139,20 @@ object ResearchSessionLogger {
     private fun canLogInputEvent(context: Context): Boolean =
         isEnabled(context) && isSessionActive(context) && knownNonPasswordField
 
+    private fun inputScopeStatus(context: Context, active: Boolean): InputScopeStatus {
+        val fieldSnapshot = fieldSnapshot()
+        val ready = isEnabled(context) && active && fieldSnapshot != null
+        val state = when {
+            !isEnabled(context) -> "logging_disabled"
+            !active -> "session_inactive"
+            currentInputAttributes == null -> "no_current_field"
+            !knownNonPasswordField -> "no_non_password_field"
+            currentFieldEpisodeId == null -> "no_field_episode"
+            else -> "ready"
+        }
+        return InputScopeStatus(ready, state, if (ready) fieldSnapshot else null)
+    }
+
     private fun currentSessionSnapshot(context: Context): SessionSnapshot? {
         val sessionId = currentSessionId(context) ?: return null
         return SessionSnapshot(
@@ -1223,6 +1258,16 @@ object ResearchSessionLogger {
             fields["field_action_id"] = inputAttributes.mEditorActionId
         }
         return fields
+    }
+
+    private fun inputFieldFields(inputAttributes: InputAttributes): Map<String, Any?> {
+        val inputType = inputAttributes.mInputType
+        return mapOf(
+            "input_type" to inputType,
+            "input_type_class" to (inputType and InputType.TYPE_MASK_CLASS),
+            "input_type_variation" to (inputType and InputType.TYPE_MASK_VARIATION),
+            "input_type_flags" to (inputType and InputType.TYPE_MASK_FLAGS)
+        ) + editorInfoFields(inputAttributes, includeFieldActionId = true)
     }
 
     private fun editorActionName(actionId: Int): String =
@@ -1434,5 +1479,11 @@ object ResearchSessionLogger {
     private data class FieldSnapshot(
         val targetPackage: String?,
         val fieldEpisodeId: Long
+    )
+
+    private data class InputScopeStatus(
+        val ready: Boolean,
+        val state: String,
+        val fieldSnapshot: FieldSnapshot?
     )
 }

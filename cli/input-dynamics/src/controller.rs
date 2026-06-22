@@ -270,19 +270,25 @@ pub(crate) fn start(
 pub(crate) fn status(app: &App) -> CliResult<Value> {
     let paths = RuntimePaths::for_app(app)?;
     match send_request(&paths, &ControllerRequest::Status) {
-        Ok(response) => Ok(json!({
+        Ok(response) => {
+            let active = response.get("ok").and_then(Value::as_bool).unwrap_or(false);
+            let session_lock = read_lock_json(&paths.session_lock).unwrap_or(Value::Null);
+            Ok(json!({
             "ok": true,
-            "active": response.get("ok").and_then(Value::as_bool).unwrap_or(false),
+            "active": active,
+            "ready_for_input": active && session_lock_ready(&session_lock),
             "package_name": app.package(),
             "device_serial": paths.device_serial.as_str(),
             "runtime": paths_json(&paths),
             "state": read_state_json(&paths.state),
-            "session_lock": read_lock_json(&paths.session_lock).unwrap_or(Value::Null),
+            "session_lock": session_lock,
             "controller": response,
-        })),
+            }))
+        }
         Err(error) => Ok(json!({
             "ok": true,
             "active": false,
+            "ready_for_input": false,
             "package_name": app.package(),
             "device_serial": paths.device_serial.as_str(),
             "runtime": paths_json(&paths),
@@ -333,11 +339,7 @@ pub(crate) fn stop(app: &App) -> CliResult<Value> {
 
 pub(crate) fn tap(app: &App, spec: ControllerTapSpec) -> CliResult<Value> {
     let paths = RuntimePaths::for_app(app)?;
-    if !paths.socket.exists() {
-        return Err(CliError::new(
-            "no active input session; run `input-dynamics session start --run-id <id>`",
-        ));
-    }
+    ensure_ready_for_input(app, &paths)?;
     let response = send_request(
         &paths,
         &ControllerRequest::Tap {
@@ -356,11 +358,7 @@ pub(crate) fn tap(app: &App, spec: ControllerTapSpec) -> CliResult<Value> {
 
 pub(crate) fn path(app: &App, spec: PathSpec) -> CliResult<Value> {
     let paths = RuntimePaths::for_app(app)?;
-    if !paths.socket.exists() {
-        return Err(CliError::new(
-            "no active input session; run `input-dynamics session start --run-id <id>`",
-        ));
-    }
+    ensure_ready_for_input(app, &paths)?;
     let response = send_request(&paths, &ControllerRequest::Path { spec })?;
     Ok(json!({
         "ok": response.get("ok").and_then(Value::as_bool).unwrap_or(false),
@@ -485,6 +483,30 @@ fn wait_until_active(app: &App, paths: &RuntimePaths, run_id: &str) -> CliResult
         }
         thread::sleep(START_POLL_INTERVAL);
     }
+}
+
+fn ensure_ready_for_input(app: &App, paths: &RuntimePaths) -> CliResult<()> {
+    if !paths.socket.exists() {
+        return Err(CliError::new(
+            "no active input session; run `input-dynamics session start --run-id <id>`",
+        ));
+    }
+    let current = status(app)?;
+    if !value_bool(&current, "active") {
+        return Err(CliError::new(
+            "no active input session; run `input-dynamics session start --run-id <id>`",
+        ));
+    }
+    if !value_bool(&current, "ready_for_input") {
+        let lock_state = current
+            .pointer("/session_lock/state")
+            .and_then(Value::as_str)
+            .unwrap_or("missing");
+        return Err(CliError::new(format!(
+            "input session is not ready for commands; session_lock.state={lock_state}"
+        )));
+    }
+    Ok(())
 }
 
 fn handle_stream(
@@ -1575,6 +1597,14 @@ fn session_busy(app: &App, paths: &RuntimePaths, message: &str, current_status: 
 
 fn value_bool(value: &Value, key: &str) -> bool {
     value.get(key).and_then(Value::as_bool).unwrap_or(false)
+}
+
+fn session_lock_ready(session_lock: &Value) -> bool {
+    session_lock.get("state").and_then(Value::as_str) == Some("active")
+        && session_lock
+            .get("input_active")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
 }
 
 #[cfg(test)]

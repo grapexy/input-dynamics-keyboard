@@ -483,19 +483,7 @@ fn select_session_jsonl(dir: &Path) -> CliResult<SessionSelection> {
         });
     }
     let mut candidates = Vec::new();
-    for entry_result in fs::read_dir(&ime_dir)? {
-        let entry = entry_result?;
-        let path = entry.path();
-        let Some(file_name) = path.file_name().and_then(OsStr::to_str) else {
-            continue;
-        };
-        let is_jsonl = path
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("jsonl"));
-        if file_name.starts_with("session-") && is_jsonl {
-            candidates.push(path);
-        }
-    }
+    collect_session_jsonl_files(&ime_dir, &mut candidates)?;
     candidates.sort();
     let mut warnings = Vec::new();
     let selected = match candidates.len() {
@@ -516,6 +504,31 @@ fn select_session_jsonl(dir: &Path) -> CliResult<SessionSelection> {
         candidates,
         warnings,
     })
+}
+
+fn collect_session_jsonl_files(dir: &Path, candidates: &mut Vec<PathBuf>) -> CliResult<()> {
+    for entry_result in fs::read_dir(dir)? {
+        let entry = entry_result?;
+        let path = entry.path();
+        let metadata = entry.metadata()?;
+        if metadata.is_dir() {
+            collect_session_jsonl_files(&path, candidates)?;
+            continue;
+        }
+        if !metadata.is_file() {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(OsStr::to_str) else {
+            continue;
+        };
+        let is_jsonl = path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("jsonl"));
+        if file_name.starts_with("session-") && is_jsonl {
+            candidates.push(path);
+        }
+    }
+    Ok(())
 }
 
 fn session_json(dir: &Path, session: &SessionSelection) -> Value {

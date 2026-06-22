@@ -592,6 +592,7 @@ fn keyboard(app: &App, command: &KeyboardCommand) -> CliResult<Value> {
 fn ensure_keyboard_visible(app: &App) -> CliResult<Value> {
     let before = app.broadcast("KEYBOARD_LAYOUT", Vec::new())?;
     if layout_visible(&before)? {
+        ensure_visible_layout_has_loggable_scope(&before)?;
         return Ok(json!({
             "ok": true,
             "package_name": app.package(),
@@ -634,6 +635,7 @@ fn ensure_keyboard_visible(app: &App) -> CliResult<Value> {
         },
     )?;
     let after = wait_for_layout(app, LayoutWait::Visible)?;
+    let scope = wait_for_input_scope_ready(app)?;
     let visible_after = layout_visible(&after).unwrap_or(false);
     let tap_ok = tap_output
         .get("ok")
@@ -654,6 +656,7 @@ fn ensure_keyboard_visible(app: &App) -> CliResult<Value> {
         "editable": editable.to_json(center),
         "tap": tap_output,
         "layout": after,
+        "input_scope": scope,
         "error": error,
     }))
 }
@@ -944,6 +947,100 @@ fn with_layout_wait_metadata(mut status: Value, wait: LayoutWait, elapsed: Durat
     status
 }
 
+fn wait_for_input_scope_ready(app: &App) -> CliResult<Value> {
+    let start = Instant::now();
+    loop {
+        let status = app.broadcast("STATUS", Vec::new())?;
+        if status
+            .get("input_scope_ready")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Ok(status);
+        }
+        if start.elapsed() >= LAYOUT_WAIT_TIMEOUT {
+            return Err(CliError::new(format!(
+                "keyboard is visible but logging input scope is not ready; input_scope_state={}",
+                input_scope_state(&status)
+            )));
+        }
+        std::thread::sleep(LAYOUT_POLL_INTERVAL);
+    }
+}
+
+fn ensure_visible_layout_has_loggable_scope(status: &Value) -> CliResult<()> {
+    if !status
+        .get("active")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    if status
+        .get("input_scope_ready")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    Err(CliError::new(format!(
+        "keyboard is visible but logging input scope is not ready; input_scope_state={}",
+        input_scope_state(status)
+    )))
+}
+
+fn ensure_logged_input_ready(app: &App) -> CliResult<Value> {
+    let input = controller::status(app)?;
+    if !input
+        .get("active")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err(CliError::new(
+            "no active input session; run `input-dynamics session start --run-id <id>`",
+        ));
+    }
+    if !input
+        .get("ready_for_input")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        let lock_state = input
+            .pointer("/session_lock/state")
+            .and_then(Value::as_str)
+            .unwrap_or("missing");
+        return Err(CliError::new(format!(
+            "input session is not ready for commands; session_lock.state={lock_state}"
+        )));
+    }
+
+    let ime = app.broadcast("STATUS", Vec::new())?;
+    if ime.get("active").and_then(Value::as_bool) != Some(true) {
+        return Err(CliError::new("IME logging session is not active"));
+    }
+    if ime
+        .get("input_scope_ready")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Ok(json!({
+            "ime": ime,
+            "input": input,
+        }));
+    }
+    Err(CliError::new(format!(
+        "logging input scope is not ready; input_scope_state={}",
+        input_scope_state(&ime)
+    )))
+}
+
+fn input_scope_state(status: &Value) -> &str {
+    status
+        .get("input_scope_state")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+}
+
 fn layout_matches(status: &Value, wait: LayoutWait) -> CliResult<bool> {
     let visible = layout_visible(status)?;
     Ok(match wait {
@@ -967,16 +1064,7 @@ fn press_key(app: &App, key: PressKey) -> CliResult<Value> {
 }
 
 fn type_text(app: &App, text: &str, inter_key_delay_ms: u64) -> CliResult<Value> {
-    let input_status = controller::status(app)?;
-    if !input_status
-        .get("active")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        return Err(CliError::new(
-            "no active input session; run `input-dynamics session start --run-id <id>`",
-        ));
-    }
+    let readiness = ensure_logged_input_ready(app)?;
 
     let layout_result = app.broadcast("KEYBOARD_LAYOUT", Vec::new())?;
     let plan = planned_type_steps(app, &layout_result, text)?;
@@ -1031,6 +1119,7 @@ fn type_text(app: &App, text: &str, inter_key_delay_ms: u64) -> CliResult<Value>
         "inter_key_delay_ms": inter_key_delay_ms,
         "input_cadence_policy": "input_profile_or_fixed_inter_key_delay",
         "layout_refresh_count": plan.layout_refresh_count,
+        "readiness": readiness,
         "typed": typed,
     }))
 }
@@ -1444,6 +1533,7 @@ fn tap_key(app: &App, label: Option<&str>, code: Option<i64>) -> CliResult<Value
         return Err(CliError::new("tap requires --label or --code"));
     }
 
+    let readiness = ensure_logged_input_ready(app)?;
     let layout_result = app.broadcast("KEYBOARD_LAYOUT", Vec::new())?;
     let layout = keyboard_layout_value(&layout_result)?;
     ensure_keyboard_layout_available(layout)?;
@@ -1470,6 +1560,7 @@ fn tap_key(app: &App, label: Option<&str>, code: Option<i64>) -> CliResult<Value
         "package_name": app.package(),
         "input_backend": "uinput",
         "key": key,
+        "readiness": readiness,
         "touch": touch_output,
     }))
 }
