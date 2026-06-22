@@ -168,6 +168,22 @@ device-level touchscreen data and should be analyzed separately from IME-owned
 JSONL privacy guarantees. Current manifests include `coordinate_frame`, derived
 from recorded touchscreen profile and layout snapshots.
 
+When a run needs screen context, add `--with-evidence`. This writes start/end
+observation bundles under `evidence/start/` and `evidence/end/`, each with
+accessibility XML, screenshot PNG, status JSON, layout JSON, state JSON, and
+index JSON:
+
+```bash
+idk record \
+  --run-id "$RUN_ID" \
+  --out "runs/$RUN_ID" \
+  --with-evidence
+```
+
+Use `--full-accessibility-evidence` only when a protocol requires uncompressed
+accessibility hierarchy dumps. Treat evidence artifacts as sensitive local run
+data.
+
 For a bounded agent-driven run that also needs persistent uinput controller
 metadata, run `record` with `--with-input-controller` and a duration. Then drive
 input from another CLI process while the record process is active. Use
@@ -190,7 +206,8 @@ The resulting manifest should include
 `input_controller_runtime.summary.input_profile`,
 `input_controller_runtime.summary.physical_touchscreen_profile_hash`,
 `input_controller_runtime.summary.virtual_touchscreen_event_path`, and
-`input_controller_runtime.summary.cleanup`.
+`input_controller_runtime.summary.cleanup`. If `--with-evidence` was used, it
+should also include `evidence.enabled: true` and `evidence.policy: start_end`.
 
 To derive touch gestures and dismissal inferences from a completed run:
 

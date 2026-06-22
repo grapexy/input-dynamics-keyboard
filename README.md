@@ -32,6 +32,8 @@ Use this keyboard only in consented, local research settings.
   screenshot-based coordinate discovery.
 - CLI observation bundles for current status, keyboard layout, accessibility
   hierarchy, and screenshot evidence when screen context is needed.
+- Optional `record --with-evidence` start/end observation bundles for bounded
+  runs that need screen context.
 - AOSP uinput-backed CLI touch commands for local agent-driven key presses,
   layout-aware text entry, absolute taps, gesture paths, and edge-back keyboard
   dismissal.

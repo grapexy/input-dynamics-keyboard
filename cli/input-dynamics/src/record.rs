@@ -15,6 +15,7 @@ use crate::commands::{normalize_stats_json, path_string, pull_logs};
 use crate::controller::{self, SessionStartPermit};
 use crate::coordinate_frame::manifest_coordinate_frame;
 use crate::error::{CliError, CliResult};
+use crate::observe::{self, AccessibilityDetail};
 use crate::process::{FailureMode, spawn_process_to_files};
 use crate::uinput;
 use crate::validate::validate_logs;
@@ -26,6 +27,8 @@ pub(crate) struct RecordConfig {
     pub(crate) out: PathBuf,
     pub(crate) duration_ms: Option<u64>,
     pub(crate) with_input_controller: bool,
+    pub(crate) with_evidence: bool,
+    pub(crate) full_accessibility_evidence: bool,
     pub(crate) input_actor: String,
     pub(crate) input_controller: Option<String>,
     pub(crate) input_cadence_policy: String,
@@ -36,6 +39,7 @@ struct RecordPaths {
     ime: PathBuf,
     adb: PathBuf,
     derived: PathBuf,
+    evidence: PathBuf,
     manifest: PathBuf,
     validation: PathBuf,
     getevent_raw: PathBuf,
@@ -231,10 +235,14 @@ pub(crate) fn record_run(app: &App, config: &RecordConfig) -> CliResult<Value> {
     } = active;
     let touchscreen_profile = touchscreen_profile_snapshot(app);
     let layout_before_capture = layout_snapshot(app);
+    let evidence_start =
+        capture_evidence_or_cleanup(app, config, &paths, "start", &mut input_controller)?;
     let mut capture = start_getevent_capture_or_cleanup(app, &paths, &mut input_controller)?;
     let wait = wait_for_stop_or_cleanup(app, config, &mut capture, &mut input_controller)?;
     let capture_stop = stop_capture_or_cleanup(app, capture, &mut input_controller)?;
     let layout_after_capture = layout_snapshot(app);
+    let evidence_end =
+        capture_evidence_or_cleanup(app, config, &paths, "end", &mut input_controller)?;
     let input_controller_stop = input_controller.stop();
     let stop = app.broadcast("STOP", Vec::new())?;
     let pull = pull_logs(app, &paths.ime_pull_tmp)?;
@@ -261,6 +269,8 @@ pub(crate) fn record_run(app: &App, config: &RecordConfig) -> CliResult<Value> {
         touchscreen_profile,
         layout_before_capture,
         layout_after_capture,
+        evidence_start,
+        evidence_end,
         input_controller: input_controller.to_json(),
         input_controller_stop,
         stop,
@@ -282,6 +292,12 @@ pub(crate) fn record_run(app: &App, config: &RecordConfig) -> CliResult<Value> {
         "validation": validation,
         "getevent_normalization": manifest_parts.getevent_normalization,
         "input_controller": manifest_parts.input_controller,
+        "evidence": {
+            "enabled": config.with_evidence,
+            "policy": if config.with_evidence { "start_end" } else { "none" },
+            "start": manifest_parts.evidence_start,
+            "end": manifest_parts.evidence_end,
+        },
     }))
 }
 
@@ -356,6 +372,53 @@ fn stop_capture_or_cleanup(
             "failed to stop getevent capture: {error}; cleanup attempted: {cleanup}"
         ))
     })
+}
+
+fn capture_evidence_or_cleanup(
+    app: &App,
+    config: &RecordConfig,
+    paths: &RecordPaths,
+    phase: &str,
+    input_controller: &mut InputControllerCapture<'_>,
+) -> CliResult<Value> {
+    record_evidence(app, config, paths, phase).map_err(|error| {
+        let cleanup = cleanup_after_record_failure(app, None, input_controller);
+        CliError::new(format!(
+            "failed to capture {phase} evidence: {error}; cleanup attempted: {cleanup}"
+        ))
+    })
+}
+
+fn record_evidence(
+    app: &App,
+    config: &RecordConfig,
+    paths: &RecordPaths,
+    phase: &str,
+) -> CliResult<Value> {
+    if !config.with_evidence {
+        return Ok(json!({
+            "enabled": false,
+            "requested": false,
+            "phase": phase,
+        }));
+    }
+    let phase_dir = paths.evidence.join(phase);
+    let bundle = observe::all(app, &phase_dir, record_accessibility_detail(config))?;
+    Ok(json!({
+        "enabled": true,
+        "requested": true,
+        "phase": phase,
+        "policy": "start_end",
+        "bundle": bundle,
+    }))
+}
+
+const fn record_accessibility_detail(config: &RecordConfig) -> AccessibilityDetail {
+    if config.full_accessibility_evidence {
+        AccessibilityDetail::Full
+    } else {
+        AccessibilityDetail::Compressed
+    }
 }
 
 fn start_record_session(app: &App, config: &RecordConfig) -> CliResult<Value> {
@@ -473,6 +536,7 @@ fn prepare_paths(out: &Path) -> CliResult<RecordPaths> {
     let ime = root.join("ime");
     let adb = root.join("adb");
     let derived = root.join("derived");
+    let evidence = root.join("evidence");
     let ime_pull_tmp = root.join("ime-pull-tmp");
     fs::create_dir_all(&ime)?;
     fs::create_dir_all(&adb)?;
@@ -490,6 +554,7 @@ fn prepare_paths(out: &Path) -> CliResult<RecordPaths> {
         ime,
         adb,
         derived,
+        evidence,
         ime_pull_tmp,
     })
 }
@@ -523,6 +588,8 @@ struct ManifestParts {
     touchscreen_profile: Value,
     layout_before_capture: Value,
     layout_after_capture: Value,
+    evidence_start: Value,
+    evidence_end: Value,
     input_controller: Value,
     input_controller_stop: Value,
     stop: Value,
@@ -551,6 +618,7 @@ fn manifest_json(
         "ime_dir": path_string(&paths.ime)?,
         "adb_dir": path_string(&paths.adb)?,
         "derived_dir": path_string(&paths.derived)?,
+        "evidence_dir": path_string(&paths.evidence)?,
         "getevent_raw_log": path_string(&paths.getevent_raw)?,
         "getevent_jsonl": path_string(&paths.getevent_jsonl)?,
         "getevent_stderr_log": path_string(&paths.getevent_stderr)?,
@@ -572,6 +640,17 @@ fn manifest_json(
                 ("layout_after_capture", &parts.layout_after_capture),
             ],
         ),
+        "evidence": {
+            "enabled": config.with_evidence,
+            "policy": if config.with_evidence { "start_end" } else { "none" },
+            "accessibility_detail": if config.full_accessibility_evidence {
+                "full"
+            } else {
+                "compressed"
+            },
+            "start": parts.evidence_start,
+            "end": parts.evidence_end,
+        },
         "commands": {
             "start": parts.start,
             "wait": parts.wait,
@@ -581,6 +660,8 @@ fn manifest_json(
             "touchscreen_profile": parts.touchscreen_profile,
             "layout_before_capture": parts.layout_before_capture,
             "layout_after_capture": parts.layout_after_capture,
+            "evidence_start": parts.evidence_start,
+            "evidence_end": parts.evidence_end,
             "input_controller_stop": parts.input_controller_stop,
             "stop": parts.stop,
             "pull": parts.pull,
@@ -713,6 +794,8 @@ mod tests {
             out: PathBuf::from("runs/run-test"),
             duration_ms: Some(1_u64),
             with_input_controller: true,
+            with_evidence: false,
+            full_accessibility_evidence: false,
             input_actor: String::from("agent_adb"),
             input_controller: None,
             input_cadence_policy: String::from("manual"),

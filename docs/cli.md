@@ -114,6 +114,20 @@ cargo run --quiet -p input-dynamics -- record --run-id "$RUN_ID" --out "runs/$RU
 When `--duration-ms` is omitted, press Enter in the terminal to stop capture
 cleanly. For scripted smoke tests, pass `--duration-ms <ms>`.
 
+To preserve screen context at the beginning and end of a run, add
+`--with-evidence`:
+
+```bash
+cargo run --quiet -p input-dynamics -- record \
+  --run-id "$RUN_ID" \
+  --out "runs/$RUN_ID" \
+  --with-evidence
+```
+
+This captures `observe all` bundles under `evidence/start/` and
+`evidence/end/`. Use `--full-accessibility-evidence` only when a protocol needs
+uncompressed accessibility hierarchy dumps.
+
 For bounded agent-driven input, add `--with-input-controller`. This starts the
 persistent uinput controller for the record window and writes controller
 runtime metadata plus cleanup results into `manifest.json`. A second CLI
@@ -259,7 +273,9 @@ scraping human-oriented text.
   ADB `getevent` raw and normalized touch streams, manifest, pull, and
   validation output. Use `--duration-ms <ms>` for timed runs; otherwise press
   Enter to stop. Add `--with-input-controller` for bounded agent-driven runs
-  that need persistent uinput controller metadata in the manifest.
+  that need persistent uinput controller metadata in the manifest. Add
+  `--with-evidence` to capture start/end observation bundles containing
+  accessibility XML, screenshot PNG, status, layout, state, and index JSON.
 - `derive dismissals --run-dir <dir>`: derives touch gestures and dismissal
   inferences from a recorded run. The command reads coordinate facts from
   `manifest.json` and uses the bundled derivation policy by default. Pass
@@ -292,12 +308,32 @@ of falling back to a second touch implementation.
     getevent.jsonl
     getevent.stderr.log
   derived/
+  evidence/        # only when --with-evidence is used
+    start/
+      accessibility.xml
+      screenshot.png
+      status.json
+      layout.json
+      state.json
+      index.json
+    end/
+      accessibility.xml
+      screenshot.png
+      status.json
+      layout.json
+      state.json
+      index.json
 ```
 
 `manifest.json` also includes `coordinate_frame`, derived from the recorded
 physical touchscreen profile and keyboard layout snapshots. Analysis commands
 use this recorded frame instead of accepting screen geometry on the command
 line.
+
+When `record` is run with `--with-evidence`, `manifest.json` includes
+`evidence.enabled: true`, `evidence.policy: start_end`, and the start/end
+observation bundle metadata. Accessibility dumps and screenshots may contain
+visible screen content; keep them with the same care as raw run artifacts.
 
 When `record` is run with `--with-input-controller`, `manifest.json` includes:
 

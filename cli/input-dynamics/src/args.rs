@@ -154,6 +154,12 @@ pub(crate) enum Commands {
         /// Start a persistent uinput controller during the record run.
         #[arg(long)]
         with_input_controller: bool,
+        /// Capture start/end observation evidence bundles.
+        #[arg(long)]
+        with_evidence: bool,
+        /// Use full accessibility hierarchy dumps for --with-evidence.
+        #[arg(long, requires = "with_evidence")]
+        full_accessibility_evidence: bool,
         /// Session-level input actor provenance.
         #[arg(long, default_value = "human")]
         input_actor: String,
