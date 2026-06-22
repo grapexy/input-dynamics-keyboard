@@ -212,6 +212,17 @@ should also include `evidence.enabled: true` and `evidence.policy: start_end`.
 To derive touch gestures and dismissal inferences from a completed run:
 
 ```bash
+idk derive presses --recording-dir "runs/$RUN_ID"
+```
+
+This writes `derived/press_summaries.jsonl`. Use it for per-key timing,
+hold/flight timing, landing geometry, pointer movement, and pressure/contact
+ranges. It groups IME records by `press_id`; do not treat it as a direct raw
+`getevent` correlation unless a later artifact explicitly adds clock alignment.
+
+Then derive touch gestures and dismissal inferences:
+
+```bash
 idk derive dismissals --recording-dir "runs/$RUN_ID"
 ```
 
@@ -237,10 +248,11 @@ idk recording inspect --dir "runs/$RUN_ID"
 ```
 
 Use `flags.valid_for_analysis`, `flags.needs_validation`,
-`flags.needs_derivation`, and `flags.needs_timeline` to decide the next step.
-If `next_actions` is non-empty, prefer those CLI commands over ad hoc file
-inspection. The inspection output fingerprints source artifacts and reports
-stale timelines, but it does not rewrite validation or derived files.
+`flags.needs_press_summaries`, `flags.needs_derivation`, and
+`flags.needs_timeline` to decide the next step. If `next_actions` is non-empty,
+prefer those CLI commands over ad hoc file inspection. The inspection output
+fingerprints source artifacts and reports stale timelines, but it does not
+rewrite validation or derived files.
 
 5. Use lower-level status and layout commands when debugging:
 

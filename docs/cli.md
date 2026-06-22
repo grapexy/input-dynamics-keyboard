@@ -276,6 +276,10 @@ scraping human-oriented text.
   that need persistent uinput controller metadata in the manifest. Add
   `--with-evidence` to capture start/end observation bundles containing
   accessibility XML, screenshot PNG, status, layout, state, and index JSON.
+- `derive presses --recording-dir <dir>`: derives per-press summaries from IME
+  JSONL records. The output includes key timing, hold/flight timing, landing
+  geometry, pointer movement, and pressure/contact ranges. It does not infer
+  raw `getevent` correlation; clock alignment is explicitly `not_estimated`.
 - `derive dismissals --recording-dir <dir>`: derives touch gestures and dismissal
   inferences from a recording. The command reads coordinate facts from
   `manifest.json` and uses the bundled derivation policy by default. Pass
@@ -370,11 +374,26 @@ input-dynamics recording inspect --dir "runs/$RUN_ID"
 This command is read-only. It reports the selected IME session JSONL file,
 record counts, artifact fingerprints, stored-versus-current validation state,
 timeline source staleness, and boolean flags such as `valid_for_analysis`,
-`needs_validation`, `needs_derivation`, and `needs_timeline`. `next_actions`
-contains local CLI commands an agent can run to refresh missing or stale
-artifacts.
+`needs_validation`, `needs_press_summaries`, `needs_derivation`, and
+`needs_timeline`. `next_actions` contains local CLI commands an agent can run
+to refresh missing or stale artifacts.
 
 After recording with the current CLI:
+
+```bash
+input-dynamics derive presses --recording-dir "runs/$RUN_ID"
+```
+
+This writes:
+
+- `derived/press_summaries.jsonl`
+
+Each `press_summary` row groups IME `pointer_sample`, `key_down`, `key_up`,
+`key_commit`, and repeat/long-press/cancel records by `press_id`. It preserves
+source line indexes, reports `hold_ms`, `down_to_commit_ms`,
+`flight_since_previous_commit_ms`, key landing geometry, pointer movement, and
+pressure/contact statistics. `clock_alignment.getevent` is `not_estimated`
+because raw device events do not carry `press_id`.
 
 ```bash
 input-dynamics derive dismissals --recording-dir "runs/$RUN_ID"

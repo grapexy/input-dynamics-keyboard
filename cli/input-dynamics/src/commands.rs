@@ -7,8 +7,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use input_dynamics_analysis::derivation::{
-    DeriveDismissalsConfig, DeriveTimelineConfig, derive_dismissals as run_derive_dismissals,
-    derive_timeline as run_derive_timeline,
+    DeriveDismissalsConfig, DerivePressesConfig, DeriveTimelineConfig,
+    derive_dismissals as run_derive_dismissals,
+    derive_press_summaries as run_derive_press_summaries, derive_timeline as run_derive_timeline,
 };
 use input_dynamics_analysis::getevent::{GETEVENT_SCHEMA, NormalizeStats, normalize_file};
 use serde_json::{Value, json};
@@ -214,6 +215,16 @@ fn run_record_command(app: &App, command: &Commands) -> CliResult<Value> {
 
 fn derive(command: DeriveCommand) -> CliResult<Value> {
     match command {
+        DeriveCommand::Presses {
+            recording_dir,
+            ime_jsonl,
+            output,
+        } => run_derive_press_summaries(&DerivePressesConfig {
+            recording_dir,
+            ime_jsonl,
+            output,
+        })
+        .map_err(CliError::from),
         DeriveCommand::Dismissals {
             recording_dir,
             policy,

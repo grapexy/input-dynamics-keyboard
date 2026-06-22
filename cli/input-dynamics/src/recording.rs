@@ -199,6 +199,17 @@ fn timeline_source_stale_reasons(dir: &Path, source: &Value) -> CliResult<Vec<St
         .get("kind")
         .and_then(Value::as_str)
         .unwrap_or("unknown_source");
+    let recorded_exists = source
+        .get("exists")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let required = source
+        .get("required")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    if !recorded_exists && !required {
+        return Ok(reasons);
+    }
     let Some(path_text_value) = source.get("path").and_then(Value::as_str) else {
         reasons.push(format!("{kind} has no source path"));
         return Ok(reasons);
@@ -284,8 +295,14 @@ fn adb_artifact_specs(dir: &Path) -> [ArtifactSpec; 3] {
     ]
 }
 
-fn derived_artifact_specs(dir: &Path) -> [ArtifactSpec; 4] {
+fn derived_artifact_specs(dir: &Path) -> [ArtifactSpec; 5] {
     [
+        artifact(
+            "press_summaries",
+            dir.join("derived").join("press_summaries.jsonl"),
+            ArtifactRequirement::Optional,
+            ArtifactSensitivity::Sensitive,
+        ),
         artifact(
             "touch_gestures",
             dir.join("derived").join("touch_gestures.jsonl"),
@@ -445,6 +462,7 @@ fn note_flags(dir: &Path) -> CliResult<Value> {
 
 fn flags_json(inputs: &FlagInputs<'_>) -> Value {
     let has_getevent_jsonl = artifact_exists(inputs.artifacts, "adb_getevent_jsonl");
+    let has_press_summaries = artifact_exists(inputs.artifacts, "press_summaries");
     let has_touch_gestures = artifact_exists(inputs.artifacts, "touch_gestures");
     let has_dismissals = artifact_exists(inputs.artifacts, "dismissal_inferences");
     let has_evidence = artifact_exists(inputs.artifacts, "evidence_start_index")
@@ -469,6 +487,7 @@ fn flags_json(inputs: &FlagInputs<'_>) -> Value {
             && inputs.validation.current_ok,
         "needs_validation": !inputs.validation.stored_present
             || !inputs.validation.stale_reasons.is_empty(),
+        "needs_press_summaries": !has_press_summaries,
         "needs_derivation": needs_derivation,
         "needs_timeline": needs_timeline,
         "has_sensitive_evidence": has_evidence,
@@ -489,6 +508,16 @@ fn next_actions(dir: &Path, external_run_id: Option<&str>, flags: &Value) -> Cli
             "kind": "validate",
             "command": command,
             "reason": "refresh validation from current IME JSONL files",
+        }));
+    }
+    if bool_at(flags, "/needs_press_summaries") {
+        actions.push(json!({
+            "kind": "derive_presses",
+            "command": format!(
+                "input-dynamics derive presses --recording-dir {}",
+                shellish(dir)?
+            ),
+            "reason": "derive or refresh per-press timing and pointer summaries",
         }));
     }
     if bool_at(flags, "/needs_derivation") {

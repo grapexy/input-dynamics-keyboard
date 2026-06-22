@@ -3,6 +3,7 @@
 mod dismissal;
 mod error;
 mod jsonl;
+mod press;
 mod timeline;
 mod touch;
 
@@ -16,6 +17,7 @@ pub use error::{DeriveError, DeriveResult};
 
 use crate::derivation::dismissal::derive_dismissal_inferences;
 use crate::derivation::jsonl::{read_jsonl, write_jsonl};
+pub use crate::derivation::press::{DerivePressesConfig, derive_press_summaries};
 pub use crate::derivation::timeline::{DeriveTimelineConfig, derive_timeline};
 use crate::derivation::touch::derive_touch_gestures;
 
@@ -24,6 +26,9 @@ pub const TOUCH_GESTURE_SCHEMA: &str = "input_dynamics_touch_gesture.v1";
 
 /// Schema written to derived dismissal inference JSONL records.
 pub const DISMISSAL_INFERENCE_SCHEMA: &str = "input_dynamics_dismissal_inference.v1";
+
+/// Schema written to derived press summary JSONL records.
+pub const PRESS_SUMMARY_SCHEMA: &str = "input_dynamics_press_summary.v1";
 
 /// Schema written to derivation command summaries.
 pub const DERIVATION_SUMMARY_SCHEMA: &str = "input_dynamics_derivation_summary.v1";

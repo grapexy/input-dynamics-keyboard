@@ -37,6 +37,13 @@ fn inspect_reports_ready_recording_and_next_timeline_action() {
     );
     assert_eq!(
         result
+            .pointer("/flags/needs_press_summaries")
+            .and_then(Value::as_bool),
+        Some(false),
+        "press summaries are present"
+    );
+    assert_eq!(
+        result
             .pointer("/flags/needs_timeline")
             .and_then(Value::as_bool),
         Some(true),
@@ -92,6 +99,27 @@ fn inspect_detects_timeline_source_staleness() {
     let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
 }
 
+#[test]
+fn inspect_accepts_optional_missing_timeline_sources() {
+    let root = unique_temp_dir("recording-inspect-optional-missing");
+    let Some(()) = assert_ok(create_fixture(&root, FixtureShape::WithTimeline), "fixture") else {
+        return;
+    };
+
+    let Some(result) = assert_ok(inspect_recording(&root), "inspect recording") else {
+        return;
+    };
+
+    assert_eq!(
+        result
+            .pointer("/flags/needs_timeline")
+            .and_then(Value::as_bool),
+        Some(false),
+        "optional absent evidence sources should not stale a fresh timeline"
+    );
+    let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
+}
+
 #[derive(Clone, Copy)]
 enum FixtureShape {
     DerivedOnly,
@@ -124,6 +152,10 @@ fn create_fixture(root: &Path, shape: FixtureShape) -> TestResult<()> {
     write_jsonl(
         &root.join("derived").join("touch_gestures.jsonl"),
         &[json!({"schema": "input_dynamics_touch_gesture.v1", "event": "touch_gesture"})],
+    )?;
+    write_jsonl(
+        &root.join("derived").join("press_summaries.jsonl"),
+        &[json!({"schema": "input_dynamics_press_summary.v1", "event": "press_summary"})],
     )?;
     write_jsonl(
         &root.join("derived").join("dismissal_inferences.jsonl"),
@@ -162,7 +194,16 @@ fn create_timeline_fixture(root: &Path) -> TestResult<()> {
                 {
                     "kind": "derived_touch_gestures",
                     "path": "derived/touch_gestures.jsonl",
+                    "exists": true,
+                    "required": false,
                     "fingerprint": fingerprint
+                },
+                {
+                    "kind": "evidence_start",
+                    "path": "evidence/start/index.json",
+                    "exists": false,
+                    "required": false,
+                    "fingerprint": null
                 }
             ],
         }),

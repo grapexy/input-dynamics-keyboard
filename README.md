@@ -34,6 +34,8 @@ Use this keyboard only in consented, local research settings.
   hierarchy, and screenshot evidence when screen context is needed.
 - Optional `record --with-evidence` start/end observation bundles for bounded
   runs that need screen context.
+- Derived press summaries for per-key timing, landing geometry, pointer
+  movement, and pressure/contact ranges from IME JSONL records.
 - Derived recording timelines that index IME events, gesture derivations,
   dismissal inferences, and evidence bundle references without embedding raw
   evidence payloads.

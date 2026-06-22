@@ -279,6 +279,18 @@ pub(crate) enum GeteventCommand {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum DeriveCommand {
+    /// Derive per-press summaries from IME JSONL records.
+    Presses {
+        /// Recording directory created by `input-dynamics record`.
+        #[arg(long)]
+        recording_dir: PathBuf,
+        /// IME session JSONL path. Defaults to the single `ime/session-*.jsonl`.
+        #[arg(long)]
+        ime_jsonl: Option<PathBuf>,
+        /// Output path for derived press summaries. Defaults under `--recording-dir`.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
     /// Derive touch gestures and dismissal inferences.
     Dismissals {
         /// Recording directory created by `input-dynamics record`.
