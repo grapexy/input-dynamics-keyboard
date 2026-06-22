@@ -110,6 +110,60 @@ class ResearchSessionLoggerTest {
         assertEquals(34.0, pointerSample.getDouble("y_screen_px"))
         assertTrue(pointerSample.has("display_width_px"))
         assertTrue(pointerSample.has("display_height_px"))
+        assertFalse(pointerSample.getBoolean("active_key_present"))
+        assertEquals("keyboard_unavailable", pointerSample.getString("active_key_lookup"))
+    }
+
+    @Test
+    fun `active key relation classifies sample position against hitbox and bounds`() {
+        assertEquals(
+            "inside_hitbox",
+            ResearchSessionLogger.activeKeyRelationForSample(
+                x = 12.0,
+                y = 12.0,
+                keyX = 10,
+                keyY = 10,
+                keyWidth = 20,
+                keyHeight = 20,
+                hitBoxLeft = 8,
+                hitBoxTop = 8,
+                hitBoxRight = 32,
+                hitBoxBottom = 32,
+                nearThresholdPx = 5.0
+            )
+        )
+        assertEquals(
+            "near_key_bounds",
+            ResearchSessionLogger.activeKeyRelationForSample(
+                x = 34.0,
+                y = 20.0,
+                keyX = 10,
+                keyY = 10,
+                keyWidth = 20,
+                keyHeight = 20,
+                hitBoxLeft = 10,
+                hitBoxTop = 10,
+                hitBoxRight = 30,
+                hitBoxBottom = 30,
+                nearThresholdPx = 5.0
+            )
+        )
+        assertEquals(
+            "outside_key_bounds",
+            ResearchSessionLogger.activeKeyRelationForSample(
+                x = 50.0,
+                y = 20.0,
+                keyX = 10,
+                keyY = 10,
+                keyWidth = 20,
+                keyHeight = 20,
+                hitBoxLeft = 10,
+                hitBoxTop = 10,
+                hitBoxRight = 30,
+                hitBoxBottom = 30,
+                nearThresholdPx = 5.0
+            )
+        )
     }
 
     @Test

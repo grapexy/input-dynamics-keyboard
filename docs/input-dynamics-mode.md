@@ -130,6 +130,30 @@ Input-scoped non-password records can also include:
 - `key_touch_y_ratio`
 - `key_center_offset_x_px`
 - `key_center_offset_y_px`
+- `active_key_present`
+- `active_key_lookup`
+- `active_key_relation`
+- `active_key_code`
+- `active_key_code_printable`
+- `active_key_label`
+- `active_key_output_text`
+- `active_key_class`
+- `active_key_x_px`
+- `active_key_y_px`
+- `active_key_width_px`
+- `active_key_height_px`
+- `active_key_hitbox_left_px`
+- `active_key_hitbox_top_px`
+- `active_key_hitbox_right_px`
+- `active_key_hitbox_bottom_px`
+- `active_key_touch_x_ratio`
+- `active_key_touch_y_ratio`
+- `active_key_center_offset_x_px`
+- `active_key_center_offset_y_px`
+- `active_key_distance_to_bounds_px`
+- `active_key_near_threshold_px`
+- `active_key_inside_hitbox`
+- `active_key_inside_bounds`
 - `pressure`
 - `size`
 - `touch_major_px`
@@ -242,6 +266,13 @@ the keyboard has them.
 same touch sequence. `gesture_id` currently matches `press_id` for ordinary key
 touches; it is included so later gesture-level analysis can group richer
 multi-sample interactions without changing existing records.
+
+`pointer_sample` records include `active_key_*` fields when the keyboard layout
+is available. These fields describe the key hit box or nearest key for that
+sample, including key-relative ratios and whether the sample is inside the key
+hit box, inside the visual key bounds, near the bounds, or outside them. When
+layout context is not available, `active_key_present` is false and
+`active_key_lookup` explains why.
 
 Pointer samples keep the original legacy `action`, `action_name`, `source`, and
 `device_id` fields for compatibility. New records also include the clearer

@@ -16,6 +16,9 @@ Use this reference when validating logs or changing event fields.
   fields.
 - Key and pointer records include `press_id` when they belong to a touch
   sequence. `gesture_id` currently matches `press_id` for ordinary key touches.
+- Pointer samples include `active_key_*` fields when keyboard layout context is
+  available. These fields describe the key hit box or nearest key for that
+  sample and the sample's relation to that key.
 - Lifecycle events include `input_view_start`, `input_view_finish`,
   `input_finish`, `ime_window_shown`, and `ime_window_hidden`.
 - Dismissal-evidence events include `ime_hide_request`,
@@ -82,6 +85,17 @@ include:
 - `key_touch_y_ratio`
 - `key_center_offset_x_px`
 - `key_center_offset_y_px`
+- `active_key_present`
+- `active_key_lookup`
+- `active_key_relation`
+- `active_key_code`
+- `active_key_label`
+- `active_key_class`
+- `active_key_touch_x_ratio`
+- `active_key_touch_y_ratio`
+- `active_key_center_offset_x_px`
+- `active_key_center_offset_y_px`
+- `active_key_distance_to_bounds_px`
 - `pressure`
 - `size`
 - `password_field`

@@ -13,6 +13,8 @@ import android.view.inputmethod.EditorInfo
 import androidx.core.content.edit
 import helium314.keyboard.compat.EditorInfoCompatUtils
 import helium314.keyboard.keyboard.Key
+import helium314.keyboard.keyboard.Keyboard
+import helium314.keyboard.keyboard.KeyboardView
 import helium314.keyboard.keyboard.internal.PopupKeySpec
 import helium314.keyboard.keyboard.internal.keyboard_parser.floris.KeyCode
 import helium314.keyboard.latin.BuildConfig
@@ -33,6 +35,10 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 object ResearchSessionLogger {
     const val PREF_ENABLED = "input_dynamics_logging_enabled"
@@ -56,6 +62,7 @@ object ResearchSessionLogger {
     private const val DEFAULT_INPUT_CADENCE_POLICY = "manual"
     private const val CHEAP_RECORD_COUNT_MAX_BYTES = 10L * 1024L * 1024L
     private const val FIELD_EPISODE_REUSE_WINDOW_MS = 1_500L
+    private const val MIN_ACTIVE_KEY_NEAR_THRESHOLD_PX = 8.0
 
     private val ioExecutor = Executors.newSingleThreadExecutor()
     private val pressIdCounter = AtomicLong(0)
@@ -377,6 +384,7 @@ object ResearchSessionLogger {
         val pointerCount = event.pointerCount
         val actionIndex = event.actionIndex
         val coordinateFrame = ResearchCoordinateFrameSnapshot.fromView(context, keyboardView)
+        val keyboard = (keyboardView as? KeyboardView)?.keyboard
         updatePressIdsForMotionAction(event, actionMasked, actionIndex, pointerCount)
         val records = ArrayList<PendingEvent>(pointerCount * (event.historySize + 1))
 
@@ -393,7 +401,8 @@ object ResearchSessionLogger {
                     "historical",
                     historyIndex,
                     pointerPressIds[event.getPointerId(pointerIndex)],
-                    coordinateFrame
+                    coordinateFrame,
+                    keyboard
                 ))
             }
         }
@@ -408,7 +417,8 @@ object ResearchSessionLogger {
                 "current",
                 null,
                 pointerPressIds[event.getPointerId(pointerIndex)],
-                coordinateFrame
+                coordinateFrame,
+                keyboard
             ))
         }
 
@@ -794,7 +804,8 @@ object ResearchSessionLogger {
         sampleKind: String,
         historyIndex: Int?,
         pressId: Long?,
-        coordinateFrame: ResearchCoordinateFrameSnapshot.CoordinateFrameSnapshot
+        coordinateFrame: ResearchCoordinateFrameSnapshot.CoordinateFrameSnapshot,
+        keyboard: Keyboard?
     ): PendingEvent {
         val x = if (historyIndex == null) {
             event.getX(pointerIndex)
@@ -878,6 +889,7 @@ object ResearchSessionLogger {
             "orientation" to orientation
         )
         fields += coordinateFrame.fieldsForLocalPoint(x, y)
+        fields += activeKeyContextFields(keyboard, x, y)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             fields["classification"] = event.classification
             fields["classification_name"] = motionClassificationName(event.classification)
@@ -886,6 +898,187 @@ object ResearchSessionLogger {
             fields["history_index"] = historyIndex
         }
         return PendingEvent("pointer_sample", fields)
+    }
+
+    private fun activeKeyContextFields(keyboard: Keyboard?, x: Float, y: Float): Map<String, Any?> {
+        if (keyboard == null) {
+            return mapOf(
+                "active_key_present" to false,
+                "active_key_lookup" to "keyboard_unavailable"
+            )
+        }
+
+        val localX = x.roundToInt()
+        val localY = y.roundToInt()
+        val hitKey = detectHitKey(keyboard, localX, localY)
+        val activeKey = hitKey ?: nearestKey(keyboard, localX, localY)
+        if (activeKey == null) {
+            return mapOf(
+                "active_key_present" to false,
+                "active_key_lookup" to "no_nearby_key"
+            )
+        }
+
+        val keyX = activeKey.x
+        val keyY = activeKey.y
+        val keyWidth = activeKey.width
+        val keyHeight = activeKey.height
+        val hitBox = activeKey.hitBox
+        val nearThresholdPx = activeKeyNearThresholdPx(activeKey)
+        val distanceToBoundsPx = distanceToBoundsPx(
+            x.toDouble(),
+            y.toDouble(),
+            keyX,
+            keyY,
+            keyWidth,
+            keyHeight
+        )
+        val relation = activeKeyRelationForSample(
+            x = x.toDouble(),
+            y = y.toDouble(),
+            keyX = keyX,
+            keyY = keyY,
+            keyWidth = keyWidth,
+            keyHeight = keyHeight,
+            hitBoxLeft = hitBox.left,
+            hitBoxTop = hitBox.top,
+            hitBoxRight = hitBox.right,
+            hitBoxBottom = hitBox.bottom,
+            nearThresholdPx = nearThresholdPx
+        )
+
+        return mapOf(
+            "active_key_present" to true,
+            "active_key_lookup" to if (hitKey != null) "hitbox" else "nearest",
+            "active_key_relation" to relation,
+            "active_key_code" to activeKey.code,
+            "active_key_code_printable" to Constants.printableCode(activeKey.code),
+            "active_key_label" to activeKey.label,
+            "active_key_output_text" to activeKey.outputText,
+            "active_key_class" to keyClass(activeKey),
+            "active_key_x_px" to keyX,
+            "active_key_y_px" to keyY,
+            "active_key_width_px" to keyWidth,
+            "active_key_height_px" to keyHeight,
+            "active_key_hitbox_left_px" to hitBox.left,
+            "active_key_hitbox_top_px" to hitBox.top,
+            "active_key_hitbox_right_px" to hitBox.right,
+            "active_key_hitbox_bottom_px" to hitBox.bottom,
+            "active_key_center_offset_x_px" to (x - (keyX + keyWidth / 2.0)),
+            "active_key_center_offset_y_px" to (y - (keyY + keyHeight / 2.0)),
+            "active_key_touch_x_ratio" to ratio(x - keyX, keyWidth),
+            "active_key_touch_y_ratio" to ratio(y - keyY, keyHeight),
+            "active_key_distance_to_bounds_px" to distanceToBoundsPx,
+            "active_key_near_threshold_px" to nearThresholdPx,
+            "active_key_inside_hitbox" to pointInRect(
+                x.toDouble(),
+                y.toDouble(),
+                hitBox.left,
+                hitBox.top,
+                hitBox.right,
+                hitBox.bottom
+            ),
+            "active_key_inside_bounds" to pointInRect(
+                x.toDouble(),
+                y.toDouble(),
+                keyX,
+                keyY,
+                keyX + keyWidth,
+                keyY + keyHeight
+            )
+        )
+    }
+
+    private fun detectHitKey(keyboard: Keyboard, x: Int, y: Int): Key? {
+        var minDistance = Int.MAX_VALUE
+        var primaryKey: Key? = null
+        for (key in keyboard.getNearestKeys(x, y)) {
+            if (key.isSpacer || !key.isOnKey(x, y)) {
+                continue
+            }
+            val distance = key.squaredDistanceToEdge(x, y)
+            if (distance > minDistance) {
+                continue
+            }
+            if (primaryKey == null || distance < minDistance || key.code > primaryKey.code) {
+                minDistance = distance
+                primaryKey = key
+            }
+        }
+        return primaryKey
+    }
+
+    private fun nearestKey(keyboard: Keyboard, x: Int, y: Int): Key? {
+        var minDistance = Int.MAX_VALUE
+        var nearestKey: Key? = null
+        for (key in keyboard.getNearestKeys(x, y)) {
+            if (key.isSpacer) {
+                continue
+            }
+            val distance = key.squaredDistanceToEdge(x, y)
+            if (distance < minDistance) {
+                minDistance = distance
+                nearestKey = key
+            }
+        }
+        return nearestKey
+    }
+
+    private fun activeKeyNearThresholdPx(key: Key): Double =
+        max(MIN_ACTIVE_KEY_NEAR_THRESHOLD_PX, min(key.width, key.height).toDouble() * 0.25)
+
+    internal fun activeKeyRelationForSample(
+        x: Double,
+        y: Double,
+        keyX: Int,
+        keyY: Int,
+        keyWidth: Int,
+        keyHeight: Int,
+        hitBoxLeft: Int,
+        hitBoxTop: Int,
+        hitBoxRight: Int,
+        hitBoxBottom: Int,
+        nearThresholdPx: Double
+    ): String {
+        if (pointInRect(x, y, hitBoxLeft, hitBoxTop, hitBoxRight, hitBoxBottom)) {
+            return "inside_hitbox"
+        }
+        if (pointInRect(x, y, keyX, keyY, keyX + keyWidth, keyY + keyHeight)) {
+            return "inside_key_bounds"
+        }
+        return if (distanceToBoundsPx(x, y, keyX, keyY, keyWidth, keyHeight) <= nearThresholdPx) {
+            "near_key_bounds"
+        } else {
+            "outside_key_bounds"
+        }
+    }
+
+    private fun pointInRect(x: Double, y: Double, left: Int, top: Int, right: Int, bottom: Int): Boolean =
+        x >= left && x < right && y >= top && y < bottom
+
+    private fun distanceToBoundsPx(
+        x: Double,
+        y: Double,
+        keyX: Int,
+        keyY: Int,
+        keyWidth: Int,
+        keyHeight: Int
+    ): Double {
+        val right = keyX + keyWidth
+        val bottom = keyY + keyHeight
+        val edgeX = when {
+            x < keyX -> keyX.toDouble()
+            x >= right -> right.toDouble()
+            else -> x
+        }
+        val edgeY = when {
+            y < keyY -> keyY.toDouble()
+            y >= bottom -> bottom.toDouble()
+            else -> y
+        }
+        val dx = x - edgeX
+        val dy = y - edgeY
+        return sqrt(dx * dx + dy * dy)
     }
 
     private fun updatePressIdsForMotionAction(
