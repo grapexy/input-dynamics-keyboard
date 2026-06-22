@@ -266,7 +266,8 @@ scraping human-oriented text.
 - `touch doctor`: checks AOSP uinput availability and reports the mirrored
   physical touchscreen profile used by the CLI.
 - `touch tap --x <x> --y <y> [--hold-ms <ms>]`: sends an absolute screen tap
-  through AOSP uinput.
+  through AOSP uinput. Use `--hold-ms` for one-shot long presses; there is no
+  separate `touch hold` command.
 - `touch swipe --from-x <x> --from-y <y> --to-x <x> --to-y <y>`: sends an
   absolute swipe through the active session controller.
 - `touch path --points-json '<json>'` or `touch path --points-file <path>`:

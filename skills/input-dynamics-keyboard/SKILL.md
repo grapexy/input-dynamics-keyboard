@@ -315,12 +315,14 @@ partial typing. `tap` and `press` also fail when the keyboard is hidden; use
 non-password editable field first, or the only visible non-password editable
 field if none is focused. Use `tap --code=<code>` only when there is no
 semantic command. Use `touch tap --x <x> --y <y>` for diagnostic absolute
-screen coordinates. Use `touch swipe` and `touch path` only when a protocol
-needs raw absolute gesture control; otherwise prefer semantic commands such as
-`type`, `press`, and `hide-keyboard`. The CLI routes session input and `touch`
-commands through AOSP `/system/bin/uinput` and should fail rather than switch
-to another touch backend. The active input profile can sample key-local landing
-ratios, hold duration, contact fields, and inter-key delay.
+screen coordinates. Use `touch tap --hold-ms <ms>` for one-shot long presses;
+do not invent a separate `touch hold` workflow. Use `touch swipe` and `touch
+path` only when a protocol needs raw absolute gesture control; otherwise prefer
+semantic commands such as `type`, `press`, and `hide-keyboard`. The CLI routes
+session input and `touch` commands through AOSP `/system/bin/uinput` and should
+fail rather than switch to another touch backend. The active input profile can
+sample key-local landing ratios, hold duration, contact fields, and inter-key
+delay.
 
 ## Validation
 
