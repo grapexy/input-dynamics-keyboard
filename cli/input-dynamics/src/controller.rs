@@ -30,6 +30,7 @@ const START_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const START_LOCK_STALE_MS: u128 = 120_000;
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 const CLEANUP_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_TAIL_MS: u64 = 100;
 
 #[derive(Debug)]
@@ -90,6 +91,17 @@ enum ControllerRequest {
         spec: PathSpec,
     },
     Stop,
+}
+
+impl ControllerRequest {
+    const fn name(&self) -> &'static str {
+        match *self {
+            Self::Status => "status",
+            Self::Tap { .. } => "tap",
+            Self::Path { .. } => "path",
+            Self::Stop => "stop",
+        }
+    }
 }
 
 pub(crate) fn acquire_session_start(app: &App, run_id: &str) -> CliResult<SessionStartPermit> {
@@ -514,13 +526,58 @@ fn handle_request(
 
 fn send_request(socket: &Path, request: &ControllerRequest) -> CliResult<Value> {
     let mut stream = UnixStream::connect(socket)?;
-    serde_json::to_writer(&mut stream, request)?;
-    stream.write_all(b"\n")?;
-    stream.flush()?;
+    stream.set_read_timeout(Some(REQUEST_TIMEOUT))?;
+    stream.set_write_timeout(Some(REQUEST_TIMEOUT))?;
+    serde_json::to_writer(&mut stream, request).map_err(|error| {
+        if json_io_timed_out(&error) {
+            request_timeout_error(socket, request, "write")
+        } else {
+            CliError::from(error)
+        }
+    })?;
+    stream.write_all(b"\n").map_err(|error| {
+        if io_timed_out(&error) {
+            request_timeout_error(socket, request, "write")
+        } else {
+            CliError::from(error)
+        }
+    })?;
+    stream.flush().map_err(|error| {
+        if io_timed_out(&error) {
+            request_timeout_error(socket, request, "write")
+        } else {
+            CliError::from(error)
+        }
+    })?;
     stream.shutdown(Shutdown::Write)?;
     let mut response_text = String::new();
-    stream.read_to_string(&mut response_text)?;
+    stream.read_to_string(&mut response_text).map_err(|error| {
+        if io_timed_out(&error) {
+            request_timeout_error(socket, request, "read")
+        } else {
+            CliError::from(error)
+        }
+    })?;
     Ok(serde_json::from_str(response_text.trim())?)
+}
+
+fn request_timeout_error(socket: &Path, request: &ControllerRequest, phase: &str) -> CliError {
+    CliError::new(format!(
+        "timed out during {phase} for controller {} request after {} ms; socket={}",
+        request.name(),
+        millis_u64(REQUEST_TIMEOUT),
+        path_string_lossy(socket),
+    ))
+}
+
+fn json_io_timed_out(error: &serde_json::Error) -> bool {
+    error
+        .io_error_kind()
+        .is_some_and(|kind| matches!(kind, ErrorKind::WouldBlock | ErrorKind::TimedOut))
+}
+
+fn io_timed_out(error: &std::io::Error) -> bool {
+    matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
 }
 
 fn start_uinput_process(app: &App, config: &RunConfig) -> CliResult<StdinProcess> {
