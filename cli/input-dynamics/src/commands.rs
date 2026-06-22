@@ -6,12 +6,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
+use input_dynamics_analysis::getevent::{GETEVENT_SCHEMA, NormalizeStats, normalize_file};
 use serde_json::{Value, json};
 
 use crate::app::{App, LOG_DIR};
 use crate::args::{
-    Commands, ControllerCommand, EdgeSide, HideKeyboardMethod, PressKey, SessionCommand,
-    TouchCommand,
+    Commands, ControllerCommand, EdgeSide, GeteventCommand, HideKeyboardMethod, PressKey,
+    SessionCommand, TouchCommand,
 };
 use crate::controller::{self, RunConfig, SessionStartPermit};
 use crate::error::{CliError, CliResult};
@@ -89,6 +90,7 @@ pub(crate) fn run_command(app: &App, cli_command: Commands) -> CliResult<Value> 
         Commands::ClearLogs => app.broadcast("CLEAR_LOGS", Vec::new()),
         Commands::Pull { out } => pull_logs(app, &out),
         Commands::Validate { path, run_id } => validate_logs(&path, run_id.as_deref()),
+        Commands::Getevent { command } => getevent(command),
         Commands::Record {
             run_id,
             out,
@@ -125,6 +127,32 @@ pub(crate) fn run_command(app: &App, cli_command: Commands) -> CliResult<Value> 
             command: controller_command,
         } => run_controller_command(app, controller_command),
     }
+}
+
+fn getevent(command: GeteventCommand) -> CliResult<Value> {
+    match command {
+        GeteventCommand::Normalize { input, output } => {
+            let stats = normalize_file(&input, &output)?;
+            Ok(json!({
+                "ok": true,
+                "schema": GETEVENT_SCHEMA,
+                "input": path_string(&input)?,
+                "output": path_string(&output)?,
+                "stats": normalize_stats_json(&stats),
+            }))
+        }
+    }
+}
+
+pub(crate) fn normalize_stats_json(stats: &NormalizeStats) -> Value {
+    json!({
+        "line_count": stats.lines,
+        "record_count": stats.records,
+        "device_count": stats.devices,
+        "input_event_count": stats.input_events,
+        "touch_frame_count": stats.touch_frames,
+        "unparsed_line_count": stats.unparsed_lines,
+    })
 }
 
 fn doctor(app: &App) -> CliResult<Value> {

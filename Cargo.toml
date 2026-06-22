@@ -1,5 +1,8 @@
 [workspace]
-members = ["cli/input-dynamics"]
+members = [
+    "cli/input-dynamics",
+    "crates/input-dynamics-analysis",
+]
 resolver = "3"
 
 [workspace.package]

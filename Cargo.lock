@@ -136,10 +136,19 @@ name = "input-dynamics"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "input-dynamics-analysis",
  "proptest",
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "input-dynamics-analysis"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "serde_json",
 ]
 
 [[package]]

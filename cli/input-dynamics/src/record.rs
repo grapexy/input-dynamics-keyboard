@@ -7,10 +7,11 @@ use std::process::Child;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use input_dynamics_analysis::getevent::{GETEVENT_SCHEMA, normalize_file};
 use serde_json::{Value, json};
 
 use crate::app::{App, LOG_DIR};
-use crate::commands::{path_string, pull_logs};
+use crate::commands::{normalize_stats_json, path_string, pull_logs};
 use crate::controller::{self, SessionStartPermit};
 use crate::error::{CliError, CliResult};
 use crate::process::{FailureMode, spawn_process_to_files};
@@ -36,6 +37,7 @@ struct RecordPaths {
     manifest: PathBuf,
     validation: PathBuf,
     getevent_raw: PathBuf,
+    getevent_jsonl: PathBuf,
     getevent_stderr: PathBuf,
     ime_pull_tmp: PathBuf,
 }
@@ -234,6 +236,14 @@ pub(crate) fn record_run(app: &App, config: &RecordConfig) -> CliResult<Value> {
     let ime_files = stage_ime_logs(&paths.ime_pull_tmp, &paths.ime)?;
     let validation = validate_logs(&paths.ime, Some(config.run_id.as_str()))?;
     write_json_file(&paths.validation, &validation)?;
+    let getevent_stats = normalize_file(&paths.getevent_raw, &paths.getevent_jsonl)?;
+    let getevent_normalization = json!({
+        "ok": true,
+        "schema": GETEVENT_SCHEMA,
+        "input": path_string(&paths.getevent_raw)?,
+        "output": path_string(&paths.getevent_jsonl)?,
+        "stats": normalize_stats_json(&getevent_stats),
+    });
     let host_stop_wall_ms = epoch_millis()?;
     let manifest_parts = ManifestParts {
         host_start_wall_ms,
@@ -248,6 +258,7 @@ pub(crate) fn record_run(app: &App, config: &RecordConfig) -> CliResult<Value> {
         stop,
         pull,
         validation: validation.clone(),
+        getevent_normalization,
         ime_files,
     };
     let manifest = manifest_json(app, config, &paths, &manifest_parts)?;
@@ -261,6 +272,7 @@ pub(crate) fn record_run(app: &App, config: &RecordConfig) -> CliResult<Value> {
         "output_dir": path_string(&paths.root)?,
         "manifest": path_string(&paths.manifest)?,
         "validation": validation,
+        "getevent_normalization": manifest_parts.getevent_normalization,
         "input_controller": manifest_parts.input_controller,
     }))
 }
@@ -430,6 +442,7 @@ fn prepare_paths(out: &Path) -> CliResult<RecordPaths> {
         manifest: root.join("manifest.json"),
         validation: root.join("validation.json"),
         getevent_raw: adb.join("getevent.raw.log"),
+        getevent_jsonl: adb.join("getevent.jsonl"),
         getevent_stderr: adb.join("getevent.stderr.log"),
         root,
         ime,
@@ -470,6 +483,7 @@ struct ManifestParts {
     stop: Value,
     pull: Value,
     validation: Value,
+    getevent_normalization: Value,
     ime_files: Vec<String>,
 }
 
@@ -493,6 +507,7 @@ fn manifest_json(
         "adb_dir": path_string(&paths.adb)?,
         "derived_dir": path_string(&paths.derived)?,
         "getevent_raw_log": path_string(&paths.getevent_raw)?,
+        "getevent_jsonl": path_string(&paths.getevent_jsonl)?,
         "getevent_stderr_log": path_string(&paths.getevent_stderr)?,
         "ime_files": &parts.ime_files,
         "device": device_json(app),
@@ -515,6 +530,7 @@ fn manifest_json(
             "stop": parts.stop,
             "pull": parts.pull,
             "validation": parts.validation,
+            "getevent_normalization": parts.getevent_normalization,
         },
     }))
 }

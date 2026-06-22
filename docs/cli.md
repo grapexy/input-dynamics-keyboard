@@ -82,8 +82,9 @@ The IME JSONL `session_start` record and controller state include
 `input_profile_hash`, and `input_profile_seed`.
 
 For a complete bounded experiment capture, use `record`. It starts IME logging,
-captures a concurrent ADB touchscreen event stream with `getevent`, stops the
-session, pulls IME logs, writes `manifest.json`, and writes `validation.json`:
+captures a concurrent ADB touchscreen event stream with `getevent`, normalizes
+that stream to JSONL, stops the session, pulls IME logs, writes
+`manifest.json`, and writes `validation.json`:
 
 ```bash
 RUN_ID=run-YYYYMMDD-HHMMSS-human-android
@@ -222,11 +223,14 @@ scraping human-oriented text.
 - `clear-logs`: clears logs when no session is active.
 - `pull --out <dir>`: pulls app-specific external log storage.
 - `validate <path> --run-id <id>`: validates JSONL lifecycle and safety fields.
+- `getevent normalize --input <raw.log> --output <events.jsonl>`: parses
+  `adb shell getevent -lt` output into neutral JSONL records with schema
+  `input_dynamics_getevent.v1`.
 - `record --run-id <id> --out <dir>`: records a complete run with IME JSONL,
-  ADB `getevent` raw touch stream, manifest, pull, and validation output. Use
-  `--duration-ms <ms>` for timed runs; otherwise press Enter to stop. Add
-  `--with-input-controller` for bounded agent-driven runs that need persistent
-  uinput controller metadata in the manifest.
+  ADB `getevent` raw and normalized touch streams, manifest, pull, and
+  validation output. Use `--duration-ms <ms>` for timed runs; otherwise press
+  Enter to stop. Add `--with-input-controller` for bounded agent-driven runs
+  that need persistent uinput controller metadata in the manifest.
 
 Use `type <text>` for ordinary text entry. Use semantic `press` commands for
 common non-letter keys and corrections. `tap --code=-7` still works for delete,
@@ -252,6 +256,7 @@ of falling back to a second touch implementation.
     input_dynamics_control_status.json
   adb/
     getevent.raw.log
+    getevent.jsonl
     getevent.stderr.log
   derived/
 ```
@@ -267,9 +272,11 @@ When `record` is run with `--with-input-controller`, `manifest.json` includes:
 - `input_controller_runtime.summary.virtual_touchscreen_event_path`
 - `input_controller_runtime.summary.cleanup`
 
-The `adb/getevent.raw.log` stream is device-level touchscreen data. Keep it
-separate from IME-owned JSONL records when analyzing password-field suppression
-or keyboard-local privacy guarantees.
+The `adb/getevent.raw.log` stream is device-level touchscreen data.
+`adb/getevent.jsonl` is a normalized form of that stream. It includes
+`device_added`, `input_event`, and reconstructed `touch_frame` records. Keep ADB
+device-level records separate from IME-owned JSONL records when analyzing
+password-field suppression or keyboard-local privacy guarantees.
 
 Use [adb-control.md](adb-control.md) when debugging the lower-level broadcast
 surface directly.

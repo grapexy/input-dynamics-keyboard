@@ -65,8 +65,8 @@ each `input-dynamics` command. Session runtime files and locks are keyed by
 package and device serial.
 
 The `record` command starts IME logging, captures an ADB touchscreen event
-stream, stops cleanly when you press Enter, pulls logs, writes `manifest.json`,
-and writes `validation.json`.
+stream, writes normalized `adb/getevent.jsonl`, stops cleanly when you press
+Enter, pulls logs, writes `manifest.json`, and writes `validation.json`.
 
 To build and install a local debug APK instead:
 

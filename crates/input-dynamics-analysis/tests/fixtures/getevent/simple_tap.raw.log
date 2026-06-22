@@ -1,0 +1,14 @@
+add device 1: /dev/input/event9
+  name:     "synthetic_touchscreen"
+[  1.000001] /dev/input/event9: EV_ABS       ABS_MT_TRACKING_ID   0000002a
+[  1.000001] /dev/input/event9: EV_ABS       ABS_MT_POSITION_X    00000010
+[  1.000001] /dev/input/event9: EV_ABS       ABS_MT_POSITION_Y    00000020
+[  1.000001] /dev/input/event9: EV_ABS       ABS_MT_TOUCH_MAJOR   00000008
+[  1.000001] /dev/input/event9: EV_ABS       ABS_MT_TOUCH_MINOR   00000006
+[  1.000001] /dev/input/event9: EV_ABS       ABS_MT_PRESSURE      00000005
+[  1.000001] /dev/input/event9: EV_KEY       BTN_TOUCH            DOWN
+[  1.000001] /dev/input/event9: EV_SYN       SYN_REPORT           00000000
+[  1.000090] /dev/input/event9: EV_ABS       ABS_MT_PRESSURE      00000000
+[  1.000090] /dev/input/event9: EV_KEY       BTN_TOUCH            UP
+[  1.000090] /dev/input/event9: EV_ABS       ABS_MT_TRACKING_ID   ffffffff
+[  1.000090] /dev/input/event9: EV_SYN       SYN_REPORT           00000000

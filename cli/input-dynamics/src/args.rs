@@ -125,6 +125,11 @@ pub(crate) enum Commands {
         #[arg(long)]
         run_id: Option<String>,
     },
+    /// Normalize Android getevent captures.
+    Getevent {
+        #[command(subcommand)]
+        command: GeteventCommand,
+    },
     /// Record a bounded research run with IME logs and ADB touch events.
     Record {
         /// External run id to write into each session record.
@@ -186,6 +191,19 @@ pub(crate) enum Commands {
     Controller {
         #[command(subcommand)]
         command: ControllerCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum GeteventCommand {
+    /// Normalize raw `adb shell getevent -lt` output to JSONL.
+    Normalize {
+        /// Raw getevent input file.
+        #[arg(long)]
+        input: PathBuf,
+        /// Normalized JSONL output file.
+        #[arg(long)]
+        output: PathBuf,
     },
 }
 
