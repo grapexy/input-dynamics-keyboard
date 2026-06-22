@@ -180,6 +180,11 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         command: SessionCommand,
     },
+    /// Manage keyboard visibility readiness.
+    Keyboard {
+        #[command(subcommand)]
+        command: KeyboardCommand,
+    },
     /// Tap a key from the current layout by label or code.
     Tap {
         /// Key label to tap.
@@ -213,6 +218,12 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         command: ControllerCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum KeyboardCommand {
+    /// Ensure the focused non-password editable field has a visible keyboard.
+    EnsureVisible,
 }
 
 #[derive(Debug, Subcommand)]

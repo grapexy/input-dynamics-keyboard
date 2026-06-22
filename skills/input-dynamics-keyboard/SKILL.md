@@ -141,7 +141,7 @@ to stop.
 Then use live commands while the session is active:
 
 ```bash
-idk layout --wait-visible
+idk keyboard ensure-visible
 idk type "ab a"
 idk press delete
 idk hide-keyboard --method edge-back --side right
@@ -287,12 +287,13 @@ command variants and fallbacks.
 ## Non-Screenshot Automation
 
 When the keyboard view is visible, use `KEYBOARD_LAYOUT` instead of screenshots.
-With the CLI, start a session, wait for layout state, and press common keys by
-semantic name. Use `type <text>` for ordinary text entry:
+With the CLI, start a session, explicitly ensure keyboard visibility when a
+non-password editable field should reopen it, and press common keys by semantic
+name. Use `type <text>` for ordinary text entry:
 
 ```bash
 idk session start --run-id "$RUN_ID"
-idk layout --wait-visible
+idk keyboard ensure-visible
 idk touch doctor
 idk type "ab a"
 idk press delete
@@ -302,15 +303,18 @@ idk session stop
 ```
 
 `type <text>` plans the full string from visible layout keys before pressing any
-key and fails on unsupported characters without partial typing. Use
-`tap --code=<code>` only when there is no semantic command. Use `touch tap --x
-<x> --y <y>` for diagnostic absolute screen coordinates. Use `touch swipe` and
-`touch path` only when a protocol needs raw absolute gesture control; otherwise
-prefer semantic commands such as `type`, `press`, and `hide-keyboard`. The CLI
-routes session input and `touch` commands through AOSP `/system/bin/uinput` and
-should fail rather than switch to another touch backend. The active input
-profile can sample key-local landing ratios, hold duration, contact fields, and
-inter-key delay.
+key and fails on unsupported characters or hidden keyboard state without
+partial typing. `tap` and `press` also fail when the keyboard is hidden; use
+`keyboard ensure-visible` as the explicit recovery command. It uses the focused
+non-password editable field first, or the only visible non-password editable
+field if none is focused. Use `tap --code=<code>` only when there is no
+semantic command. Use `touch tap --x <x> --y <y>` for diagnostic absolute
+screen coordinates. Use `touch swipe` and `touch path` only when a protocol
+needs raw absolute gesture control; otherwise prefer semantic commands such as
+`type`, `press`, and `hide-keyboard`. The CLI routes session input and `touch`
+commands through AOSP `/system/bin/uinput` and should fail rather than switch
+to another touch backend. The active input profile can sample key-local landing
+ratios, hold duration, contact fields, and inter-key delay.
 
 ## Validation
 

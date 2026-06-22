@@ -54,7 +54,7 @@ cargo run --quiet -p input-dynamics -- doctor
 cargo run --quiet -p input-dynamics -- install
 cargo run --quiet -p input-dynamics -- touch doctor
 cargo run --quiet -p input-dynamics -- session start --run-id "$RUN_ID"
-cargo run --quiet -p input-dynamics -- layout --wait-visible
+cargo run --quiet -p input-dynamics -- keyboard ensure-visible
 cargo run --quiet -p input-dynamics -- type "ab a"
 cargo run --quiet -p input-dynamics -- press delete
 cargo run --quiet -p input-dynamics -- session stop
@@ -180,7 +180,7 @@ or clap text to stderr:
 ```json
 {
   "ok": false,
-  "error": "keyboard layout is not available"
+  "error": "keyboard is hidden (keyboard_view_not_shown); run `input-dynamics keyboard ensure-visible` or focus a non-password editable field first"
 }
 ```
 
@@ -226,6 +226,13 @@ scraping human-oriented text.
   screen-space key centers for coordinate calibration.
 - `layout --wait-visible` / `layout --wait-hidden`: waits for keyboard layout
   visibility state before returning.
+- `keyboard ensure-visible`: if the keyboard is already visible, returns
+  success. Otherwise, with an active stateful session, captures the current
+  accessibility hierarchy, taps the focused non-password editable field through
+  the uinput controller, and waits for visible layout state. If no editable
+  field is focused, it may tap the only visible non-password editable field. It
+  fails rather than guessing when there is no such field or more than one
+  candidate.
 - `observe accessibility [--out <xml>] [--full]`: captures the current Android
   accessibility hierarchy with `uiautomator dump`. Without `--out`, the XML is
   included in JSON output. With `--out`, the XML is written to that path and
@@ -244,13 +251,15 @@ scraping human-oriented text.
   gesture and waits for hidden layout state. Options include
   `--method edge-back`, `--side left|right`, and ratio-based geometry overrides.
 - `tap --label <label>` or `tap --code <code>`: taps a key from layout data
-  through the active session controller.
+  through the active session controller. Fails if the keyboard view is hidden.
 - `press delete`, `press enter`, `press space`: taps common keys by semantic
-  name through the active session controller.
+  name through the active session controller. Fails if the keyboard view is
+  hidden.
 - `type <text>`: types text through visible layout keys in the active session.
   The command plans the full string before pressing any key; unsupported
-  characters fail without partial typing. The active input profile can sample
-  key-local landing ratios, hold duration, contact fields, and inter-key delay.
+  characters and hidden keyboard state fail without partial typing. The active
+  input profile can sample key-local landing ratios, hold duration, contact
+  fields, and inter-key delay.
   `--inter-key-delay-ms`, default `40`, is used when the active controller does
   not provide an inter-key delay sample.
 - `touch doctor`: checks AOSP uinput availability and reports the mirrored
@@ -299,8 +308,10 @@ Use `type <text>` for ordinary text entry. Use semantic `press` commands for
 common non-letter keys and corrections. `tap --code=-7` still works for delete,
 and `tap --code -7` is also accepted, but semantic commands are easier for
 agents to generate correctly. `type`, `tap`, `press`, `hide-keyboard`, `touch
-swipe`, and `touch path` require `session start`; use `touch tap` only for
-low-level diagnostic absolute taps.
+swipe`, and `touch path` require `session start`; `type`, `tap`, and `press`
+also require visible keyboard layout state. Run `keyboard ensure-visible` when
+a non-password editable field should reopen the keyboard. Use `touch tap` only
+for low-level diagnostic absolute taps.
 
 `session` input and `touch` commands use AOSP `/system/bin/uinput` for
 touchscreen input. They fail if the device does not expose that command instead

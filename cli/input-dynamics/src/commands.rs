@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use crate::app::{App, LOG_DIR};
 use crate::args::{
     Commands, ControllerCommand, DeriveCommand, EdgeSide, GeteventCommand, HideKeyboardMethod,
-    ObserveCommand, PressKey, RecordingCommand, SessionCommand, TouchCommand,
+    KeyboardCommand, ObserveCommand, PressKey, RecordingCommand, SessionCommand, TouchCommand,
 };
 use crate::controller::{self, RunConfig, SessionStartPermit};
 use crate::coordinate_frame::screen_config_from_run_manifest;
@@ -108,6 +108,9 @@ pub(crate) fn run_command(app: &App, cli_command: Commands) -> CliResult<Value> 
         Commands::Session {
             command: session_command,
         } => session(app, session_command),
+        Commands::Keyboard {
+            command: keyboard_command,
+        } => keyboard(app, &keyboard_command),
         Commands::Tap { label, code } => tap_key(app, label.as_deref(), code),
         Commands::Press { key } => press_key(app, key),
         Commands::Type {
@@ -580,6 +583,81 @@ fn session_stop(app: &App) -> CliResult<Value> {
     }))
 }
 
+fn keyboard(app: &App, command: &KeyboardCommand) -> CliResult<Value> {
+    match command {
+        &KeyboardCommand::EnsureVisible => ensure_keyboard_visible(app),
+    }
+}
+
+fn ensure_keyboard_visible(app: &App) -> CliResult<Value> {
+    let before = app.broadcast("KEYBOARD_LAYOUT", Vec::new())?;
+    if layout_visible(&before)? {
+        return Ok(json!({
+            "ok": true,
+            "package_name": app.package(),
+            "already_visible": true,
+            "action": "none",
+            "layout": before,
+        }));
+    }
+
+    let input_status = controller::status(app)?;
+    if !input_status
+        .get("active")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err(CliError::new(
+            "keyboard is hidden and no active input session is available; run `input-dynamics session start --run-id <id>` before `input-dynamics keyboard ensure-visible`",
+        ));
+    }
+
+    let accessibility =
+        observe::accessibility(app, None, observe::AccessibilityDetail::Compressed)?;
+    let xml = accessibility
+        .get("xml")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CliError::new("accessibility XML was not present"))?;
+    let editable = keyboard_visible_target_node(xml)?;
+    let action = if editable.focused {
+        "tap_focused_editable"
+    } else {
+        "tap_single_editable"
+    };
+    let center = editable.bounds.center()?;
+    let tap_output = controller::tap(
+        app,
+        controller::ControllerTapSpec {
+            fallback: TapSpec::new(center.x, center.y),
+            key_context: None,
+            inter_key_delay_sampling: InterKeyDelaySampling::Skip,
+        },
+    )?;
+    let after = wait_for_layout(app, LayoutWait::Visible)?;
+    let visible_after = layout_visible(&after).unwrap_or(false);
+    let tap_ok = tap_output
+        .get("ok")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let ok = tap_ok && visible_after;
+    let error = if ok {
+        Value::Null
+    } else {
+        json!("keyboard did not become visible after tapping the editable field")
+    };
+
+    Ok(json!({
+        "ok": ok,
+        "package_name": app.package(),
+        "already_visible": false,
+        "action": action,
+        "editable": editable.to_json(center),
+        "tap": tap_output,
+        "layout": after,
+        "error": error,
+    }))
+}
+
 fn run_controller_command(app: &App, command: ControllerCommand) -> CliResult<Value> {
     match command {
         ControllerCommand::Run {
@@ -656,7 +734,7 @@ fn hide_keyboard_command(app: &App, command: &Commands) -> CliResult<Value> {
 
 fn hide_keyboard(app: &App, config: &EdgeBackGestureConfig) -> CliResult<Value> {
     let before = app.broadcast("KEYBOARD_LAYOUT", Vec::new())?;
-    if !layout_available(&before)? {
+    if !layout_visible(&before)? {
         return Ok(json!({
             "ok": true,
             "package_name": app.package(),
@@ -867,22 +945,16 @@ fn with_layout_wait_metadata(mut status: Value, wait: LayoutWait, elapsed: Durat
 }
 
 fn layout_matches(status: &Value, wait: LayoutWait) -> CliResult<bool> {
-    let available = layout_available(status)?;
+    let visible = layout_visible(status)?;
     Ok(match wait {
         LayoutWait::Current => true,
-        LayoutWait::Visible => available,
-        LayoutWait::Hidden => !available,
+        LayoutWait::Visible => visible,
+        LayoutWait::Hidden => !visible,
     })
 }
 
-fn layout_available(status: &Value) -> CliResult<bool> {
-    let layout = status
-        .get("keyboard_layout")
-        .ok_or_else(|| CliError::new("keyboard_layout was not present"))?;
-    Ok(layout
-        .get("available")
-        .and_then(Value::as_bool)
-        .unwrap_or(false))
+fn layout_visible(status: &Value) -> CliResult<bool> {
+    Ok(keyboard_layout_visible(keyboard_layout_value(status)?))
 }
 
 fn press_key(app: &App, key: PressKey) -> CliResult<Value> {
@@ -1145,6 +1217,21 @@ struct PlannedTypeSteps {
     layout_refresh_count: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ScreenBounds {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct EditableNode {
+    class_name: String,
+    bounds: ScreenBounds,
+    focused: bool,
+}
+
 impl LayoutWait {
     const fn description(self) -> &'static str {
         match self {
@@ -1157,6 +1244,163 @@ impl LayoutWait {
 
 fn millis_u64(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+impl ScreenBounds {
+    fn center(self) -> CliResult<TouchPoint> {
+        Ok(TouchPoint::new(
+            midpoint(self.left, self.right, "x")?,
+            midpoint(self.top, self.bottom, "y")?,
+        ))
+    }
+
+    fn to_json(self) -> Value {
+        json!({
+            "left": self.left,
+            "top": self.top,
+            "right": self.right,
+            "bottom": self.bottom,
+        })
+    }
+}
+
+impl EditableNode {
+    fn to_json(&self, center: TouchPoint) -> Value {
+        json!({
+            "class": self.class_name,
+            "password": false,
+            "focused": self.focused,
+            "bounds": self.bounds.to_json(),
+            "tap": {
+                "x": center.x,
+                "y": center.y,
+            },
+        })
+    }
+}
+
+fn midpoint(start: i32, end: i32, axis: &str) -> CliResult<i32> {
+    let span = end
+        .checked_sub(start)
+        .ok_or_else(|| CliError::new(format!("{axis} bounds overflow")))?;
+    let half = span
+        .checked_div(2_i32)
+        .ok_or_else(|| CliError::new(format!("{axis} bounds cannot be halved")))?;
+    start
+        .checked_add(half)
+        .ok_or_else(|| CliError::new(format!("{axis} center overflow")))
+}
+
+fn keyboard_visible_target_node(xml: &str) -> CliResult<EditableNode> {
+    let mut focused_password_editable = false;
+    let mut fallback_candidate = None;
+    let mut fallback_count = 0_u64;
+    for raw_node in xml.split("<node").skip(1) {
+        let node = raw_node
+            .split_once('>')
+            .map_or(raw_node, |(attributes, _)| attributes);
+        let focused = xml_bool_attribute(node, "focused");
+        let enabled = !matches!(xml_bool_attribute(node, "enabled"), Some(false));
+        if !enabled {
+            continue;
+        }
+
+        let class_name = xml_attribute(node, "class").unwrap_or_default();
+        if !editable_class_name(class_name) {
+            continue;
+        }
+
+        if xml_bool_attribute(node, "password") == Some(true) {
+            focused_password_editable = true;
+            continue;
+        }
+
+        let bounds_text = xml_attribute(node, "bounds")
+            .ok_or_else(|| CliError::new("editable node is missing bounds"))?;
+        let candidate = EditableNode {
+            class_name: String::from(class_name),
+            bounds: parse_screen_bounds(bounds_text)?,
+            focused: focused == Some(true),
+        };
+        if candidate.focused {
+            return Ok(candidate);
+        }
+        fallback_count = fallback_count.saturating_add(1);
+        if fallback_candidate.is_none() {
+            fallback_candidate = Some(candidate);
+        }
+    }
+
+    if focused_password_editable {
+        Err(CliError::new(
+            "focused editable field is password-protected; refusing to show keyboard",
+        ))
+    } else if fallback_count == 1 {
+        fallback_candidate.ok_or_else(|| {
+            CliError::new("internal error: single editable candidate was not retained")
+        })
+    } else if fallback_count > 1 {
+        Err(CliError::new(
+            "multiple non-password editable fields were found; focus one before running `input-dynamics keyboard ensure-visible`",
+        ))
+    } else {
+        Err(CliError::new(
+            "no non-password editable field was found; focus an editable field first",
+        ))
+    }
+}
+
+fn editable_class_name(class_name: &str) -> bool {
+    class_name.ends_with("EditText")
+        || class_name.ends_with("AutoCompleteTextView")
+        || class_name.ends_with("MultiAutoCompleteTextView")
+}
+
+fn xml_bool_attribute(node: &str, name: &str) -> Option<bool> {
+    match xml_attribute(node, name)? {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+fn xml_attribute<'a>(node: &'a str, name: &str) -> Option<&'a str> {
+    let marker = format!("{name}=\"");
+    let (_, rest) = node.split_once(marker.as_str())?;
+    let (value, _) = rest.split_once('"')?;
+    Some(value)
+}
+
+fn parse_screen_bounds(value: &str) -> CliResult<ScreenBounds> {
+    let parts = value
+        .split(['[', ']', ','])
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.len() != 4 {
+        return Err(CliError::new(format!(
+            "bounds should contain four values: {value}"
+        )));
+    }
+    let left = parse_bound(parts.first().copied(), "left")?;
+    let top = parse_bound(parts.get(1).copied(), "top")?;
+    let right = parse_bound(parts.get(2).copied(), "right")?;
+    let bottom = parse_bound(parts.get(3).copied(), "bottom")?;
+    let bounds = ScreenBounds {
+        left,
+        top,
+        right,
+        bottom,
+    };
+    if bounds.right < bounds.left || bounds.bottom < bounds.top {
+        return Err(CliError::new(format!("bounds are inverted: {value}")));
+    }
+    Ok(bounds)
+}
+
+fn parse_bound(raw: Option<&str>, field: &str) -> CliResult<i32> {
+    let text = raw.ok_or_else(|| CliError::new(format!("bounds are missing {field}")))?;
+    text.parse::<i32>()
+        .map_err(|error| CliError::new(format!("invalid bounds {field}: {text}: {error}")))
 }
 
 pub(crate) fn pull_logs(app: &App, out: &Path) -> CliResult<Value> {
@@ -1315,15 +1559,28 @@ fn keyboard_layout_value(layout_result: &Value) -> CliResult<&Value> {
 }
 
 fn ensure_keyboard_layout_available(layout: &Value) -> CliResult<()> {
-    let available = layout
-        .get("available")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    if available {
+    if keyboard_layout_visible(layout) {
         Ok(())
     } else {
-        Err(CliError::new("keyboard layout is not available"))
+        let reason = layout
+            .get("unavailable_reason")
+            .and_then(Value::as_str)
+            .unwrap_or("keyboard_view_not_visible");
+        Err(CliError::new(format!(
+            "keyboard is hidden ({reason}); run `input-dynamics keyboard ensure-visible` or focus a non-password editable field first"
+        )))
     }
+}
+
+fn keyboard_layout_visible(layout: &Value) -> bool {
+    layout
+        .get("available")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        && layout
+            .get("keyboard_view_visible")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
 }
 
 fn resolve_layout_key<'a>(
@@ -1557,7 +1814,8 @@ mod tests {
 
     use crate::args::PressKey;
     use crate::commands::{
-        TypeKeyTarget, ime_is_registered, is_debug_apk, latest_release_tag_from_json,
+        EditableNode, ScreenBounds, TypeKeyTarget, ime_is_registered, is_debug_apk,
+        keyboard_layout_visible, keyboard_visible_target_node, latest_release_tag_from_json,
         planned_type_step, press_key_code, type_key_target,
     };
 
@@ -1654,6 +1912,142 @@ mod tests {
         assert_eq!(space.key_class.as_deref(), Some("space"));
     }
 
+    #[test]
+    fn planned_type_step_rejects_hidden_keyboard_layout() {
+        let layout = hidden_layout_result();
+
+        let result = planned_type_step(&layout, 0, 'a');
+
+        assert!(
+            result.is_err(),
+            "hidden keyboard should fail before any key is pressed"
+        );
+        let error = result
+            .err()
+            .map_or(String::new(), |error| error.to_string());
+        assert!(
+            error.contains("keyboard is hidden"),
+            "error should name hidden keyboard state: {error}"
+        );
+    }
+
+    #[test]
+    fn keyboard_layout_visibility_requires_view_visible() {
+        let layout = json!({
+            "available": true,
+            "keyboard_view_visible": false
+        });
+
+        assert!(
+            !keyboard_layout_visible(&layout),
+            "available layout without visible view should not pass semantic preflight"
+        );
+    }
+
+    #[test]
+    fn keyboard_visible_target_prefers_focused_non_password_edit_text() {
+        let xml = r#"
+            <hierarchy>
+              <node index="0" class="android.widget.TextView" focused="false" enabled="true" password="false" bounds="[0,0][10,10]" />
+              <node index="1" class="android.widget.EditText" focused="true" enabled="true" password="false" bounds="[168,145][1244,397]" />
+            </hierarchy>
+        "#;
+
+        assert_eq!(
+            keyboard_visible_target_node(xml).ok(),
+            Some(EditableNode {
+                class_name: String::from("android.widget.EditText"),
+                bounds: ScreenBounds {
+                    left: 168,
+                    top: 145,
+                    right: 1244,
+                    bottom: 397,
+                },
+                focused: true,
+            }),
+            "focused non-password editable node should be extracted without text"
+        );
+    }
+
+    #[test]
+    fn keyboard_visible_target_uses_single_unfocused_edit_text() {
+        let xml = r#"
+            <hierarchy>
+              <node class="android.widget.EditText" focused="false" enabled="true" password="false" bounds="[168,145][1244,397]" />
+            </hierarchy>
+        "#;
+
+        assert_eq!(
+            keyboard_visible_target_node(xml).ok(),
+            Some(EditableNode {
+                class_name: String::from("android.widget.EditText"),
+                bounds: ScreenBounds {
+                    left: 168,
+                    top: 145,
+                    right: 1244,
+                    bottom: 397,
+                },
+                focused: false,
+            }),
+            "single visible non-password editable node should be usable after IME dismissal"
+        );
+    }
+
+    #[test]
+    fn keyboard_visible_target_rejects_password_edit_text() {
+        let xml = r#"
+            <hierarchy>
+              <node class="android.widget.EditText" focused="true" enabled="true" password="true" bounds="[0,0][100,100]" />
+            </hierarchy>
+        "#;
+
+        let error = keyboard_visible_target_node(xml)
+            .err()
+            .map_or(String::new(), |error| error.to_string());
+
+        assert!(
+            error.contains("password-protected"),
+            "password focused fields should be refused: {error}"
+        );
+    }
+
+    #[test]
+    fn keyboard_visible_target_requires_editable_node() {
+        let xml = r#"
+            <hierarchy>
+              <node class="android.widget.TextView" focused="true" enabled="true" password="false" bounds="[0,0][100,100]" />
+            </hierarchy>
+        "#;
+
+        let error = keyboard_visible_target_node(xml)
+            .err()
+            .map_or(String::new(), |error| error.to_string());
+
+        assert!(
+            error.contains("no non-password editable field"),
+            "non-editable focused nodes should not be used: {error}"
+        );
+    }
+
+    #[test]
+    fn keyboard_visible_target_rejects_multiple_unfocused_edit_texts() {
+        let xml = r#"
+            <hierarchy>
+              <node class="android.widget.EditText" focused="false" enabled="true" password="false" bounds="[0,0][100,100]" />
+              <node class="android.widget.EditText" focused="false" enabled="true" password="false" bounds="[0,200][100,300]" />
+            </hierarchy>
+        "#;
+
+        let error = keyboard_visible_target_node(xml)
+            .err()
+            .map_or(String::new(), |error| error.to_string());
+
+        assert!(
+            error.contains("multiple non-password editable fields"),
+            "ambiguous editable fields should require explicit focus: {error}"
+        );
+    }
+
     proptest::proptest! {
         #[test]
         fn type_key_target_rejects_control_characters(character in control_character()) {
@@ -1668,6 +2062,7 @@ mod tests {
         json!({
             "keyboard_layout": {
                 "available": true,
+                "keyboard_view_visible": true,
                 "keys": [
                     {
                         "key_label": "a",
@@ -1688,6 +2083,16 @@ mod tests {
                         "tap_center_screen_y_px": 60
                     }
                 ]
+            }
+        })
+    }
+
+    fn hidden_layout_result() -> serde_json::Value {
+        json!({
+            "keyboard_layout": {
+                "available": false,
+                "keyboard_view_visible": false,
+                "unavailable_reason": "keyboard_view_not_shown"
             }
         })
     }
