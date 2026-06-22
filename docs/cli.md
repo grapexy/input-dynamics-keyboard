@@ -283,6 +283,10 @@ scraping human-oriented text.
 - `derive timeline --recording-dir <dir>`: writes a cross-source recording
   timeline bundle under `derived/timeline/`. Timeline rows reference source
   records and evidence artifacts; raw streams remain canonical.
+- `recording inspect --dir <dir>`: inspects a local recording directory without
+  modifying it. Output includes artifact metadata, current validation state,
+  derived timeline staleness, analysis-readiness flags, and suggested next CLI
+  actions.
 
 Use `type <text>` for ordinary text entry. Use semantic `press` commands for
 common non-letter keys and corrections. `tap --code=-7` still works for delete,
@@ -356,6 +360,19 @@ device-level records separate from IME-owned JSONL records when analyzing
 password-field suppression or keyboard-local privacy guarantees.
 
 ## Derived Output
+
+Before deriving or analyzing a local recording, inspect it:
+
+```bash
+input-dynamics recording inspect --dir "runs/$RUN_ID"
+```
+
+This command is read-only. It reports the selected IME session JSONL file,
+record counts, artifact fingerprints, stored-versus-current validation state,
+timeline source staleness, and boolean flags such as `valid_for_analysis`,
+`needs_validation`, `needs_derivation`, and `needs_timeline`. `next_actions`
+contains local CLI commands an agent can run to refresh missing or stale
+artifacts.
 
 After recording with the current CLI:
 

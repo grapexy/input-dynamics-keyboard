@@ -230,6 +230,18 @@ This writes `derived/timeline/index.json` and
 records and evidence artifacts, not as the raw source of truth. Preserve clock
 domains and source references when reasoning from it.
 
+To inspect a local recording directory without modifying it:
+
+```bash
+idk recording inspect --dir "runs/$RUN_ID"
+```
+
+Use `flags.valid_for_analysis`, `flags.needs_validation`,
+`flags.needs_derivation`, and `flags.needs_timeline` to decide the next step.
+If `next_actions` is non-empty, prefer those CLI commands over ad hoc file
+inspection. The inspection output fingerprints source artifacts and reports
+stale timelines, but it does not rewrite validation or derived files.
+
 5. Use lower-level status and layout commands when debugging:
 
 ```bash
@@ -282,6 +294,7 @@ Validate pulled JSONL before considering a run complete:
 
 ```bash
 idk validate "runs/$RUN_ID" --run-id "$RUN_ID"
+idk recording inspect --dir "runs/$RUN_ID"
 ```
 
 Expected validation includes `session_start`, `session_stop`,

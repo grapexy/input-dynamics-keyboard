@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use crate::app::{App, LOG_DIR};
 use crate::args::{
     Commands, ControllerCommand, DeriveCommand, EdgeSide, GeteventCommand, HideKeyboardMethod,
-    ObserveCommand, PressKey, SessionCommand, TouchCommand,
+    ObserveCommand, PressKey, RecordingCommand, SessionCommand, TouchCommand,
 };
 use crate::controller::{self, RunConfig, SessionStartPermit};
 use crate::coordinate_frame::screen_config_from_run_manifest;
@@ -30,6 +30,7 @@ use crate::profile::{
 };
 use crate::ratio::{RatioPpm, SignedRatioPpm};
 use crate::record::{RecordConfig, record_run};
+use crate::recording::inspect_recording;
 use crate::uinput::{self, PathSpec, TapSpec, TouchPoint};
 use crate::validate::validate_logs;
 
@@ -100,6 +101,7 @@ pub(crate) fn run_command(app: &App, cli_command: Commands) -> CliResult<Value> 
         Commands::Validate { path, run_id } => validate_logs(&path, run_id.as_deref()),
         Commands::Getevent { command } => getevent(command),
         Commands::Derive { command } => derive(command),
+        Commands::Recording { command } => recording(command),
         ref record_command @ Commands::Record { .. } => run_record_command(app, record_command),
         Commands::Session {
             command: session_command,
@@ -116,6 +118,12 @@ pub(crate) fn run_command(app: &App, cli_command: Commands) -> CliResult<Value> 
         Commands::Controller {
             command: controller_command,
         } => run_controller_command(app, controller_command),
+    }
+}
+
+fn recording(command: RecordingCommand) -> CliResult<Value> {
+    match command {
+        RecordingCommand::Inspect { dir } => inspect_recording(&dir),
     }
 }
 

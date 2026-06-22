@@ -37,6 +37,8 @@ Use this keyboard only in consented, local research settings.
 - Derived recording timelines that index IME events, gesture derivations,
   dismissal inferences, and evidence bundle references without embedding raw
   evidence payloads.
+- Read-only recording inspection that reports artifact presence, validation
+  state, stale derived output, and next local CLI actions.
 - AOSP uinput-backed CLI touch commands for local agent-driven key presses,
   layout-aware text entry, absolute taps, gesture paths, and edge-back keyboard
   dismissal.
@@ -65,6 +67,7 @@ target/debug/input-dynamics install
 target/debug/input-dynamics select-ime
 target/debug/input-dynamics touch doctor
 target/debug/input-dynamics record --run-id "$RUN_ID" --out "runs/$RUN_ID"
+target/debug/input-dynamics recording inspect --dir "runs/$RUN_ID"
 ```
 
 If more than one Android device is connected, pass `--serial <adb-serial>` to

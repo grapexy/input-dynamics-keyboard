@@ -140,6 +140,11 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         command: DeriveCommand,
     },
+    /// Inspect local recording directories.
+    Recording {
+        #[command(subcommand)]
+        command: RecordingCommand,
+    },
     /// Record a bounded research run with IME logs and ADB touch events.
     Record {
         /// External run id to write into each session record.
@@ -312,6 +317,16 @@ pub(crate) enum DeriveCommand {
         /// Timeline output directory. Defaults to `derived/timeline`.
         #[arg(long)]
         output_dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum RecordingCommand {
+    /// Inspect a recording directory without modifying it.
+    Inspect {
+        /// Recording directory created by `input-dynamics record`.
+        #[arg(long)]
+        dir: PathBuf,
     },
 }
 
