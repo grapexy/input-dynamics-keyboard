@@ -1,6 +1,7 @@
 //! Cross-source timeline derivation for a recorded input-dynamics run.
 
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write as IoWrite};
@@ -10,7 +11,9 @@ use std::time::UNIX_EPOCH;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::clock::{AlignmentStatus, ClockDomain};
+use crate::clock::{
+    AlignmentStatus, ClockDomain, TimestampPrecision, micros_to_nanos, millis_to_nanos,
+};
 use crate::derivation::jsonl::write_jsonl;
 use crate::derivation::{
     DeriveError, DeriveResult, TIMELINE_EVENT_SCHEMA, TIMELINE_INDEX_SCHEMA, find_ime_jsonl,
@@ -94,6 +97,7 @@ struct OptionalRecords {
 struct EvidenceRecord {
     kind: SourceKind,
     value: Option<Value>,
+    capture: Option<Value>,
 }
 
 #[derive(Clone, Debug)]
@@ -112,6 +116,7 @@ struct TimelineIndexInputs<'a> {
     video_timing: Option<&'a Value>,
     evidence_records: &'a [EvidenceRecord],
     warnings: &'a [String],
+    events: &'a [Value],
     event_count: usize,
 }
 
@@ -162,8 +167,8 @@ impl Ord for TimelineOrder {
     fn cmp(&self, other: &Self) -> Ordering {
         self.group
             .cmp(&other.group)
-            .then_with(|| optional_time_order(self.time_ms, other.time_ms))
             .then_with(|| self.source_rank.cmp(&other.source_rank))
+            .then_with(|| optional_time_order(self.time_ms, other.time_ms))
             .then_with(|| self.source_line_index.cmp(&other.source_line_index))
     }
 }
@@ -182,7 +187,7 @@ pub fn derive_timeline(config: &DeriveTimelineConfig) -> DeriveResult<Value> {
     let touch_records = read_optional_jsonl(&paths.touch_gestures_jsonl)?;
     let dismissal_records = read_optional_jsonl(&paths.dismissals_jsonl)?;
     let video_timing = read_optional_json(&paths.video_timing_json)?;
-    let evidence_records = read_evidence_records(&paths)?;
+    let evidence_records = read_evidence_records(&paths, &manifest)?;
     let mut warnings = Vec::new();
     collect_missing_warning(
         &mut warnings,
@@ -236,6 +241,7 @@ pub fn derive_timeline(config: &DeriveTimelineConfig) -> DeriveResult<Value> {
         video_timing: video_timing.as_ref(),
         evidence_records: &evidence_records,
         warnings: &warnings,
+        events: &timeline_values,
         event_count: timeline_values.len(),
     })?;
     write_json_file(&paths.index_output, &index)?;
@@ -291,6 +297,8 @@ fn append_ime_records(
             "source": "ime_jsonl",
             "source_ref": source_ref(recording_dir, path, record.line_index, extra_refs(&record.value)),
             "clock_domain": ClockDomain::AndroidUptimeMs.as_str(),
+            "source_time": ime_source_time_json(&record.value),
+            "normalized_time": normalized_time_json(AlignmentStatus::NotEstimated.as_str()),
             "ordering": ordering_json(ORDER_METHOD, CLOCK_ALIGNMENT_STATUS),
             "t_uptime_ms": record.value.get("t_uptime_ms").cloned().unwrap_or(Value::Null),
             "t_wall_ms": record.value.get("t_wall_ms").cloned().unwrap_or(Value::Null),
@@ -306,7 +314,7 @@ fn append_ime_records(
         timeline.push(TimelineRecord {
             order: TimelineOrder {
                 group: 1,
-                time_ms: record.value.get("t_uptime_ms").and_then(Value::as_i64),
+                time_ms: ime_order_time_ms(&record.value),
                 source_rank: IME_SOURCE_RANK,
                 source_line_index: Some(record.line_index),
             },
@@ -366,8 +374,14 @@ fn touch_gesture_timeline_record(
         "source_layer": "derived",
         "source": "derived_touch_gesture",
         "source_ref": source_ref(recording_dir, path, line_index, extra_refs(record)),
-        "clock_domain": ClockDomain::KernelGeteventUs.as_str(),
-        "ordering": ordering_json(ORDER_METHOD, CLOCK_ALIGNMENT_STATUS),
+        "clock_domain": record
+            .pointer("/time/source_clock_domain")
+            .and_then(Value::as_str)
+            .unwrap_or(ClockDomain::KernelGeteventUs.as_str()),
+        "source_time": touch_source_time_json(record),
+        "clock_alignment_status": AlignmentStatus::UnsupportedClockDomain.as_str(),
+        "normalized_time": normalized_time_json(AlignmentStatus::UnsupportedClockDomain.as_str()),
+        "ordering": ordering_json(ORDER_METHOD, AlignmentStatus::UnsupportedClockDomain.as_str()),
         "external_run_id": record.get("external_run_id").cloned().unwrap_or(Value::Null),
         "session_id": record.get("session_id").cloned().unwrap_or(Value::Null),
         "package_name": record.get("package_name").cloned().unwrap_or(Value::Null),
@@ -398,7 +412,16 @@ fn dismissal_timeline_record(
         "source": "derived_dismissal_inference",
         "source_ref": source_ref(recording_dir, path, line_index, extra_refs(record)),
         "clock_domain": ClockDomain::AndroidUptimeMs.as_str(),
-        "ordering": ordering_json(ORDER_METHOD, CLOCK_ALIGNMENT_STATUS),
+        "source_clock_domains": dismissal_source_clock_domains(record),
+        "source_time": dismissal_source_time_json(record),
+        "normalized_time": dismissal_normalized_time_json(record),
+        "ordering": ordering_json(
+            ORDER_METHOD,
+            record
+                .get("clock_alignment_status")
+                .and_then(Value::as_str)
+                .unwrap_or(AlignmentStatus::UnsupportedClockDomain.as_str()),
+        ),
         "inference_id": record.get("inference_id").cloned().unwrap_or(Value::Null),
         "inferred_dismissal": record.get("inferred_dismissal").cloned().unwrap_or(Value::Null),
         "confidence": record.get("confidence").cloned().unwrap_or(Value::Null),
@@ -439,6 +462,8 @@ fn append_video_records(
                 },
                 "clock_domain": ClockDomain::DeviceElapsedRealtimeNs.as_str(),
                 "clock_alignment_status": AlignmentStatus::NotEstimated.as_str(),
+                "source_time": device_elapsed_source_time_json(clock.elapsed_realtime_ns, Some(clock.bracket)),
+                "normalized_time": normalized_time_json(AlignmentStatus::NotEstimated.as_str()),
                 "ordering": ordering_json(ORDER_METHOD, AlignmentStatus::NotEstimated.as_str()),
                 "phase": phase,
                 "t_elapsed_realtime_ns": clock.elapsed_realtime_ns,
@@ -461,6 +486,13 @@ fn append_video_records(
             },
             "clock_domain": ClockDomain::HostWallMs.as_str(),
             "clock_alignment_status": AlignmentStatus::LegacyWallClockBracketed.as_str(),
+            "source_time": legacy_host_wall_source_time_json(
+                "host_wall_ms_before_device_timestamp",
+                phase_record
+                    .get("host_wall_ms_before_device_timestamp")
+                    .and_then(Value::as_i64),
+            ),
+            "normalized_time": normalized_time_json(AlignmentStatus::LegacyWallClockBracketed.as_str()),
             "ordering": ordering_json(ORDER_METHOD, AlignmentStatus::LegacyWallClockBracketed.as_str()),
             "phase": phase,
             "remote_path": timing_record.get("remote_path").cloned().unwrap_or(Value::Null),
@@ -495,6 +527,45 @@ fn append_evidence_records(
         let kind = evidence_record.kind;
         let phase = evidence_phase(kind)?;
         let path = evidence_index_path(recording_dir, kind)?;
+        let capture_clock = evidence_capture_clock(evidence_record.capture.as_ref());
+        let (
+            clock_domain,
+            clock_alignment_status,
+            source_time,
+            normalized_time,
+            marker,
+            order_time_ms,
+        ) = if let Some(clock) = capture_clock {
+            (
+                ClockDomain::DeviceElapsedRealtimeNs.as_str(),
+                AlignmentStatus::Bracketed.as_str(),
+                device_elapsed_interval_source_time_json(
+                    clock.before_ns,
+                    clock.after_ns,
+                    Some(clock.capture),
+                ),
+                normalized_interval_time_json(
+                    AlignmentStatus::Bracketed.as_str(),
+                    ClockDomain::DeviceElapsedRealtimeNs.as_str(),
+                    clock.before_ns,
+                    clock.after_ns,
+                ),
+                evidence_record.capture.clone().unwrap_or(Value::Null),
+                elapsed_realtime_ms(clock.before_ns),
+            )
+        } else {
+            (
+                ClockDomain::HostWallMs.as_str(),
+                AlignmentStatus::LegacyWallClockBracketed.as_str(),
+                legacy_host_wall_source_time_json(
+                    "captured_wall_ms",
+                    record.get("captured_wall_ms").and_then(Value::as_i64),
+                ),
+                normalized_time_json(AlignmentStatus::LegacyWallClockBracketed.as_str()),
+                evidence_record.capture.clone().unwrap_or(Value::Null),
+                record.get("captured_wall_ms").and_then(Value::as_i64),
+            )
+        };
         let value = json!({
             "schema": TIMELINE_EVENT_SCHEMA,
             "record_kind": "evidence_bundle",
@@ -505,10 +576,14 @@ fn append_evidence_records(
                 "path": relative_path_text(recording_dir, &path),
                 "phase": phase,
             },
-            "clock_domain": "host_wall_ms",
-            "ordering": ordering_json(ORDER_METHOD, CLOCK_ALIGNMENT_STATUS),
+            "clock_domain": clock_domain,
+            "clock_alignment_status": clock_alignment_status,
+            "source_time": source_time,
+            "normalized_time": normalized_time,
+            "ordering": ordering_json(ORDER_METHOD, clock_alignment_status),
             "captured_wall_ms": record.get("captured_wall_ms").cloned().unwrap_or(Value::Null),
             "phase": phase,
+            "capture": marker,
             "package_name": record.get("package_name").cloned().unwrap_or(Value::Null),
             "artifacts": record.get("artifacts").cloned().unwrap_or(Value::Null),
             "state_ok": record.pointer("/state/ok").cloned().unwrap_or(Value::Null),
@@ -516,7 +591,7 @@ fn append_evidence_records(
         timeline.push(TimelineRecord {
             order: TimelineOrder {
                 group: evidence_order_group(kind)?,
-                time_ms: record.get("captured_wall_ms").and_then(Value::as_i64),
+                time_ms: order_time_ms,
                 source_rank: source_rank(kind),
                 source_line_index: None,
             },
@@ -579,6 +654,8 @@ fn timeline_index(inputs: &TimelineIndexInputs<'_>) -> DeriveResult<Value> {
         "events_output": path_text(&inputs.paths.events_output),
         "event_count": inputs.event_count,
         "sources": sources,
+        "clock_domain_counts": count_string_field(inputs.events, "clock_domain"),
+        "normalized_status_counts": count_string_pointer(inputs.events, "/normalized_time/status"),
         "ordering": {
             "method": ORDER_METHOD,
             "clock_alignment_status": CLOCK_ALIGNMENT_STATUS,
@@ -614,6 +691,30 @@ fn source_index(
     }))
 }
 
+fn count_string_field(records: &[Value], field: &str) -> BTreeMap<String, u64> {
+    let mut counts = BTreeMap::new();
+    for record in records {
+        let Some(value) = record.get(field).and_then(Value::as_str) else {
+            continue;
+        };
+        let current = counts.get(value).copied().unwrap_or(0_u64);
+        counts.insert(value.to_owned(), current.saturating_add(1));
+    }
+    counts
+}
+
+fn count_string_pointer(records: &[Value], pointer: &str) -> BTreeMap<String, u64> {
+    let mut counts = BTreeMap::new();
+    for record in records {
+        let Some(value) = record.pointer(pointer).and_then(Value::as_str) else {
+            continue;
+        };
+        let current = counts.get(value).copied().unwrap_or(0_u64);
+        counts.insert(value.to_owned(), current.saturating_add(1));
+    }
+    counts
+}
+
 fn read_jsonl_with_line_indexes(path: &Path) -> DeriveResult<Vec<LineRecord>> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
@@ -645,15 +746,20 @@ fn read_optional_jsonl(path: &Path) -> DeriveResult<Option<OptionalRecords>> {
     }))
 }
 
-fn read_evidence_records(paths: &TimelinePaths) -> DeriveResult<Vec<EvidenceRecord>> {
+fn read_evidence_records(
+    paths: &TimelinePaths,
+    manifest: &Value,
+) -> DeriveResult<Vec<EvidenceRecord>> {
     Ok(vec![
         EvidenceRecord {
             kind: SourceKind::EvidenceStart,
             value: read_optional_json(&paths.evidence_start_index)?,
+            capture: manifest.pointer("/evidence/start").cloned(),
         },
         EvidenceRecord {
             kind: SourceKind::EvidenceEnd,
             value: read_optional_json(&paths.evidence_end_index)?,
+            capture: manifest.pointer("/evidence/end").cloned(),
         },
     ])
 }
@@ -807,10 +913,309 @@ struct VideoMarkerClock<'a> {
     bracket: &'a Value,
 }
 
+#[derive(Clone, Copy)]
+struct EvidenceCaptureClock<'a> {
+    before_ns: i64,
+    after_ns: i64,
+    capture: &'a Value,
+}
+
+struct MillisecondSourceTimeInput<'a> {
+    clock_domain: &'a str,
+    source_field: &'a str,
+    value_ms: Option<i64>,
+    source_time_status: &'a str,
+    metadata: Option<&'a Value>,
+    alignment_status: &'a str,
+}
+
+fn ime_source_time_json(record: &Value) -> Value {
+    let event_time = record.get("event_time");
+    let t_event_uptime_ms = record.get("t_event_uptime_ms").and_then(Value::as_i64);
+    if event_time
+        .and_then(|metadata| metadata.get("clock_domain"))
+        .and_then(Value::as_str)
+        == Some(ClockDomain::AndroidUptimeMs.as_str())
+        && event_time
+            .and_then(|metadata| metadata.get("timestamp_precision"))
+            .and_then(Value::as_str)
+            == Some(TimestampPrecision::Milliseconds.as_str())
+        && event_time
+            .and_then(|metadata| metadata.get("field"))
+            .and_then(Value::as_str)
+            == Some("t_event_uptime_ms")
+        && let Some(value_ms) = t_event_uptime_ms
+    {
+        return source_millisecond_time_json(&MillisecondSourceTimeInput {
+            clock_domain: ClockDomain::AndroidUptimeMs.as_str(),
+            source_field: "t_event_uptime_ms",
+            value_ms: Some(value_ms),
+            source_time_status: "canonical_event_time_metadata",
+            metadata: event_time,
+            alignment_status: AlignmentStatus::NotEstimated.as_str(),
+        });
+    }
+    if let Some(value_ms) = t_event_uptime_ms {
+        return source_millisecond_time_json(&MillisecondSourceTimeInput {
+            clock_domain: ClockDomain::AndroidUptimeMs.as_str(),
+            source_field: "t_event_uptime_ms",
+            value_ms: Some(value_ms),
+            source_time_status: "legacy_t_event_uptime_ms",
+            metadata: event_time,
+            alignment_status: AlignmentStatus::NotEstimated.as_str(),
+        });
+    }
+    source_millisecond_time_json(&MillisecondSourceTimeInput {
+        clock_domain: ClockDomain::AndroidUptimeMs.as_str(),
+        source_field: "t_uptime_ms",
+        value_ms: record.get("t_uptime_ms").and_then(Value::as_i64),
+        source_time_status: "legacy_t_uptime_ms_fallback",
+        metadata: event_time,
+        alignment_status: AlignmentStatus::NotEstimated.as_str(),
+    })
+}
+
+fn ime_order_time_ms(record: &Value) -> Option<i64> {
+    let event_time = record.get("event_time");
+    let t_event_uptime_ms = record.get("t_event_uptime_ms").and_then(Value::as_i64);
+    if event_time
+        .and_then(|metadata| metadata.get("clock_domain"))
+        .and_then(Value::as_str)
+        == Some(ClockDomain::AndroidUptimeMs.as_str())
+        && event_time
+            .and_then(|metadata| metadata.get("timestamp_precision"))
+            .and_then(Value::as_str)
+            == Some(TimestampPrecision::Milliseconds.as_str())
+        && event_time
+            .and_then(|metadata| metadata.get("field"))
+            .and_then(Value::as_str)
+            == Some("t_event_uptime_ms")
+    {
+        return t_event_uptime_ms;
+    }
+    t_event_uptime_ms.or_else(|| record.get("t_uptime_ms").and_then(Value::as_i64))
+}
+
+fn touch_source_time_json(record: &Value) -> Value {
+    if let Some(time) = record.get("time") {
+        return time.clone();
+    }
+    let start_us = record
+        .pointer("/start/t_getevent_us")
+        .and_then(Value::as_i64);
+    let end_us = record.pointer("/end/t_getevent_us").and_then(Value::as_i64);
+    json!({
+        "source_clock_domain": ClockDomain::KernelGeteventUs.as_str(),
+        "source_timestamp_precision": TimestampPrecision::Microseconds.as_str(),
+        "source_time_interval_us": [start_us, end_us],
+        "source_time_interval_ns": [
+            start_us.and_then(micros_to_nanos),
+            end_us.and_then(micros_to_nanos),
+        ],
+        "source_time_status": "derived_getevent_time",
+        "normalized_clock_domain": Value::Null,
+        "normalized_time_interval_ns": Value::Null,
+        "alignment_status": AlignmentStatus::UnsupportedClockDomain.as_str(),
+        "transform_id": Value::Null,
+        "uncertainty_ns": Value::Null,
+    })
+}
+
+fn dismissal_source_time_json(record: &Value) -> Value {
+    if let Some(time) = record.get("source_time") {
+        return time.clone();
+    }
+    if let Some(time) = record
+        .get("evidence")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item.get("kind").and_then(Value::as_str) == Some("ime_event"))
+        })
+        .and_then(|item| item.get("time"))
+    {
+        return time.clone();
+    }
+    source_millisecond_time_json(&MillisecondSourceTimeInput {
+        clock_domain: ClockDomain::AndroidUptimeMs.as_str(),
+        source_field: "evidence.ime_event.t_uptime_ms",
+        value_ms: dismissal_order_ms(record),
+        source_time_status: "legacy_t_uptime_ms_fallback",
+        metadata: None,
+        alignment_status: AlignmentStatus::NotEstimated.as_str(),
+    })
+}
+
+fn dismissal_normalized_time_json(record: &Value) -> Value {
+    if let Some(time) = record.get("normalized_time") {
+        return time.clone();
+    }
+    normalized_time_json(
+        record
+            .get("clock_alignment_status")
+            .and_then(Value::as_str)
+            .unwrap_or(AlignmentStatus::UnsupportedClockDomain.as_str()),
+    )
+}
+
+fn dismissal_source_clock_domains(record: &Value) -> Value {
+    record
+        .pointer("/clock_alignment/source_clock_domains")
+        .cloned()
+        .unwrap_or_else(|| {
+            json!([
+                record
+                    .pointer("/clock_alignment/ime_event_clock_domain")
+                    .cloned()
+                    .unwrap_or_else(|| json!(ClockDomain::AndroidUptimeMs.as_str())),
+                record
+                    .pointer("/clock_alignment/getevent_gesture_clock_domain")
+                    .cloned()
+                    .unwrap_or_else(|| json!(ClockDomain::KernelGeteventUs.as_str())),
+            ])
+        })
+}
+
+fn source_millisecond_time_json(input: &MillisecondSourceTimeInput<'_>) -> Value {
+    let status = if input.value_ms.is_some() {
+        input.source_time_status
+    } else {
+        "missing"
+    };
+    json!({
+        "source_clock_domain": input.value_ms.map(|_value| input.clock_domain),
+        "source_timestamp_precision": input.value_ms.map(|_value| TimestampPrecision::Milliseconds.as_str()),
+        "source_time_ms": input.value_ms,
+        "source_time_ns": input.value_ms.and_then(millis_to_nanos),
+        "source_field": input.source_field,
+        "source_time_status": status,
+        "timestamp_role_metadata": input.metadata.cloned(),
+        "normalized_clock_domain": Value::Null,
+        "normalized_time_ns": Value::Null,
+        "alignment_status": input.alignment_status,
+        "transform_id": Value::Null,
+        "uncertainty_ns": Value::Null,
+    })
+}
+
+fn device_elapsed_source_time_json(value_ns: i64, bracket: Option<&Value>) -> Value {
+    json!({
+        "source_clock_domain": ClockDomain::DeviceElapsedRealtimeNs.as_str(),
+        "source_timestamp_precision": TimestampPrecision::Nanoseconds.as_str(),
+        "source_time_ns": value_ns,
+        "source_field": "t_elapsed_realtime_ns",
+        "source_time_status": "device_clock_probe",
+        "clock_bracket": bracket.cloned().unwrap_or(Value::Null),
+        "normalized_clock_domain": Value::Null,
+        "normalized_time_ns": Value::Null,
+        "alignment_status": AlignmentStatus::NotEstimated.as_str(),
+        "transform_id": Value::Null,
+        "uncertainty_ns": Value::Null,
+    })
+}
+
+fn device_elapsed_interval_source_time_json(
+    before_ns: i64,
+    after_ns: i64,
+    capture: Option<&Value>,
+) -> Value {
+    json!({
+        "source_clock_domain": ClockDomain::DeviceElapsedRealtimeNs.as_str(),
+        "source_timestamp_precision": TimestampPrecision::Nanoseconds.as_str(),
+        "source_time_interval_ns": [before_ns, after_ns],
+        "source_time_status": "device_clock_probe_bracket",
+        "clock_bracket": capture.cloned().unwrap_or(Value::Null),
+        "normalized_clock_domain": Value::Null,
+        "normalized_time_interval_ns": Value::Null,
+        "alignment_status": AlignmentStatus::Bracketed.as_str(),
+        "transform_id": Value::Null,
+        "uncertainty_ns": Value::Null,
+    })
+}
+
+fn legacy_host_wall_source_time_json(source_field: &str, value_ms: Option<i64>) -> Value {
+    source_millisecond_time_json(&MillisecondSourceTimeInput {
+        clock_domain: ClockDomain::HostWallMs.as_str(),
+        source_field,
+        value_ms,
+        source_time_status: "legacy_wall_clock",
+        metadata: None,
+        alignment_status: AlignmentStatus::LegacyWallClockBracketed.as_str(),
+    })
+}
+
+fn normalized_time_json(status: &str) -> Value {
+    json!({
+        "status": status,
+        "clock_domain": Value::Null,
+        "time_ns": Value::Null,
+        "time_interval_ns": Value::Null,
+        "transform_id": Value::Null,
+        "uncertainty_ns": Value::Null,
+    })
+}
+
+fn normalized_interval_time_json(
+    status: &str,
+    clock_domain: &str,
+    before_ns: i64,
+    after_ns: i64,
+) -> Value {
+    json!({
+        "status": status,
+        "clock_domain": clock_domain,
+        "time_ns": Value::Null,
+        "time_interval_ns": [before_ns, after_ns],
+        "transform_id": Value::Null,
+        "uncertainty_ns": Value::Null,
+    })
+}
+
 fn video_marker_clock(record: &Value) -> Option<VideoMarkerClock<'_>> {
     let before = record.get("before")?;
-    let _after = record.get("after")?;
-    let probe = before.get("device_clock_probe")?;
+    let after = record.get("after")?;
+    let elapsed_realtime_ns = probe_marker_elapsed_realtime_ns(before)?;
+    let after_elapsed_realtime_ns = probe_marker_elapsed_realtime_ns(after)?;
+    if after_elapsed_realtime_ns < elapsed_realtime_ns {
+        return None;
+    }
+    Some(VideoMarkerClock {
+        elapsed_realtime_ns,
+        bracket: record,
+    })
+}
+
+fn evidence_capture_clock(record: Option<&Value>) -> Option<EvidenceCaptureClock<'_>> {
+    let capture = record?;
+    if capture.get("clock_domain").and_then(Value::as_str)
+        != Some(ClockDomain::DeviceElapsedRealtimeNs.as_str())
+    {
+        return None;
+    }
+    if capture
+        .get("clock_alignment_status")
+        .and_then(Value::as_str)
+        != Some(AlignmentStatus::Bracketed.as_str())
+    {
+        return None;
+    }
+    let before = capture.get("before")?;
+    let after = capture.get("after")?;
+    let before_ns = probe_marker_elapsed_realtime_ns(before)?;
+    let after_ns = probe_marker_elapsed_realtime_ns(after)?;
+    if after_ns < before_ns {
+        return None;
+    }
+    Some(EvidenceCaptureClock {
+        before_ns,
+        after_ns,
+        capture,
+    })
+}
+
+fn probe_marker_elapsed_realtime_ns(marker: &Value) -> Option<i64> {
+    let probe = marker.get("device_clock_probe")?;
     if probe.get("schema").and_then(Value::as_str) != Some("input_dynamics_device_clock_probe.v1") {
         return None;
     }
@@ -819,13 +1224,14 @@ fn video_marker_clock(record: &Value) -> Option<VideoMarkerClock<'_>> {
     {
         return None;
     }
-    let elapsed_realtime_ns = before
-        .get("t_elapsed_realtime_ns")
-        .and_then(Value::as_i64)?;
-    Some(VideoMarkerClock {
-        elapsed_realtime_ns,
-        bracket: record,
-    })
+    let probe_elapsed_realtime_ns = probe.get("t_elapsed_realtime_ns").and_then(Value::as_i64)?;
+    if let Some(marker_elapsed_realtime_ns) =
+        marker.get("t_elapsed_realtime_ns").and_then(Value::as_i64)
+        && marker_elapsed_realtime_ns != probe_elapsed_realtime_ns
+    {
+        return None;
+    }
+    Some(probe_elapsed_realtime_ns)
 }
 
 const fn elapsed_realtime_ms(elapsed_realtime_ns: i64) -> Option<i64> {
@@ -907,6 +1313,8 @@ fn ordering_json(method: &str, clock_alignment_status: &str) -> Value {
     json!({
         "method": method,
         "clock_alignment_status": clock_alignment_status,
+        "used": "source_time_for_inspection",
+        "canonical_cross_source_order": false,
     })
 }
 
@@ -1014,6 +1422,18 @@ mod tests {
             return;
         };
         assert_eq!(output.len(), 7, "pointer_sample should be excluded");
+        assert_current_evidence_rows(&output);
+        assert_ime_source_time_rows(&output);
+        assert_touch_and_dismissal_rows(&output);
+        let Some(index) = assert_ok(read_json(&timeline_dir.join("index.json")), "read index")
+        else {
+            return;
+        };
+        assert_timeline_index_counts(&index);
+        let _cleanup = assert_ok(fs::remove_dir_all(&root), "remove fixture");
+    }
+
+    fn assert_current_evidence_rows(output: &[Value]) {
         assert_eq!(
             output
                 .first()
@@ -1022,6 +1442,54 @@ mod tests {
             Some("evidence_bundle"),
             "start evidence is anchored first"
         );
+        let evidence_rows = output
+            .iter()
+            .filter(|record| {
+                record.get("record_kind").and_then(Value::as_str) == Some("evidence_bundle")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(evidence_rows.len(), 2_usize, "start/end evidence rows");
+        assert!(
+            evidence_rows.iter().all(|record| {
+                record.get("clock_domain").and_then(Value::as_str)
+                    == Some("device_elapsed_realtime_ns")
+                    && record.get("clock_alignment_status").and_then(Value::as_str)
+                        == Some("bracketed")
+                    && record
+                        .pointer("/source_time/source_time_status")
+                        .and_then(Value::as_str)
+                        == Some("device_clock_probe_bracket")
+                    && record
+                        .pointer("/normalized_time/time_interval_ns/0")
+                        .is_some()
+                    && record
+                        .pointer("/ordering/canonical_cross_source_order")
+                        .and_then(Value::as_bool)
+                        == Some(false)
+            }),
+            "manifest-backed evidence brackets should expose elapsed-realtime source and normalized intervals"
+        );
+    }
+
+    fn assert_ime_source_time_rows(output: &[Value]) {
+        assert!(
+            output.iter().any(|record| {
+                record.get("record_kind").and_then(Value::as_str) == Some("ime_event")
+                    && record.get("event").and_then(Value::as_str) == Some("key_down")
+                    && record
+                        .pointer("/source_time/source_time_ms")
+                        .and_then(Value::as_i64)
+                        == Some(125_i64)
+                    && record
+                        .pointer("/source_time/source_time_status")
+                        .and_then(Value::as_str)
+                        == Some("canonical_event_time_metadata")
+            }),
+            "IME timeline rows should prefer event_time metadata over writer uptime"
+        );
+    }
+
+    fn assert_touch_and_dismissal_rows(output: &[Value]) {
         assert!(
             output.iter().any(|record| {
                 record.get("record_kind").and_then(Value::as_str) == Some("touch_gesture")
@@ -1031,6 +1499,14 @@ mod tests {
                         == Some("gesture-1")
                     && record.get("clock_domain").and_then(Value::as_str)
                         == Some("kernel_getevent_us")
+                    && record
+                        .pointer("/normalized_time/status")
+                        .and_then(Value::as_str)
+                        == Some("unsupported_clock_domain")
+                    && record
+                        .pointer("/ordering/clock_alignment_status")
+                        .and_then(Value::as_str)
+                        == Some("unsupported_clock_domain")
             }),
             "touch gesture source refs and canonical clock domain should be present"
         );
@@ -1045,13 +1521,16 @@ mod tests {
                         .pointer("/clock_alignment/status")
                         .and_then(Value::as_str)
                         == Some("unsupported_clock_domain")
+                    && record
+                        .pointer("/ordering/clock_alignment_status")
+                        .and_then(Value::as_str)
+                        == Some("unsupported_clock_domain")
             }),
             "dismissal timeline rows should preserve clock-safety metadata"
         );
-        let Some(index) = assert_ok(read_json(&timeline_dir.join("index.json")), "read index")
-        else {
-            return;
-        };
+    }
+
+    fn assert_timeline_index_counts(index: &Value) {
         assert_eq!(
             index.get("event_count").and_then(Value::as_u64),
             Some(7_u64),
@@ -1059,10 +1538,146 @@ mod tests {
         );
         assert_eq!(
             index
+                .pointer("/clock_domain_counts/device_elapsed_realtime_ns")
+                .and_then(Value::as_u64),
+            Some(2_u64),
+            "index should count current evidence elapsed-realtime rows"
+        );
+        assert_eq!(
+            index
                 .pointer("/ordering/clock_alignment_status")
                 .and_then(Value::as_str),
             Some("not_estimated"),
             "clock alignment should be explicit"
+        );
+    }
+
+    #[test]
+    fn derives_timeline_with_legacy_evidence_index_markers() {
+        let root = unique_temp_dir("timeline-legacy-evidence");
+        let Some(()) = assert_ok(create_legacy_evidence_fixture(&root), "create fixture") else {
+            return;
+        };
+
+        let derive_result = derive_timeline(&DeriveTimelineConfig {
+            recording_dir: root.clone(),
+            ime_jsonl: None,
+            touch_gestures_jsonl: None,
+            dismissals_jsonl: None,
+            output_dir: None,
+        });
+        let Some(_summary) = assert_ok(derive_result, "derive timeline") else {
+            return;
+        };
+
+        let Some(output) = assert_ok(
+            read_jsonl(&root.join("derived").join("timeline").join("events.jsonl")),
+            "read timeline events",
+        ) else {
+            return;
+        };
+        let evidence_rows = output
+            .iter()
+            .filter(|record| {
+                record.get("record_kind").and_then(Value::as_str) == Some("evidence_bundle")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(evidence_rows.len(), 2_usize, "start/end evidence rows");
+        assert!(
+            evidence_rows.iter().all(|record| {
+                record.get("clock_domain").and_then(Value::as_str) == Some("host_wall_ms")
+                    && record.get("clock_alignment_status").and_then(Value::as_str)
+                        == Some("legacy_wall_clock_bracketed")
+                    && record
+                        .pointer("/source_time/source_time_status")
+                        .and_then(Value::as_str)
+                        == Some("legacy_wall_clock")
+            }),
+            "index-only evidence timing should be explicit legacy host-wall provenance"
+        );
+        let _cleanup = assert_ok(fs::remove_dir_all(&root), "remove fixture");
+    }
+
+    #[test]
+    fn derives_timeline_with_mapped_unsupported_and_legacy_time_claims() {
+        let root = unique_temp_dir("timeline-derived-time-claims");
+        let Some(()) = assert_ok(create_dismissal_time_claim_fixture(&root), "create fixture")
+        else {
+            return;
+        };
+
+        let derive_result = derive_timeline(&DeriveTimelineConfig {
+            recording_dir: root.clone(),
+            ime_jsonl: None,
+            touch_gestures_jsonl: None,
+            dismissals_jsonl: None,
+            output_dir: None,
+        });
+        let Some(_summary) = assert_ok(derive_result, "derive timeline") else {
+            return;
+        };
+
+        let timeline_dir = root.join("derived").join("timeline");
+        let Some(output) = assert_ok(
+            read_jsonl(&timeline_dir.join("events.jsonl")),
+            "read events",
+        ) else {
+            return;
+        };
+        assert!(
+            output.iter().any(|record| {
+                record.get("inference_id").and_then(Value::as_str) == Some("dismissal-mapped")
+                    && record
+                        .pointer("/normalized_time/status")
+                        .and_then(Value::as_str)
+                        == Some("bracketed")
+                    && record
+                        .pointer("/normalized_time/time_interval_ns/0")
+                        .and_then(Value::as_i64)
+                        .is_some()
+            }),
+            "mapped fixture should preserve its normalized time claim"
+        );
+        assert!(
+            output.iter().any(|record| {
+                record.get("inference_id").and_then(Value::as_str) == Some("dismissal-unsupported")
+                    && record.get("time_delta_ms") == Some(&Value::Null)
+                    && record
+                        .pointer("/normalized_time/status")
+                        .and_then(Value::as_str)
+                        == Some("unsupported_clock_domain")
+            }),
+            "unsupported fixture should remain null-delta and non-normalized"
+        );
+        assert!(
+            output.iter().any(|record| {
+                record.get("inference_id").and_then(Value::as_str) == Some("dismissal-legacy")
+                    && record.get("time_delta_status").and_then(Value::as_str)
+                        == Some("legacy_mixed_clock_heuristic")
+                    && record
+                        .pointer("/normalized_time/status")
+                        .and_then(Value::as_str)
+                        == Some("unsupported_clock_domain")
+            }),
+            "legacy fixture should remain readable without becoming mapped"
+        );
+        let Some(index) = assert_ok(read_json(&timeline_dir.join("index.json")), "read index")
+        else {
+            return;
+        };
+        assert_eq!(
+            index
+                .pointer("/normalized_status_counts/bracketed")
+                .and_then(Value::as_u64),
+            Some(1_u64),
+            "index should count mapped normalized rows separately"
+        );
+        assert_eq!(
+            index
+                .pointer("/normalized_status_counts/unsupported_clock_domain")
+                .and_then(Value::as_u64),
+            Some(2_u64),
+            "index should count unsupported and legacy rows separately from mapped rows"
         );
         let _cleanup = assert_ok(fs::remove_dir_all(&root), "remove fixture");
     }
@@ -1249,6 +1864,51 @@ mod tests {
         let _cleanup = assert_ok(fs::remove_dir_all(&root), "remove fixture");
     }
 
+    #[test]
+    fn derives_timeline_rejects_mismatched_probe_marker_elapsed_time() {
+        let root = unique_temp_dir("timeline-mismatched-video-probe");
+        let Some(()) = assert_ok(create_complete_fixture(&root), "create fixture") else {
+            return;
+        };
+        let Some(()) = assert_ok(
+            create_mismatched_current_video_fixture(&root),
+            "create mismatched video fixture",
+        ) else {
+            return;
+        };
+
+        let derive_result = derive_timeline(&DeriveTimelineConfig {
+            recording_dir: root.clone(),
+            ime_jsonl: None,
+            touch_gestures_jsonl: None,
+            dismissals_jsonl: None,
+            output_dir: None,
+        });
+        let Some(_summary) = assert_ok(derive_result, "derive timeline") else {
+            return;
+        };
+
+        let Some(output) = assert_ok(
+            read_jsonl(&root.join("derived").join("timeline").join("events.jsonl")),
+            "read timeline events",
+        ) else {
+            return;
+        };
+        assert!(
+            output
+                .iter()
+                .filter(|record| {
+                    record.get("record_kind").and_then(Value::as_str) == Some("video_marker")
+                        && record.get("clock_domain").and_then(Value::as_str)
+                            == Some("device_elapsed_realtime_ns")
+                })
+                .count()
+                == 0_usize,
+            "mismatched probe wrappers should not emit canonical video markers"
+        );
+        let _cleanup = assert_ok(fs::remove_dir_all(&root), "remove fixture");
+    }
+
     fn create_complete_fixture(root: &Path) -> TestResult<()> {
         let ime_dir = root.join("ime");
         let derived_dir = root.join("derived");
@@ -1263,6 +1923,12 @@ mod tests {
             &json!({
                 "external_run_id": "run-test",
                 "package_name": "org.inputdynamics.ime.debug",
+                "evidence": {
+                    "enabled": true,
+                    "policy": "start_end",
+                    "start": current_evidence_capture("start", 900_000_i64, 910_000_i64),
+                    "end": current_evidence_capture("end", 1_500_000_i64, 1_510_000_i64),
+                },
             }),
         )?;
         write_jsonl(&ime_dir.join("session-test.jsonl"), &ime_fixture())?;
@@ -1281,6 +1947,62 @@ mod tests {
         write_json(
             &evidence_end.join("index.json"),
             &evidence_fixture("end/screenshot.png", 1_500_i64),
+        )?;
+        Ok(())
+    }
+
+    fn create_legacy_evidence_fixture(root: &Path) -> TestResult<()> {
+        let ime_dir = root.join("ime");
+        let evidence_start = root.join("evidence").join("start");
+        let evidence_end = root.join("evidence").join("end");
+        fs::create_dir_all(&ime_dir)?;
+        fs::create_dir_all(&evidence_start)?;
+        fs::create_dir_all(&evidence_end)?;
+        write_json(
+            &root.join("manifest.json"),
+            &json!({
+                "external_run_id": "run-test",
+                "package_name": "org.inputdynamics.ime.debug",
+            }),
+        )?;
+        write_jsonl(
+            &ime_dir.join("session-test.jsonl"),
+            &[session_start_fixture()],
+        )?;
+        write_json(
+            &evidence_start.join("index.json"),
+            &evidence_fixture("start/screenshot.png", 900_i64),
+        )?;
+        write_json(
+            &evidence_end.join("index.json"),
+            &evidence_fixture("end/screenshot.png", 1_500_i64),
+        )?;
+        Ok(())
+    }
+
+    fn create_dismissal_time_claim_fixture(root: &Path) -> TestResult<()> {
+        let ime_dir = root.join("ime");
+        let derived_dir = root.join("derived");
+        fs::create_dir_all(&ime_dir)?;
+        fs::create_dir_all(&derived_dir)?;
+        write_json(
+            &root.join("manifest.json"),
+            &json!({
+                "external_run_id": "run-test",
+                "package_name": "org.inputdynamics.ime.debug",
+            }),
+        )?;
+        write_jsonl(
+            &ime_dir.join("session-test.jsonl"),
+            &[session_start_fixture()],
+        )?;
+        write_jsonl(
+            &derived_dir.join("dismissal_inferences.jsonl"),
+            &[
+                mapped_dismissal_fixture(),
+                unsupported_dismissal_fixture(),
+                legacy_dismissal_fixture(),
+            ],
         )?;
         Ok(())
     }
@@ -1337,6 +2059,30 @@ mod tests {
         )
     }
 
+    fn create_mismatched_current_video_fixture(root: &Path) -> TestResult<()> {
+        let video_dir = root.join("video");
+        fs::create_dir_all(&video_dir)?;
+        write_json(
+            &video_dir.join("timing.json"),
+            &json!({
+                "schema": "input_dynamics_video_capture.v1",
+                "enabled": true,
+                "required": true,
+                "remote_path": "/sdcard/Download/input-dynamics-run-test.mp4",
+                "local_path": "video/screen.mp4",
+                "start": {
+                    "before": mismatched_video_probe_marker("before_screenrecord_start", 10_000_i64),
+                    "after": video_probe_marker("after_screenrecord_start", 11_000_i64),
+                },
+                "stop": {
+                    "before": mismatched_video_probe_marker("before_screenrecord_stop", 20_000_i64),
+                    "after": video_probe_marker("after_screenrecord_stop", 21_000_i64),
+                },
+                "ok": true,
+            }),
+        )
+    }
+
     fn video_probe_marker(phase: &str, elapsed_realtime_ns: i64) -> Value {
         json!({
             "schema": "input_dynamics_device_clock_probe.v1",
@@ -1348,6 +2094,35 @@ mod tests {
                 "schema": "input_dynamics_device_clock_probe.v1",
                 "canonical_clock_domain": "device_elapsed_realtime_ns",
                 "t_elapsed_realtime_ns": elapsed_realtime_ns,
+            },
+        })
+    }
+
+    fn mismatched_video_probe_marker(phase: &str, elapsed_realtime_ns: i64) -> Value {
+        let mut marker = video_probe_marker(phase, elapsed_realtime_ns);
+        if let Some(object) = marker.as_object_mut() {
+            object.insert(
+                String::from("t_elapsed_realtime_ns"),
+                json!(elapsed_realtime_ns.saturating_add(1_i64)),
+            );
+        }
+        marker
+    }
+
+    fn current_evidence_capture(phase: &str, before_ns: i64, after_ns: i64) -> Value {
+        json!({
+            "schema": "input_dynamics_record_evidence_capture.v1",
+            "enabled": true,
+            "requested": true,
+            "phase": phase,
+            "policy": "start_end",
+            "clock_domain": "device_elapsed_realtime_ns",
+            "clock_alignment_status": "bracketed",
+            "before": video_probe_marker(&format!("before_evidence_{phase}"), before_ns),
+            "after": video_probe_marker(&format!("after_evidence_{phase}"), after_ns),
+            "bundle": {
+                "schema": "input_dynamics_observation_bundle.v1",
+                "index": format!("evidence/{phase}/index.json")
             },
         })
     }
@@ -1372,7 +2147,9 @@ mod tests {
                 "session_id": "session-test",
                 "external_run_id": "run-test",
                 "target_package": "example.app",
-                "t_uptime_ms": 120_i64,
+                "t_uptime_ms": 9_000_i64,
+                "t_event_uptime_ms": 125_i64,
+                "event_time": ime_event_time_metadata(),
                 "press_id": 7_i64,
                 "gesture_id": 8_i64,
                 "key_code": 97_i64,
@@ -1386,6 +2163,24 @@ mod tests {
                 "t_uptime_ms": 200_i64,
             }),
         ]
+    }
+
+    fn ime_event_time_metadata() -> Value {
+        json!({
+            "clock_domain": "android_uptime_ms",
+            "timestamp_source": "motion_event",
+            "timestamp_precision": "milliseconds",
+            "field": "t_event_uptime_ms",
+            "field_ns": "t_event_uptime_ns",
+            "field_ns_precision": "milliseconds_converted_to_nanoseconds",
+        })
+    }
+
+    fn session_start_fixture() -> Value {
+        ime_fixture()
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| json!({"event": "session_start", "t_uptime_ms": 100_i64}))
     }
 
     fn touch_gesture_fixture() -> Value {
@@ -1437,6 +2232,67 @@ mod tests {
                 {"kind": "ime_event", "line_index": 4_u64, "t_uptime_ms": 200_i64}
             ],
         })
+    }
+
+    fn mapped_dismissal_fixture() -> Value {
+        json!({
+            "event": "dismissal_inference",
+            "inference_id": "dismissal-mapped",
+            "inferred_dismissal": "focus_or_app_hide_unknown",
+            "confidence": {"decimal_ppm": 500_000_i64},
+            "time_delta_ms": 12_i64,
+            "clock_alignment_status": "bracketed",
+            "source_time": {
+                "source_clock_domain": "android_uptime_ms",
+                "source_timestamp_precision": "milliseconds",
+                "source_time_ms": 200_i64,
+                "source_time_ns": 200_000_000_i64,
+                "source_field": "evidence.ime_event.t_uptime_ms",
+                "source_time_status": "synthetic_mapped_fixture",
+                "alignment_status": "bracketed"
+            },
+            "normalized_time": {
+                "status": "bracketed",
+                "clock_domain": "device_elapsed_realtime_ns",
+                "time_interval_ns": [1_000_000_000_i64, 1_001_000_000_i64],
+                "transform_id": "fixture-transform",
+                "uncertainty_ns": 1_000_000_i64
+            },
+            "clock_alignment": {
+                "status": "bracketed",
+                "source_clock_domains": ["android_uptime_ms", "device_elapsed_realtime_ns"],
+                "transform_id": "fixture-transform"
+            },
+            "evidence": [
+                {"kind": "ime_event", "line_index": 1_u64, "t_uptime_ms": 200_i64}
+            ],
+        })
+    }
+
+    fn unsupported_dismissal_fixture() -> Value {
+        json!({
+            "event": "dismissal_inference",
+            "inference_id": "dismissal-unsupported",
+            "inferred_dismissal": "focus_or_app_hide_unknown",
+            "confidence": {"decimal_ppm": 250_000_i64},
+            "time_delta_ms": Value::Null,
+            "clock_alignment_status": "unsupported_clock_domain",
+            "clock_alignment": {
+                "status": "unsupported_clock_domain",
+                "source_clock_domains": ["android_uptime_ms", "kernel_getevent_us"]
+            },
+            "evidence": [
+                {"kind": "ime_event", "line_index": 1_u64, "t_uptime_ms": 210_i64}
+            ],
+        })
+    }
+
+    fn legacy_dismissal_fixture() -> Value {
+        let mut fixture = dismissal_fixture();
+        if let Some(object) = fixture.as_object_mut() {
+            object.insert(String::from("inference_id"), json!("dismissal-legacy"));
+        }
+        fixture
     }
 
     fn evidence_fixture(screenshot: &str, captured_wall_ms: i64) -> Value {

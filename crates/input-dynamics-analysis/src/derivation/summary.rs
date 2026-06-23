@@ -47,6 +47,7 @@ struct RunSummaryBuilder {
     pointer: PointerStats,
     spatial: SpatialStats,
     target_packages: BTreeMap<String, u64>,
+    timing_source_status_counts: BTreeMap<String, u64>,
     password_record_count: u64,
     clock_alignment_status: Option<String>,
 }
@@ -207,6 +208,7 @@ fn run_summary_json(
             "source_present": paths.press_summaries_jsonl.exists(),
             "password_record_count": builder.password_record_count,
             "clock_alignment_status": clock_alignment_status,
+            "timing_source_status_counts": builder.timing_source_status_counts,
         },
     }))
 }
@@ -225,6 +227,10 @@ impl RunSummaryBuilder {
         if self.clock_alignment_status.is_none() {
             self.clock_alignment_status = string_at(record, "/clock_alignment/getevent");
         }
+        merge_count_object(
+            &mut self.timing_source_status_counts,
+            record.pointer("/timing_clock/source_time_status_counts"),
+        )?;
         if let Some(target_package) = string_field(record, "target_package") {
             increment_map_value(&mut self.target_packages, target_package)?;
         }
@@ -689,6 +695,28 @@ fn checked_increment(value: u64) -> DeriveResult<u64> {
 fn increment_map_value(map: &mut BTreeMap<String, u64>, key: String) -> DeriveResult<()> {
     let current = map.get(&key).copied().unwrap_or(0_u64);
     map.insert(key, checked_increment(current)?);
+    Ok(())
+}
+
+fn merge_count_object(
+    totals: &mut BTreeMap<String, u64>,
+    value: Option<&Value>,
+) -> DeriveResult<()> {
+    let Some(object) = value.and_then(Value::as_object) else {
+        return Ok(());
+    };
+    for (key, count) in object {
+        let Some(count_value) = count.as_u64() else {
+            continue;
+        };
+        let current = totals.get(key).copied().unwrap_or(0_u64);
+        totals.insert(
+            key.clone(),
+            current
+                .checked_add(count_value)
+                .ok_or_else(|| DeriveError::new("timing source status count overflow"))?,
+        );
+    }
     Ok(())
 }
 

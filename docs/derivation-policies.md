@@ -50,7 +50,10 @@ Fields:
   million of screen height.
 - `tap_max_distance_px`: maximum movement for tap classification.
 - `tap_max_duration_ms`: maximum duration for tap classification.
-- `hide_correlation_window_ms`: window for matching gestures to IME hide events.
+- `hide_correlation_window_ms`: window for matching gestures to IME hide events
+  only when the events are already in a comparable clock domain or a validated
+  alignment transform supplies the conversion and uncertainty. It is not
+  permission to subtract raw `kernel_getevent_us` from Android uptime.
 
 Example:
 

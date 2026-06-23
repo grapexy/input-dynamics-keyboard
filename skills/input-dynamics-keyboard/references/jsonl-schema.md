@@ -71,8 +71,19 @@ Use this reference when validating logs or changing event fields.
 - Current dismissal inference records use
   `clock_alignment_status: "unsupported_clock_domain"` when getevent
   correlation is unavailable. Treat those records as IME lifecycle evidence, not
-  aligned getevent timing evidence. Older records may include `time_delta_ms`
-  with `time_delta_status: "legacy_mixed_clock_heuristic"`.
+  aligned getevent timing evidence. Current or older readable rows may carry
+  compatibility `time_delta_ms`; `time_delta_status:
+  "legacy_mixed_clock_heuristic"` is provenance only, not aligned timing.
+- Derived press, touch, dismissal, and timeline rows keep compatibility
+  timestamp fields, but current rows also expose clock provenance through
+  `time`, `source_time`, `timing_clock`, and `normalized_time`. Treat
+  `normalized_time.status: "unsupported_clock_domain"` as not comparable across
+  sources. A usable normalized timestamp needs non-null normalized clock and
+  time fields, not status alone. Treat `legacy_wall_clock_bracketed` as readable
+  legacy provenance, not canonical timing.
+- Timeline `events.jsonl` is a source index. Row order is deterministic
+  inspection order unless the row has a valid normalized-time claim; check
+  `ordering.canonical_cross_source_order` before using row order as chronology.
 - `target_package` identifies the active editor package reported to the IME.
 - `field_episode_id` groups field-scoped records that appear to belong to one
   visible editing episode. It is a logger heuristic, not app-provided truth.

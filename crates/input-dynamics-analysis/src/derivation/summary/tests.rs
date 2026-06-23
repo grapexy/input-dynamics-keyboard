@@ -43,6 +43,7 @@ fn derives_run_summary_from_press_summaries() {
     assert_summary_identity(&summary);
     assert_summary_counts(&summary);
     assert_summary_timing_and_pointer(&summary);
+    assert_summary_timing_source_counts(&summary);
     assert_summary_provenance_and_source(&summary);
     let _cleanup = assert_ok(fs::remove_dir_all(&root), "remove fixture");
 }
@@ -101,6 +102,30 @@ fn assert_summary_timing_and_pointer(summary: &Value) {
             .and_then(Value::as_u64),
         Some(12_u64),
         "pointer pressure count should aggregate source sample counts"
+    );
+}
+
+fn assert_summary_timing_source_counts(summary: &Value) {
+    assert_eq!(
+        summary
+            .pointer("/readiness/timing_source_status_counts/canonical_event_time_metadata")
+            .and_then(Value::as_u64),
+        Some(3_u64),
+        "canonical timing-source count should aggregate press summaries"
+    );
+    assert_eq!(
+        summary
+            .pointer("/readiness/timing_source_status_counts/legacy_t_event_uptime_ms")
+            .and_then(Value::as_u64),
+        Some(2_u64),
+        "legacy event-time count should aggregate press summaries"
+    );
+    assert_eq!(
+        summary
+            .pointer("/readiness/timing_source_status_counts/legacy_t_uptime_ms_fallback")
+            .and_then(Value::as_u64),
+        Some(1_u64),
+        "writer-time fallback count should aggregate press summaries"
     );
 }
 
@@ -200,6 +225,9 @@ fn press_summary(
         "clock_alignment": {
             "getevent": "not_estimated",
         },
+        "timing_clock": {
+            "source_time_status_counts": timing_clock_counts(key_class),
+        },
         "timing": {
             "hold_ms": hold_ms,
             "flight_since_previous_commit_ms": flight_ms,
@@ -262,6 +290,29 @@ fn press_summary(
             "has_pointer_samples": true,
         },
     })
+}
+
+fn timing_clock_counts(key_class: &str) -> Value {
+    match key_class {
+        "letter" => json!({
+            "canonical_event_time_metadata": 3_u64,
+            "legacy_t_event_uptime_ms": 0_u64,
+            "legacy_t_uptime_ms_fallback": 0_u64,
+            "missing": 0_u64,
+        }),
+        "space" => json!({
+            "canonical_event_time_metadata": 0_u64,
+            "legacy_t_event_uptime_ms": 2_u64,
+            "legacy_t_uptime_ms_fallback": 0_u64,
+            "missing": 0_u64,
+        }),
+        _other => json!({
+            "canonical_event_time_metadata": 0_u64,
+            "legacy_t_event_uptime_ms": 0_u64,
+            "legacy_t_uptime_ms_fallback": 1_u64,
+            "missing": 0_u64,
+        }),
+    }
 }
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {

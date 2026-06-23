@@ -46,6 +46,19 @@ impl DismissalInference {
                 "classification": gesture.classification.kind.as_str(),
                 "edge_side": gesture.classification.edge_side.map(EdgeSide::as_str),
                 "end_t_getevent_ms": us_to_ms_floor(gesture.end.t_getevent_us),
+                "time": {
+                    "source_clock_domain": ClockDomain::KernelGeteventUs.as_str(),
+                    "source_timestamp_precision": "microseconds",
+                    "source_time_us": gesture.end.t_getevent_us,
+                    "source_time_ms_floor": us_to_ms_floor(gesture.end.t_getevent_us),
+                    "source_field": "end.t_getevent_us",
+                    "source_time_status": "derived_getevent_time",
+                    "alignment_status": AlignmentStatus::UnsupportedClockDomain.as_str(),
+                    "normalized_clock_domain": Value::Null,
+                    "normalized_time_ns": Value::Null,
+                    "transform_id": Value::Null,
+                    "uncertainty_ns": Value::Null,
+                },
             }));
         }
         evidence.push(json!({
@@ -53,6 +66,18 @@ impl DismissalInference {
             "event": self.ime_event.event,
             "line_index": self.ime_event.line_index,
             "t_uptime_ms": self.ime_event.t_uptime_ms,
+            "time": {
+                "source_clock_domain": ClockDomain::AndroidUptimeMs.as_str(),
+                "source_timestamp_precision": "milliseconds",
+                "source_time_ms": self.ime_event.t_uptime_ms,
+                "source_field": "t_uptime_ms",
+                "source_time_status": "legacy_t_uptime_ms_fallback",
+                "alignment_status": AlignmentStatus::NotEstimated.as_str(),
+                "normalized_clock_domain": Value::Null,
+                "normalized_time_ns": Value::Null,
+                "transform_id": Value::Null,
+                "uncertainty_ns": Value::Null,
+            },
             "target_package": self.ime_event.target_package,
         }));
         json!({
@@ -68,6 +93,10 @@ impl DismissalInference {
                 "status": AlignmentStatus::UnsupportedClockDomain.as_str(),
                 "ime_event_clock_domain": ClockDomain::AndroidUptimeMs.as_str(),
                 "getevent_gesture_clock_domain": ClockDomain::KernelGeteventUs.as_str(),
+                "source_clock_domains": [
+                    ClockDomain::AndroidUptimeMs.as_str(),
+                    ClockDomain::KernelGeteventUs.as_str(),
+                ],
                 "reason": "getevent gesture correlation is disabled until a validated alignment transform exists",
             },
             "observed_ime_event": self.ime_event.event,
@@ -186,6 +215,31 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             None,
             "missing time deltas should not receive a legacy-delta status"
+        );
+        assert_inference_clock_domains_explicit(inference_json.as_ref());
+    }
+
+    fn assert_inference_clock_domains_explicit(inference_json: Option<&serde_json::Value>) {
+        assert_eq!(
+            inference_json
+                .and_then(|record| record.pointer("/clock_alignment/source_clock_domains/0"))
+                .and_then(serde_json::Value::as_str),
+            Some("android_uptime_ms"),
+            "IME source clock domain should be explicit"
+        );
+        assert_eq!(
+            inference_json
+                .and_then(|record| record.pointer("/clock_alignment/source_clock_domains/1"))
+                .and_then(serde_json::Value::as_str),
+            Some("kernel_getevent_us"),
+            "getevent source clock domain should be explicit"
+        );
+        assert_eq!(
+            inference_json
+                .and_then(|record| record.pointer("/evidence/0/time/source_clock_domain"))
+                .and_then(serde_json::Value::as_str),
+            Some("android_uptime_ms"),
+            "observed IME event evidence should carry timing provenance"
         );
     }
 

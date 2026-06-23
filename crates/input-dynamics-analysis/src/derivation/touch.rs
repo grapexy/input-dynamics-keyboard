@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
 
+use crate::clock::{AlignmentStatus, ClockDomain, TimestampPrecision, micros_to_nanos};
 use crate::derivation::{
     DeriveError, DeriveResult, DismissalDerivationPolicy, RunContext, ScreenConfig,
     TOUCH_GESTURE_SCHEMA, confidence_value, coordinate_max, micros_between, ratio_value,
@@ -115,6 +116,9 @@ impl TouchGesture {
             "session_id": context.session_id,
             "package_name": context.package_name,
             "source": "adb_getevent",
+            "clock_domain": ClockDomain::KernelGeteventUs.as_str(),
+            "clock_alignment_status": AlignmentStatus::UnsupportedClockDomain.as_str(),
+            "time": gesture_time_json(self),
             "event_path": self.event_path,
             "touch_sequence_index": self.touch_sequence_index,
             "tracking_id": self.tracking_id,
@@ -131,6 +135,8 @@ impl TouchGesture {
             "start": sample_json(&self.start, screen),
             "end": sample_json(&self.end, screen),
             "delta": {
+                "clock_domain": ClockDomain::KernelGeteventUs.as_str(),
+                "source_timestamp_precision": TimestampPrecision::Microseconds.as_str(),
                 "dx_px": self.dx,
                 "dy_px": self.dy,
                 "distance_px": self.distance_px,
@@ -260,6 +266,7 @@ fn sample_json(sample: &TouchSample, screen: ScreenConfig) -> Value {
         "line_index": sample.line_index,
         "t_getevent_us": sample.t_getevent_us,
         "t_getevent_ms": us_to_ms_floor(sample.t_getevent_us),
+        "time": touch_sample_time_json(sample),
         "x_px": sample.x,
         "y_px": sample.y,
         "x_ratio": ratio_value(sample.x, coordinate_max(screen.width)),
@@ -268,6 +275,46 @@ fn sample_json(sample: &TouchSample, screen: ScreenConfig) -> Value {
         "touch_major": sample.touch_major,
         "touch_minor": sample.touch_minor,
         "orientation": sample.orientation,
+    })
+}
+
+fn gesture_time_json(gesture: &TouchGesture) -> Value {
+    json!({
+        "source_clock_domain": ClockDomain::KernelGeteventUs.as_str(),
+        "source_timestamp_precision": TimestampPrecision::Microseconds.as_str(),
+        "source_time_interval_us": [
+            gesture.start.t_getevent_us,
+            gesture.end.t_getevent_us,
+        ],
+        "source_time_interval_ns": [
+            micros_to_nanos(gesture.start.t_getevent_us),
+            micros_to_nanos(gesture.end.t_getevent_us),
+        ],
+        "source_field": "start.t_getevent_us,end.t_getevent_us",
+        "source_time_status": "derived_getevent_time",
+        "duration_us": gesture.duration_us,
+        "duration_ms": gesture.duration_ms,
+        "normalized_clock_domain": Value::Null,
+        "normalized_time_interval_ns": Value::Null,
+        "alignment_status": AlignmentStatus::UnsupportedClockDomain.as_str(),
+        "transform_id": Value::Null,
+        "uncertainty_ns": Value::Null,
+    })
+}
+
+fn touch_sample_time_json(sample: &TouchSample) -> Value {
+    json!({
+        "source_clock_domain": ClockDomain::KernelGeteventUs.as_str(),
+        "source_timestamp_precision": TimestampPrecision::Microseconds.as_str(),
+        "source_time_us": sample.t_getevent_us,
+        "source_time_ns": micros_to_nanos(sample.t_getevent_us),
+        "source_field": "t_getevent_us",
+        "source_time_status": "derived_getevent_time",
+        "normalized_clock_domain": Value::Null,
+        "normalized_time_ns": Value::Null,
+        "alignment_status": AlignmentStatus::UnsupportedClockDomain.as_str(),
+        "transform_id": Value::Null,
+        "uncertainty_ns": Value::Null,
     })
 }
 
@@ -406,8 +453,10 @@ mod tests {
     use proptest::prelude::{Just, any};
     use proptest::prop_assert_eq;
 
-    use crate::derivation::touch::{GestureKind, GestureMeasure, TouchSample, classify_gesture};
-    use crate::derivation::{ScreenConfig, default_derivation_policy};
+    use crate::derivation::touch::{
+        GestureKind, GestureMeasure, TouchSample, classify_gesture, derive_touch_gestures,
+    };
+    use crate::derivation::{RunContext, ScreenConfig, default_derivation_policy};
 
     fn test_screen() -> ScreenConfig {
         ScreenConfig {
@@ -443,6 +492,65 @@ mod tests {
             classification.ok().map(|value| value.kind),
             Some(GestureKind::OutsideKeyboardTap),
             "top tap should be outside the known keyboard bounds"
+        );
+    }
+
+    #[test]
+    fn touch_gesture_json_exposes_kernel_getevent_clock_domain() {
+        let records = vec![
+            touch_frame(1_u64, 150_000_i64, 10_i64, 100_i64, 200_i64),
+            touch_frame(2_u64, 190_000_i64, 10_i64, 300_i64, 200_i64),
+        ];
+        let policy_result = default_derivation_policy();
+        assert!(policy_result.is_ok(), "default policy should load");
+        let Ok(policy) = policy_result else {
+            return;
+        };
+        let gesture_result = derive_touch_gestures(&records, test_screen(), policy);
+        assert!(gesture_result.is_ok(), "gesture should derive");
+        let Ok(gestures) = gesture_result else {
+            return;
+        };
+        let Some(gesture) = gestures.first() else {
+            assert_eq!(gestures.len(), 1_usize, "one gesture should derive");
+            return;
+        };
+        let record = gesture.to_json(
+            &RunContext {
+                external_run_id: Some(String::from("run-test")),
+                package_name: Some(String::from("org.inputdynamics.ime.debug")),
+                session_id: Some(String::from("session-test")),
+            },
+            test_screen(),
+            None,
+        );
+        assert_eq!(
+            record
+                .get("clock_domain")
+                .and_then(serde_json::Value::as_str),
+            Some("kernel_getevent_us"),
+            "touch gesture should declare the getevent source clock"
+        );
+        assert_eq!(
+            record
+                .pointer("/time/source_clock_domain")
+                .and_then(serde_json::Value::as_str),
+            Some("kernel_getevent_us"),
+            "gesture time should be self-describing"
+        );
+        assert_eq!(
+            record
+                .pointer("/time/alignment_status")
+                .and_then(serde_json::Value::as_str),
+            Some("unsupported_clock_domain"),
+            "getevent gestures should not imply cross-source alignment"
+        );
+        assert_eq!(
+            record
+                .pointer("/start/time/source_time_us")
+                .and_then(serde_json::Value::as_i64),
+            Some(150_000_i64),
+            "endpoint time should preserve raw getevent microseconds"
         );
     }
 
@@ -571,5 +679,29 @@ mod tests {
             orientation: Some(0),
             tracking_id: Some(7),
         }
+    }
+
+    fn touch_frame(
+        line_index: u64,
+        t_getevent_us: i64,
+        sequence_index: i64,
+        x: i64,
+        y: i64,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "event": "touch_frame",
+            "event_path": "/dev/input/event1",
+            "line_index": line_index,
+            "t_getevent_us": t_getevent_us,
+            "slots": [{
+                "touch_sequence_index": sequence_index,
+                "tracking_id": sequence_index,
+                "x": x,
+                "y": y,
+                "pressure": 20_i64,
+                "touch_major": 12_i64,
+                "touch_minor": 8_i64,
+            }],
+        })
     }
 }

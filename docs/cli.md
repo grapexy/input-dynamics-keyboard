@@ -494,6 +494,24 @@ depends on canonical clocks, also require `flags.canonical_clock_ready: true`,
 `flags.needs_canonical_recording: false`, and no recorder rerun action in
 `next_actions`.
 
+Derived artifacts preserve source timing and normalized timing separately.
+Compatibility fields such as `t_uptime_ms`, `t_event_uptime_ms`, and
+`t_getevent_us` remain readable, but current derived rows also include explicit
+clock metadata:
+
+- `source_time` or `time` names the source clock domain, source field, precision,
+  status, and raw source value or interval.
+- `normalized_time.status` describes the normalized-time claim. A row supports
+  normalized ordering only when `normalized_time.clock_domain` and either
+  `normalized_time.time_ns` or `normalized_time.time_interval_ns` are non-null
+  and the row's ordering metadata allows that use. `unsupported_clock_domain`
+  means the row is not comparable across sources. `legacy_wall_clock_bracketed`
+  means old wall-clock timing is readable but not canonical. `bracketed` is used
+  only when a saved artifact supplies an explicit bracket or transform.
+- Timeline `ordering.canonical_cross_source_order: false` means row order is a
+  deterministic inspection order unless the row carries a valid normalized-time
+  claim.
+
 After recording with the current CLI:
 
 ```bash
@@ -509,7 +527,13 @@ Each `press_summary` row groups IME `pointer_sample`, `key_down`, `key_up`,
 source line indexes, reports `hold_ms`, `down_to_commit_ms`,
 `flight_since_previous_commit_ms`, key landing geometry, pointer movement, and
 pressure/contact statistics. `clock_alignment.getevent` is `not_estimated`
-because raw device events do not carry `press_id`.
+because raw device events do not carry `press_id`. `timing_clock` reports
+whether press timing came from current event-time metadata, legacy
+`t_event_uptime_ms`, legacy writer-time fallback, or missing source timing.
+`canonical_event_time_metadata` is the current source-event path;
+`legacy_t_event_uptime_ms` is legacy-compatible source-event timing;
+`legacy_t_uptime_ms_fallback` is writer-time compatibility only; `missing`
+blocks source-event timing claims.
 
 ```bash
 input-dynamics derive summary --recording-dir "runs/$RUN_ID"
@@ -538,8 +562,11 @@ This writes:
 `dismissal_inferences.jsonl` does not infer a getevent-backed dismissal cause
 until a validated alignment transform exists. Treat records with
 `clock_alignment_status: "unsupported_clock_domain"` as IME lifecycle evidence
-only, not as aligned getevent timing evidence. Older records may include
-`time_delta_ms` with `time_delta_status: "legacy_mixed_clock_heuristic"`.
+only, not as aligned getevent timing evidence. Current or older readable rows
+may carry compatibility `time_delta_ms`; `time_delta_status:
+"legacy_mixed_clock_heuristic"` is provenance only, not aligned timing.
+`touch_gestures.jsonl` declares `kernel_getevent_us` source timing and
+`unsupported_clock_domain` cross-source alignment until a transform exists.
 
 To create a cross-source timeline index:
 
@@ -560,9 +587,13 @@ derived/
 gestures, dismissal inferences, video start/stop markers when timing metadata
 is present, and optional evidence bundle markers. It does not copy low-level
 raw `getevent` rows by default and does not embed screenshot, accessibility, or
-video payloads. Each row keeps source references and an explicit clock domain.
+video payloads. Each row keeps source references, an explicit source clock
+domain, `source_time`, `normalized_time`, and ordering metadata. Manifest-backed
+evidence brackets use `device_elapsed_realtime_ns`; index-only evidence timing
+remains readable as legacy `host_wall_ms` provenance.
 `derived/timeline/index.json` records selected sources, counts, fingerprints,
-output paths, warnings, and the clock-alignment status.
+output paths, warnings, clock-domain counts, normalized-status counts, and the
+clock-alignment status.
 
 To use a local classifier-threshold policy:
 

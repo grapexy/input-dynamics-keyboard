@@ -43,7 +43,8 @@ Use this keyboard only in consented, local research settings.
   freshness.
 - Derived recording timelines that index IME events, gesture derivations,
   dismissal inferences, and evidence bundle references without embedding raw
-  evidence payloads.
+  evidence payloads, while preserving source clock domains and normalized-time
+  status instead of implying cross-source alignment.
 - Read-only recording inspection that reports artifact presence, validation
   state, stale derived output, and next local CLI actions.
 - AOSP uinput-backed CLI touch commands for local agent-driven key presses,

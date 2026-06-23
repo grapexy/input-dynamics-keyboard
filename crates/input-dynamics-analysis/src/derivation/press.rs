@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::clock::ClockDomain;
+use crate::clock::{AlignmentStatus, ClockDomain, TimestampPrecision, millis_to_nanos};
 use crate::derivation::{
     DERIVATION_SUMMARY_SCHEMA, DeriveError, DeriveResult, PRESS_SUMMARY_SCHEMA, RunContext,
     find_ime_jsonl, path_text, required_i64, squared_distance, string_field,
@@ -72,6 +72,7 @@ struct PointerSample {
     line_index: u64,
     sample_kind: Option<String>,
     action_name: Option<String>,
+    event_time: Option<Value>,
     t_uptime_ms: Option<i64>,
     t_event_uptime_ms: Option<i64>,
     x_px: Option<i64>,
@@ -92,6 +93,7 @@ struct KeyEventRecord {
     kind: KeyEventKind,
     line_index: u64,
     value: Value,
+    event_time: Option<Value>,
     t_uptime_ms: Option<i64>,
     t_event_uptime_ms: Option<i64>,
 }
@@ -104,6 +106,30 @@ enum KeyEventKind {
     Repeat,
     LongPress,
     Cancel,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SourceTimeStatus {
+    CanonicalEventTimeMetadata,
+    LegacyEventUptimeMs,
+    LegacyUptimeMsFallback,
+    Missing,
+}
+
+#[derive(Clone, Debug)]
+struct SourceEventTime {
+    value_ms: Option<i64>,
+    status: SourceTimeStatus,
+    source_field: Option<String>,
+    metadata: Option<Value>,
+}
+
+#[derive(Default)]
+struct SourceTimeCounts {
+    canonical_event_time_metadata: u64,
+    legacy_t_event_uptime_ms: u64,
+    legacy_t_uptime_ms_fallback: u64,
+    missing: u64,
 }
 
 #[derive(Default)]
@@ -194,6 +220,102 @@ impl KeyEventKind {
             Self::LongPress => "key_long_press",
             Self::Cancel => "key_cancel",
         }
+    }
+}
+
+impl SourceTimeStatus {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::CanonicalEventTimeMetadata => "canonical_event_time_metadata",
+            Self::LegacyEventUptimeMs => "legacy_t_event_uptime_ms",
+            Self::LegacyUptimeMsFallback => "legacy_t_uptime_ms_fallback",
+            Self::Missing => "missing",
+        }
+    }
+}
+
+impl SourceEventTime {
+    fn from_parts(
+        event_time: Option<&Value>,
+        t_event_uptime_ms: Option<i64>,
+        t_uptime_ms: Option<i64>,
+    ) -> Self {
+        if let Some(metadata) = event_time
+            && metadata.get("clock_domain").and_then(Value::as_str)
+                == Some(ClockDomain::AndroidUptimeMs.as_str())
+            && metadata.get("timestamp_precision").and_then(Value::as_str)
+                == Some(TimestampPrecision::Milliseconds.as_str())
+            && metadata.get("field").and_then(Value::as_str) == Some("t_event_uptime_ms")
+            && let Some(value_ms) = t_event_uptime_ms
+        {
+            return Self {
+                value_ms: Some(value_ms),
+                status: SourceTimeStatus::CanonicalEventTimeMetadata,
+                source_field: Some(String::from("t_event_uptime_ms")),
+                metadata: Some(metadata.clone()),
+            };
+        }
+        if let Some(value_ms) = t_event_uptime_ms {
+            return Self {
+                value_ms: Some(value_ms),
+                status: SourceTimeStatus::LegacyEventUptimeMs,
+                source_field: Some(String::from("t_event_uptime_ms")),
+                metadata: event_time.cloned(),
+            };
+        }
+        if let Some(value_ms) = t_uptime_ms {
+            return Self {
+                value_ms: Some(value_ms),
+                status: SourceTimeStatus::LegacyUptimeMsFallback,
+                source_field: Some(String::from("t_uptime_ms")),
+                metadata: event_time.cloned(),
+            };
+        }
+        Self {
+            value_ms: None,
+            status: SourceTimeStatus::Missing,
+            source_field: None,
+            metadata: event_time.cloned(),
+        }
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "source_clock_domain": self.value_ms.map(|_value| ClockDomain::AndroidUptimeMs.as_str()),
+            "source_timestamp_precision": self.value_ms.map(|_value| TimestampPrecision::Milliseconds.as_str()),
+            "source_time_ms": self.value_ms,
+            "source_time_ns": self.value_ms.and_then(millis_to_nanos),
+            "source_field": self.source_field,
+            "source_time_status": self.status.as_str(),
+            "timestamp_role_metadata": self.metadata,
+            "normalized_clock_domain": Value::Null,
+            "normalized_time_ns": Value::Null,
+            "alignment_status": AlignmentStatus::NotEstimated.as_str(),
+            "transform_id": Value::Null,
+            "uncertainty_ns": Value::Null,
+        })
+    }
+}
+
+impl SourceTimeCounts {
+    fn push(&mut self, status: SourceTimeStatus) -> DeriveResult<()> {
+        let count = match status {
+            SourceTimeStatus::CanonicalEventTimeMetadata => &mut self.canonical_event_time_metadata,
+            SourceTimeStatus::LegacyEventUptimeMs => &mut self.legacy_t_event_uptime_ms,
+            SourceTimeStatus::LegacyUptimeMsFallback => &mut self.legacy_t_uptime_ms_fallback,
+            SourceTimeStatus::Missing => &mut self.missing,
+        };
+        *count = checked_increment(*count)?;
+        Ok(())
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "canonical_event_time_metadata": self.canonical_event_time_metadata,
+            "legacy_t_event_uptime_ms": self.legacy_t_event_uptime_ms,
+            "legacy_t_uptime_ms_fallback": self.legacy_t_uptime_ms_fallback,
+            "missing": self.missing,
+        })
     }
 }
 
@@ -303,6 +425,7 @@ impl PointerSample {
             sample_kind: string_field(&record.value, "sample_kind"),
             action_name: string_field(&record.value, "action_name")
                 .or_else(|| string_field(&record.value, "motion_action_name")),
+            event_time: record.value.get("event_time").cloned(),
             t_uptime_ms: record.value.get("t_uptime_ms").and_then(Value::as_i64),
             t_event_uptime_ms: record
                 .value
@@ -327,7 +450,15 @@ impl PointerSample {
     }
 
     fn event_time_ms(&self) -> Option<i64> {
-        self.t_event_uptime_ms.or(self.t_uptime_ms)
+        self.source_event_time().value_ms
+    }
+
+    fn source_event_time(&self) -> SourceEventTime {
+        SourceEventTime::from_parts(
+            self.event_time.as_ref(),
+            self.t_event_uptime_ms,
+            self.t_uptime_ms,
+        )
     }
 
     fn point(&self) -> Option<Point> {
@@ -344,6 +475,7 @@ impl PointerSample {
             "action_name": self.action_name,
             "t_uptime_ms": self.t_uptime_ms,
             "t_event_uptime_ms": self.t_event_uptime_ms,
+            "time": self.source_event_time().to_json(),
             "x_px": self.x_px,
             "y_px": self.y_px,
             "x_screen_px": self.x_screen_px,
@@ -365,6 +497,7 @@ impl KeyEventRecord {
             kind,
             line_index: record.line_index,
             value: record.value.clone(),
+            event_time: record.value.get("event_time").cloned(),
             t_uptime_ms: record.value.get("t_uptime_ms").and_then(Value::as_i64),
             t_event_uptime_ms: record
                 .value
@@ -378,7 +511,15 @@ impl KeyEventRecord {
     }
 
     fn event_time_ms(&self) -> Option<i64> {
-        self.t_event_uptime_ms.or(self.t_uptime_ms)
+        self.source_event_time().value_ms
+    }
+
+    fn source_event_time(&self) -> SourceEventTime {
+        SourceEventTime::from_parts(
+            self.event_time.as_ref(),
+            self.t_event_uptime_ms,
+            self.t_uptime_ms,
+        )
     }
 }
 
@@ -572,6 +713,7 @@ fn press_summary_json(input: &PressSummaryInput<'_>) -> DeriveResult<Value> {
         "clock_alignment": {
             "getevent": CLOCK_ALIGNMENT_STATUS,
         },
+        "timing_clock": timing_clock_json(input.builder)?,
         "timing": timing_json(input.builder, input.previous_commit_time_ms),
         "key": primary_key.map_or(Value::Null, key_summary_json),
         "key_events": key_events_json(input.builder),
@@ -647,11 +789,33 @@ fn key_event_json(event: &KeyEventRecord) -> Value {
         "line_index": event.line_index,
         "t_uptime_ms": event.t_uptime_ms,
         "t_event_uptime_ms": event.t_event_uptime_ms,
+        "time": event.source_event_time().to_json(),
         "x_px": event.value.get("x_px").cloned().unwrap_or(Value::Null),
         "y_px": event.value.get("y_px").cloned().unwrap_or(Value::Null),
         "x_screen_px": event.value.get("x_screen_px").cloned().unwrap_or(Value::Null),
         "y_screen_px": event.value.get("y_screen_px").cloned().unwrap_or(Value::Null),
     })
+}
+
+fn timing_clock_json(builder: &PressBuilder) -> DeriveResult<Value> {
+    let mut counts = SourceTimeCounts::default();
+    for sample in &builder.pointer_samples {
+        counts.push(sample.source_event_time().status)?;
+    }
+    for event in &builder.key_events {
+        counts.push(event.source_event_time().status)?;
+    }
+    Ok(json!({
+        "source_clock_domain": ClockDomain::AndroidUptimeMs.as_str(),
+        "source_timestamp_precision": TimestampPrecision::Milliseconds.as_str(),
+        "duration_unit": "milliseconds",
+        "alignment_status": AlignmentStatus::NotEstimated.as_str(),
+        "normalized_clock_domain": Value::Null,
+        "normalized_time_interval_ns": Value::Null,
+        "transform_id": Value::Null,
+        "uncertainty_ns": Value::Null,
+        "source_time_status_counts": counts.to_json(),
+    }))
 }
 
 fn key_summary_json(event: &KeyEventRecord) -> Value {

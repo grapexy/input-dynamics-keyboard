@@ -241,7 +241,24 @@ Unless `--no-video` was explicitly used, it should include `video.enabled:
 true`, `video.required: true`, `video.local_path`, and a non-null
 `video.file.sha256`.
 
-To derive per-press summaries from a completed run:
+Before deriving or interpreting a completed run, inspect it:
+
+```bash
+idk recording inspect --dir "runs/$RUN_ID"
+```
+
+Use `flags.valid_for_analysis`, `flags.needs_validation`,
+`flags.has_video`, `flags.needs_video`, `flags.canonical_clock_ready`,
+`flags.has_legacy_timing`, `flags.needs_canonical_recording`,
+`flags.needs_press_summaries`, `flags.needs_run_summary`,
+`flags.needs_derivation`, and `flags.needs_timeline` to decide the next step.
+Required missing or stale video makes `valid_for_analysis` false. The `clock`
+object classifies saved video/evidence anchors as `bracketed`,
+`legacy_wall_clock_bracketed`, `missing_source`, `stale_inputs`,
+`probe_failed`, `not_requested`, or `not_estimated`. If `next_actions` is
+non-empty, prefer those CLI commands over ad hoc file inspection.
+
+To derive per-press summaries from an inspected run:
 
 ```bash
 idk derive presses --recording-dir "runs/$RUN_ID"
@@ -265,6 +282,19 @@ Clock reasoning rules for agents:
   metadata and wall fields as diagnostics.
 - Do not subtract or order across different clock domains unless a derived
   artifact provides a transform, uncertainty, and an alignment status.
+- Derived rows separate source timing from normalized timing. Read `source_time`
+  or `time` for the source domain/value. For normalized timing, status alone is
+  not enough: require a non-null `normalized_time.clock_domain` and either
+  `normalized_time.time_ns` or `normalized_time.time_interval_ns`.
+- Timeline row order is deterministic inspection order unless
+  populated `normalized_time` fields and ordering metadata say a mapped
+  normalized timestamp can be used. Do not treat
+  `ordering.canonical_cross_source_order: false` as event chronology.
+- Press `timing_clock.source_time_status_counts` has four important buckets:
+  `canonical_event_time_metadata` is the current source-event path;
+  `legacy_t_event_uptime_ms` is legacy-compatible source-event timing;
+  `legacy_t_uptime_ms_fallback` is writer-time compatibility only; `missing`
+  blocks source-event timing claims.
 - Treat `legacy_wall_clock_bracketed` and `estimated` as lower-confidence
   timing claims, `unsupported_clock_domain` as not comparable, and
   `stale_inputs`, `missing_source`, `outside_range`, or `probe_failed` as
@@ -299,8 +329,9 @@ input profiles for derivation thresholds; profiles control generated input.
 Until a validated alignment transform exists, dismissal inference does not join
 IME lifecycle events to raw `getevent` gestures. Records with
 `clock_alignment_status: "unsupported_clock_domain"` are IME lifecycle evidence
-only, not aligned getevent timing evidence. Older records may include
-`time_delta_ms` with `time_delta_status: "legacy_mixed_clock_heuristic"`.
+only, not aligned getevent timing evidence. Current or older readable rows may
+carry compatibility `time_delta_ms`; `time_delta_status:
+"legacy_mixed_clock_heuristic"` is provenance only, not aligned timing.
 
 To build an agent-readable cross-source recording timeline:
 
@@ -313,23 +344,13 @@ This writes `derived/timeline/index.json` and
 records and evidence artifacts, not as the raw source of truth. Preserve clock
 domains and source references when reasoning from it.
 
-To inspect a local recording directory without modifying it:
+After deriving, inspect again if freshness matters:
 
 ```bash
 idk recording inspect --dir "runs/$RUN_ID"
 ```
 
-Use `flags.valid_for_analysis`, `flags.needs_validation`,
-`flags.has_video`, `flags.needs_video`, `flags.canonical_clock_ready`,
-`flags.has_legacy_timing`, `flags.needs_canonical_recording`,
-`flags.needs_press_summaries`, `flags.needs_run_summary`,
-`flags.needs_derivation`, and `flags.needs_timeline` to decide the next step.
-Required missing or stale video makes `valid_for_analysis` false. The `clock`
-object classifies saved video/evidence anchors as `bracketed`,
-`legacy_wall_clock_bracketed`, `missing_source`, `stale_inputs`,
-`probe_failed`, `not_requested`, or `not_estimated`. If `next_actions` is
-non-empty, prefer those CLI commands over ad hoc file inspection. The
-inspection output fingerprints source artifacts and reports stale video,
+The inspection output fingerprints source artifacts and reports stale video,
 summaries, timelines, and clock-anchor readiness, but it does not rewrite
 validation or derived files.
 

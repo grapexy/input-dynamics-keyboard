@@ -63,6 +63,20 @@ fn derives_press_summary_with_timings_and_pointer_stats() {
     );
     assert_eq!(
         first
+            .pointer("/timing_clock/source_time_status_counts/canonical_event_time_metadata")
+            .and_then(Value::as_u64),
+        Some(5_u64),
+        "current records should report canonical event-time metadata coverage"
+    );
+    assert_eq!(
+        first
+            .pointer("/key_events/down/time/source_time_status")
+            .and_then(Value::as_str),
+        Some("canonical_event_time_metadata"),
+        "key endpoint should expose event-time provenance"
+    );
+    assert_eq!(
+        first
             .pointer("/pointer/movement/path_length_px")
             .and_then(Value::as_i64),
         Some(10_i64),
@@ -78,6 +92,104 @@ fn derives_press_summary_with_timings_and_pointer_stats() {
             .and_then(Value::as_i64),
         Some(30_i64),
         "flight should compare current down to previous commit"
+    );
+    let _cleanup = assert_ok(fs::remove_dir_all(&root), "remove fixture");
+}
+
+#[test]
+fn press_timing_prefers_source_event_time_over_writer_time() {
+    let root = unique_temp_dir("press-source-event-time");
+    let Some(()) = assert_ok(create_writer_divergence_fixture(&root), "create fixture") else {
+        return;
+    };
+
+    let derive_result = derive_press_summaries(&DerivePressesConfig {
+        recording_dir: root.clone(),
+        ime_jsonl: None,
+        output: None,
+    });
+    let Some(_summary) = assert_ok(derive_result, "derive press summaries") else {
+        return;
+    };
+
+    let output_path = root.join("derived").join("press_summaries.jsonl");
+    let Some(records) = assert_ok(read_jsonl(&output_path), "read summaries") else {
+        return;
+    };
+    let Some(first) = records.first() else {
+        assert_eq!(records.len(), 1_usize, "one summary should exist");
+        return;
+    };
+    assert_eq!(
+        first.pointer("/timing/hold_ms").and_then(Value::as_i64),
+        Some(40_i64),
+        "hold time must use event uptime, not writer uptime"
+    );
+    assert_eq!(
+        first
+            .pointer("/timing/down_to_commit_ms")
+            .and_then(Value::as_i64),
+        Some(55_i64),
+        "down-to-commit must use event uptime, not writer uptime"
+    );
+    assert_eq!(
+        first
+            .pointer("/timing/pointer_duration_ms")
+            .and_then(Value::as_i64),
+        Some(40_i64),
+        "pointer duration must use MotionEvent uptime, not writer uptime"
+    );
+    assert_eq!(
+        first
+            .pointer("/timing_clock/source_time_status_counts/legacy_t_uptime_ms_fallback")
+            .and_then(Value::as_u64),
+        Some(0_u64),
+        "writer-time fallback must be visible and unused for current records"
+    );
+    let _cleanup = assert_ok(fs::remove_dir_all(&root), "remove fixture");
+}
+
+#[test]
+fn press_timing_reports_legacy_source_time_branches() {
+    let root = unique_temp_dir("press-legacy-source-time");
+    let Some(()) = assert_ok(create_legacy_timing_fixture(&root), "create fixture") else {
+        return;
+    };
+
+    let derive_result = derive_press_summaries(&DerivePressesConfig {
+        recording_dir: root.clone(),
+        ime_jsonl: None,
+        output: None,
+    });
+    let Some(_summary) = assert_ok(derive_result, "derive press summaries") else {
+        return;
+    };
+
+    let output_path = root.join("derived").join("press_summaries.jsonl");
+    let Some(records) = assert_ok(read_jsonl(&output_path), "read summaries") else {
+        return;
+    };
+    let Some(legacy_event) = records.first() else {
+        assert_eq!(records.len(), 2_usize, "legacy rows should exist");
+        return;
+    };
+    let Some(writer_fallback) = records.get(1) else {
+        assert_eq!(records.len(), 2_usize, "writer fallback row should exist");
+        return;
+    };
+    assert_eq!(
+        legacy_event
+            .pointer("/timing_clock/source_time_status_counts/legacy_t_event_uptime_ms")
+            .and_then(Value::as_u64),
+        Some(3_u64),
+        "records without event_time metadata should be marked legacy event uptime"
+    );
+    assert_eq!(
+        writer_fallback
+            .pointer("/timing_clock/source_time_status_counts/legacy_t_uptime_ms_fallback")
+            .and_then(Value::as_u64),
+        Some(3_u64),
+        "records without event uptime should be marked writer-time fallback"
     );
     let _cleanup = assert_ok(fs::remove_dir_all(&root), "remove fixture");
 }
@@ -126,6 +238,76 @@ fn create_fixture(root: &Path) -> TestResult<()> {
         }),
     )?;
     write_jsonl(&ime_dir.join("session-test.jsonl"), &fixture_records())?;
+    Ok(())
+}
+
+fn create_writer_divergence_fixture(root: &Path) -> TestResult<()> {
+    let ime_dir = root.join("ime");
+    fs::create_dir_all(&ime_dir)?;
+    write_json(
+        &root.join("manifest.json"),
+        &json!({
+            "external_run_id": "run-test",
+            "package_name": "org.inputdynamics.ime.debug",
+        }),
+    )?;
+    write_jsonl(
+        &ime_dir.join("session-test.jsonl"),
+        &[
+            json!({
+                "schema": "input_dynamics_event.v1",
+                "event": "session_start",
+                "session_id": "session-test",
+                "external_run_id": "run-test",
+                "t_uptime_ms": 1_i64,
+            }),
+            PointerJsonFixture {
+                press_id: 1_i64,
+                t_event_uptime_ms: 90_i64,
+                t_uptime_ms: 9_000_i64,
+                action_name: "down",
+                x_px: 100_i64,
+                y_px: 200_i64,
+            }
+            .to_json(),
+            PointerJsonFixture {
+                press_id: 1_i64,
+                t_event_uptime_ms: 130_i64,
+                t_uptime_ms: 13_000_i64,
+                action_name: "move",
+                x_px: 106_i64,
+                y_px: 208_i64,
+            }
+            .to_json(),
+            key_json("key_down", 1_i64, 100_i64, 10_000_i64, 97_i64),
+            key_json("key_up", 1_i64, 140_i64, 20_000_i64, 97_i64),
+            key_json("key_commit", 1_i64, 155_i64, 30_000_i64, 97_i64),
+        ],
+    )?;
+    Ok(())
+}
+
+fn create_legacy_timing_fixture(root: &Path) -> TestResult<()> {
+    let ime_dir = root.join("ime");
+    fs::create_dir_all(&ime_dir)?;
+    write_json(
+        &root.join("manifest.json"),
+        &json!({
+            "external_run_id": "run-test",
+            "package_name": "org.inputdynamics.ime.debug",
+        }),
+    )?;
+    write_jsonl(
+        &ime_dir.join("session-test.jsonl"),
+        &[
+            legacy_key_json("key_down", 1_i64, Some(100_i64), 100_i64),
+            legacy_key_json("key_up", 1_i64, Some(140_i64), 140_i64),
+            legacy_key_json("key_commit", 1_i64, Some(155_i64), 155_i64),
+            legacy_key_json("key_down", 2_i64, None, 200_i64),
+            legacy_key_json("key_up", 2_i64, None, 240_i64),
+            legacy_key_json("key_commit", 2_i64, None, 255_i64),
+        ],
+    )?;
     Ok(())
 }
 
@@ -189,6 +371,15 @@ struct KeyFixture {
     privacy: FieldPrivacy,
 }
 
+struct PointerJsonFixture {
+    press_id: i64,
+    t_event_uptime_ms: i64,
+    t_uptime_ms: i64,
+    action_name: &'static str,
+    x_px: i64,
+    y_px: i64,
+}
+
 impl FieldPrivacy {
     const fn is_password(self) -> bool {
         matches!(self, Self::Password)
@@ -232,6 +423,7 @@ impl PointerFixture {
             "action_name": self.action_name,
             "t_uptime_ms": self.t_event_uptime_ms,
             "t_event_uptime_ms": self.t_event_uptime_ms,
+            "event_time": event_time_metadata(),
             "x_px": self.x_px,
             "y_px": self.y_px,
             "x_screen_px": self.x_px,
@@ -278,6 +470,7 @@ impl KeyFixture {
             "gesture_id": self.press_id,
             "t_uptime_ms": self.t_event_uptime_ms,
             "t_event_uptime_ms": self.t_event_uptime_ms,
+            "event_time": event_time_metadata(),
             "x_px": 10_i64,
             "y_px": 20_i64,
             "key_code": self.key_code,
@@ -291,6 +484,95 @@ impl KeyFixture {
             "key_center_offset_y_px": 0_i64,
         })
     }
+}
+
+impl PointerJsonFixture {
+    fn to_json(&self) -> Value {
+        json!({
+            "schema": "input_dynamics_event.v1",
+            "event": "pointer_sample",
+            "session_id": "session-test",
+            "external_run_id": "run-test",
+            "target_package": "example.app",
+            "password_field": false,
+            "press_id": self.press_id,
+            "gesture_id": self.press_id,
+            "sample_kind": "current",
+            "action_name": self.action_name,
+            "t_uptime_ms": self.t_uptime_ms,
+            "t_event_uptime_ms": self.t_event_uptime_ms,
+            "event_time": event_time_metadata(),
+            "x_px": self.x_px,
+            "y_px": self.y_px,
+            "x_screen_px": self.x_px,
+            "y_screen_px": self.y_px,
+        })
+    }
+}
+
+fn key_json(
+    event: &'static str,
+    press_id: i64,
+    t_event_uptime_ms: i64,
+    t_uptime_ms: i64,
+    key_code: i64,
+) -> Value {
+    json!({
+        "schema": "input_dynamics_event.v1",
+        "event": event,
+        "session_id": "session-test",
+        "external_run_id": "run-test",
+        "target_package": "example.app",
+        "password_field": false,
+        "press_id": press_id,
+        "gesture_id": press_id,
+        "t_uptime_ms": t_uptime_ms,
+        "t_event_uptime_ms": t_event_uptime_ms,
+        "event_time": event_time_metadata(),
+        "x_px": 10_i64,
+        "y_px": 20_i64,
+        "key_code": key_code,
+        "key_code_printable": "key",
+        "key_label": "a",
+        "key_class": "letter",
+    })
+}
+
+fn legacy_key_json(
+    event: &'static str,
+    press_id: i64,
+    t_event_uptime_ms: Option<i64>,
+    t_uptime_ms: i64,
+) -> Value {
+    json!({
+        "schema": "input_dynamics_event.v1",
+        "event": event,
+        "session_id": "session-test",
+        "external_run_id": "run-test",
+        "target_package": "example.app",
+        "password_field": false,
+        "press_id": press_id,
+        "gesture_id": press_id,
+        "t_uptime_ms": t_uptime_ms,
+        "t_event_uptime_ms": t_event_uptime_ms,
+        "x_px": 10_i64,
+        "y_px": 20_i64,
+        "key_code": 97_i64,
+        "key_code_printable": "key",
+        "key_label": "a",
+        "key_class": "letter",
+    })
+}
+
+fn event_time_metadata() -> Value {
+    json!({
+        "clock_domain": "android_uptime_ms",
+        "timestamp_source": "motion_event",
+        "timestamp_precision": "milliseconds",
+        "field": "t_event_uptime_ms",
+        "field_ns": "t_event_uptime_ns",
+        "field_ns_precision": "milliseconds_converted_to_nanoseconds",
+    })
 }
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {
