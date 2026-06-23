@@ -616,6 +616,7 @@ object ResearchSessionLogger {
             File(logDirectory, controlResultFileName(it))
         }
         val inputScope = inputScopeStatus(appContext, active)
+        val uptimeMs = SystemClock.uptimeMillis()
         val json = JSONObject()
             .put("package_name", appContext.packageName)
             .put("request_id", jsonValue(requestId))
@@ -649,7 +650,9 @@ object ResearchSessionLogger {
             .put("result_file_path", jsonValue(resultFile?.absolutePath))
             .put("log_file_count", listLogFiles(appContext).size)
             .put("t_wall_ms", System.currentTimeMillis())
-            .put("t_uptime_ms", SystemClock.uptimeMillis())
+            .put("t_uptime_ms", uptimeMs)
+            .put("t_uptime_ns", TimeUnit.MILLISECONDS.toNanos(uptimeMs))
+            .put("t_elapsed_realtime_ns", SystemClock.elapsedRealtimeNanos())
             .put("ok", ok)
             .put("command", jsonValue(command))
             .put("message", jsonValue(message))
@@ -787,13 +790,16 @@ object ResearchSessionLogger {
             val file = File(target.directory, "session-${session.sessionId}.jsonl")
             FileOutputStream(file, true).use { output ->
                 events.forEach { event ->
+                    val uptimeMs = SystemClock.uptimeMillis()
                     val record = JSONObject()
                         .put("schema", SCHEMA)
                         .put("session_id", session.sessionId)
                         .put("external_run_id", jsonValue(session.externalRunId))
                         .put("event", event.name)
                         .put("t_wall_ms", System.currentTimeMillis())
-                        .put("t_uptime_ms", SystemClock.uptimeMillis())
+                        .put("t_uptime_ms", uptimeMs)
+                        .put("t_uptime_ns", TimeUnit.MILLISECONDS.toNanos(uptimeMs))
+                        .put("t_elapsed_realtime_ns", SystemClock.elapsedRealtimeNanos())
                         .put("package_name", appContext.packageName)
                         .put("storage", if (target.external) "app_specific_external" else "internal_fallback")
 
@@ -807,6 +813,8 @@ object ResearchSessionLogger {
                     event.fields.forEach { (key, value) ->
                         record.put(key, jsonValue(value))
                     }
+                    addNanosecondCompanion(record, "t_event_uptime_ms", "t_event_uptime_ns")
+                    addNanosecondCompanion(record, "t_down_uptime_ms", "t_down_uptime_ns")
 
                     output.write(record.toString().toByteArray(Charsets.UTF_8))
                     output.write('\n'.code)
@@ -1304,6 +1312,16 @@ object ResearchSessionLogger {
             array.put(jsonValue(value))
         }
         return array
+    }
+
+    private fun addNanosecondCompanion(record: JSONObject, millisField: String, nanosField: String) {
+        if (!record.has(millisField) || record.has(nanosField)) return
+        val millis = when (val value = record.opt(millisField)) {
+            is Number -> value.toLong()
+            is String -> value.toLongOrNull()
+            else -> null
+        } ?: return
+        record.put(nanosField, TimeUnit.MILLISECONDS.toNanos(millis))
     }
 
     private fun logFilesJson(context: Context): JSONArray {

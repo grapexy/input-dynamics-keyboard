@@ -14,6 +14,10 @@ Use this reference when validating logs or changing event fields.
 - `session_start` includes session-level provenance: `input_actor`,
   `input_controller`, `input_cadence_policy`, and optional `input_profile_*`
   fields.
+- Every record includes `t_elapsed_realtime_ns`, a high-resolution monotonic
+  timestamp captured when the record is written. `t_event_uptime_ns` and
+  `t_down_uptime_ns` are nanosecond-unit companions for Android millisecond
+  input event times when those source fields are present.
 - Key and pointer records include `press_id` when they belong to a touch
   sequence. `gesture_id` currently matches `press_id` for ordinary key touches.
 - Pointer samples include `active_key_*` fields when keyboard layout context is
@@ -53,7 +57,13 @@ include:
 - `external_run_id`
 - `event`
 - `t_uptime_ms`
+- `t_uptime_ns`
 - `t_wall_ms`
+- `t_elapsed_realtime_ns`
+- `t_event_uptime_ms`
+- `t_event_uptime_ns`
+- `t_down_uptime_ms`
+- `t_down_uptime_ns`
 - `target_package`
 - `field_episode_id`
 - `ime_options`

@@ -55,6 +55,7 @@ class ResearchSessionLoggerTest {
         records.forEach { record ->
             assertEquals("input_dynamics_event.v1", record.getString("schema"))
             assertEquals("run-test-001", record.getString("external_run_id"))
+            assertTimestampFields(record)
             assertFalse(record.optBoolean("password_field", false))
         }
     }
@@ -112,6 +113,30 @@ class ResearchSessionLoggerTest {
         assertTrue(pointerSample.has("display_height_px"))
         assertFalse(pointerSample.getBoolean("active_key_present"))
         assertEquals("keyboard_unavailable", pointerSample.getString("active_key_lookup"))
+        assertEquals(1_010_000_000L, pointerSample.getLong("t_event_uptime_ns"))
+        assertEquals(1_000_000_000L, pointerSample.getLong("t_down_uptime_ns"))
+    }
+
+    @Test
+    fun `key records include event timestamp nanosecond companion`() {
+        ResearchSessionLogger.setEnabled(context, true)
+        val sessionId = ResearchSessionLogger.startSession(context, "run-key-timestamp-test")
+        ResearchSessionLogger.onInputFieldStarted(context, textAttributes())
+        ResearchSessionLogger.logKeyEvent(
+            "key_down",
+            pointerId = 0,
+            x = 10,
+            y = 20,
+            eventTime = 1_234L,
+            key = null
+        )
+        ResearchSessionLogger.stopSession(context)
+        ResearchSessionLogger.waitForPendingWrites()
+
+        val keyDown = readRecords(sessionId).first { it.getString("event") == "key_down" }
+        assertTimestampFields(keyDown)
+        assertEquals(1_234L, keyDown.getLong("t_event_uptime_ms"))
+        assertEquals(1_234_000_000L, keyDown.getLong("t_event_uptime_ns"))
     }
 
     @Test
@@ -319,5 +344,14 @@ class ResearchSessionLoggerTest {
     private fun readRecords(sessionId: String): List<JSONObject> {
         val file = ResearchSessionLogger.logDirectory(context).resolve("session-$sessionId.jsonl")
         return file.readLines().filter { it.isNotBlank() }.map { JSONObject(it) }
+    }
+
+    private fun assertTimestampFields(record: JSONObject) {
+        assertTrue(record.has("t_wall_ms"))
+        assertTrue(record.has("t_uptime_ms"))
+        assertTrue(record.has("t_uptime_ns"))
+        assertTrue(record.has("t_elapsed_realtime_ns"))
+        assertEquals(record.getLong("t_uptime_ms") * 1_000_000L, record.getLong("t_uptime_ns"))
+        assertTrue(record.getLong("t_elapsed_realtime_ns") > 0L)
     }
 }

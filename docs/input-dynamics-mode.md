@@ -50,7 +50,12 @@ Input dynamics timing uses Android input timestamps from touch events:
 - Keyboard-view coordinate frame and display metrics for aligning IME-local touch
   records with device-level event streams
 
-Millisecond event time is the primary comparable signal.
+Each JSONL record also includes `t_elapsed_realtime_ns`, a high-resolution
+monotonic timestamp captured when the record is written. Existing Android input
+event timestamps remain millisecond uptime values. The logger includes
+nanosecond-unit companions such as `t_event_uptime_ns` and `t_down_uptime_ns`
+when those millisecond source fields are present; these fields are for unit
+alignment, not extra source-event precision.
 
 ## Event Types
 
@@ -90,6 +95,8 @@ Logs are newline-delimited JSON. Every record has:
 - `event`
 - `t_wall_ms`
 - `t_uptime_ms`
+- `t_uptime_ns`
+- `t_elapsed_realtime_ns`
 
 The current schema value is:
 
@@ -102,6 +109,7 @@ Input-scoped non-password records can also include:
 - `press_id`
 - `gesture_id`
 - `t_event_uptime_ms`
+- `t_event_uptime_ns`
 - `pointer_id`
 - `pointer_index`
 - `pointer_count`
@@ -161,6 +169,8 @@ Input-scoped non-password records can also include:
 - `tool_major_px`
 - `tool_minor_px`
 - `orientation`
+- `t_down_uptime_ms`
+- `t_down_uptime_ns`
 - `coordinate_space`
 - `coordinate_frame_available`
 - `keyboard_view_visible`
