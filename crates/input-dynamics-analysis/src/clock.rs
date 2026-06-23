@@ -102,10 +102,6 @@ pub enum TimestampPrecision {
     Milliseconds,
     /// A millisecond source timestamp represented in nanosecond units.
     MillisecondsConvertedToNanoseconds,
-    /// A timestamp interval bracketed by before/after probes.
-    Bracketed,
-    /// A timestamp derived by estimation rather than direct observation.
-    Estimated,
 }
 
 impl TimestampPrecision {
@@ -116,8 +112,6 @@ impl TimestampPrecision {
             Self::Microseconds => "microseconds",
             Self::Milliseconds => "milliseconds",
             Self::MillisecondsConvertedToNanoseconds => "milliseconds_converted_to_nanoseconds",
-            Self::Bracketed => "bracketed",
-            Self::Estimated => "estimated",
         }
     }
 }
@@ -137,8 +131,6 @@ impl FromStr for TimestampPrecision {
             "microseconds" => Ok(Self::Microseconds),
             "milliseconds" => Ok(Self::Milliseconds),
             "milliseconds_converted_to_nanoseconds" => Ok(Self::MillisecondsConvertedToNanoseconds),
-            "bracketed" => Ok(Self::Bracketed),
-            "estimated" => Ok(Self::Estimated),
             other => Err(ClockParseError::new("timestamp precision", other)),
         }
     }
@@ -296,7 +288,7 @@ pub const fn micros_to_nanos(timestamp_us: i64) -> Option<i64> {
 mod tests {
     use std::str::FromStr;
 
-    use proptest::prelude::{Just, Strategy, any, prop_assert_eq, proptest};
+    use proptest::prelude::{Strategy, any, prop_assert_eq, proptest};
     use serde_json::json;
 
     use crate::clock::{
@@ -304,73 +296,250 @@ mod tests {
         millis_to_nanos,
     };
 
+    #[derive(Clone, Copy, Debug)]
+    struct VocabularyCase<T> {
+        value: T,
+        text: &'static str,
+    }
+
+    const CLOCK_DOMAIN_CASES: &[VocabularyCase<ClockDomain>] = &[
+        VocabularyCase {
+            value: ClockDomain::AndroidUptimeMs,
+            text: "android_uptime_ms",
+        },
+        VocabularyCase {
+            value: ClockDomain::AndroidUptimeNs,
+            text: "android_uptime_ns",
+        },
+        VocabularyCase {
+            value: ClockDomain::DeviceElapsedRealtimeNs,
+            text: "device_elapsed_realtime_ns",
+        },
+        VocabularyCase {
+            value: ClockDomain::KernelGeteventUs,
+            text: "kernel_getevent_us",
+        },
+        VocabularyCase {
+            value: ClockDomain::MediaPtsNs,
+            text: "media_pts_ns",
+        },
+        VocabularyCase {
+            value: ClockDomain::HostProcessMonotonicNs,
+            text: "host_process_monotonic_ns",
+        },
+        VocabularyCase {
+            value: ClockDomain::HostWallMs,
+            text: "host_wall_ms",
+        },
+        VocabularyCase {
+            value: ClockDomain::DeviceWallMs,
+            text: "device_wall_ms",
+        },
+    ];
+
+    const TIMESTAMP_PRECISION_CASES: &[VocabularyCase<TimestampPrecision>] = &[
+        VocabularyCase {
+            value: TimestampPrecision::Nanoseconds,
+            text: "nanoseconds",
+        },
+        VocabularyCase {
+            value: TimestampPrecision::Microseconds,
+            text: "microseconds",
+        },
+        VocabularyCase {
+            value: TimestampPrecision::Milliseconds,
+            text: "milliseconds",
+        },
+        VocabularyCase {
+            value: TimestampPrecision::MillisecondsConvertedToNanoseconds,
+            text: "milliseconds_converted_to_nanoseconds",
+        },
+    ];
+
+    const TIMESTAMP_SOURCE_CASES: &[VocabularyCase<TimestampSource>] = &[
+        VocabularyCase {
+            value: TimestampSource::MotionEvent,
+            text: "motion_event",
+        },
+        VocabularyCase {
+            value: TimestampSource::KeyEvent,
+            text: "key_event",
+        },
+        VocabularyCase {
+            value: TimestampSource::CallbackCapture,
+            text: "callback_capture",
+        },
+        VocabularyCase {
+            value: TimestampSource::SyntheticHandler,
+            text: "synthetic_handler",
+        },
+        VocabularyCase {
+            value: TimestampSource::Writer,
+            text: "writer",
+        },
+        VocabularyCase {
+            value: TimestampSource::AdbShell,
+            text: "adb_shell",
+        },
+        VocabularyCase {
+            value: TimestampSource::HostProcess,
+            text: "host_process",
+        },
+        VocabularyCase {
+            value: TimestampSource::MediaProbe,
+            text: "media_probe",
+        },
+        VocabularyCase {
+            value: TimestampSource::DerivedTransform,
+            text: "derived_transform",
+        },
+    ];
+
+    const ALIGNMENT_STATUS_CASES: &[VocabularyCase<AlignmentStatus>] = &[
+        VocabularyCase {
+            value: AlignmentStatus::Bracketed,
+            text: "bracketed",
+        },
+        VocabularyCase {
+            value: AlignmentStatus::LegacyWallClockBracketed,
+            text: "legacy_wall_clock_bracketed",
+        },
+        VocabularyCase {
+            value: AlignmentStatus::Estimated,
+            text: "estimated",
+        },
+        VocabularyCase {
+            value: AlignmentStatus::UnsupportedClockDomain,
+            text: "unsupported_clock_domain",
+        },
+        VocabularyCase {
+            value: AlignmentStatus::OutsideRange,
+            text: "outside_range",
+        },
+        VocabularyCase {
+            value: AlignmentStatus::StaleInputs,
+            text: "stale_inputs",
+        },
+        VocabularyCase {
+            value: AlignmentStatus::MissingSource,
+            text: "missing_source",
+        },
+        VocabularyCase {
+            value: AlignmentStatus::ProbeFailed,
+            text: "probe_failed",
+        },
+        VocabularyCase {
+            value: AlignmentStatus::NotEstimated,
+            text: "not_estimated",
+        },
+    ];
+
     #[test]
     fn clock_domain_strings_are_stable() {
-        assert_eq!(
-            ClockDomain::DeviceElapsedRealtimeNs.as_str(),
-            "device_elapsed_realtime_ns",
-            "elapsed realtime domain string"
-        );
-        assert_eq!(
-            ClockDomain::from_str("android_uptime_ms"),
-            Ok(ClockDomain::AndroidUptimeMs),
-            "android uptime domain parses"
-        );
-        assert_eq!(
-            serde_json::to_value(ClockDomain::MediaPtsNs).map_err(|err| err.to_string()),
-            Ok(json!("media_pts_ns")),
-            "media PTS domain serializes"
-        );
-        assert_eq!(
-            serde_json::from_value::<ClockDomain>(json!("kernel_getevent_us"))
-                .map_err(|err| err.to_string()),
-            Ok(ClockDomain::KernelGeteventUs),
-            "kernel getevent domain deserializes"
-        );
+        for case in CLOCK_DOMAIN_CASES {
+            assert_eq!(case.value.as_str(), case.text, "clock domain as_str");
+            assert_eq!(case.value.to_string(), case.text, "clock domain Display");
+            assert_eq!(
+                ClockDomain::from_str(case.text),
+                Ok(case.value),
+                "clock domain FromStr"
+            );
+            assert_eq!(
+                serde_json::to_value(case.value).map_err(|err| err.to_string()),
+                Ok(json!(case.text)),
+                "clock domain serde serialize"
+            );
+            assert_eq!(
+                serde_json::from_value::<ClockDomain>(json!(case.text))
+                    .map_err(|err| err.to_string()),
+                Ok(case.value),
+                "clock domain serde deserialize"
+            );
+        }
     }
 
     #[test]
-    fn timestamp_metadata_strings_are_stable() {
-        assert_eq!(
-            TimestampPrecision::MillisecondsConvertedToNanoseconds.as_str(),
-            "milliseconds_converted_to_nanoseconds",
-            "converted precision string"
-        );
-        assert_eq!(
-            TimestampPrecision::from_str("bracketed"),
-            Ok(TimestampPrecision::Bracketed),
-            "bracketed precision parses"
-        );
-        assert_eq!(
-            TimestampSource::CallbackCapture.as_str(),
-            "callback_capture",
-            "callback source string"
-        );
-        assert_eq!(
-            serde_json::to_value(TimestampSource::DerivedTransform).map_err(|err| err.to_string()),
-            Ok(json!("derived_transform")),
-            "derived source serializes"
-        );
+    fn timestamp_precision_strings_are_stable() {
+        for case in TIMESTAMP_PRECISION_CASES {
+            assert_eq!(case.value.as_str(), case.text, "timestamp precision as_str");
+            assert_eq!(
+                case.value.to_string(),
+                case.text,
+                "timestamp precision Display"
+            );
+            assert_eq!(
+                TimestampPrecision::from_str(case.text),
+                Ok(case.value),
+                "timestamp precision FromStr"
+            );
+            assert_eq!(
+                serde_json::to_value(case.value).map_err(|err| err.to_string()),
+                Ok(json!(case.text)),
+                "timestamp precision serde serialize"
+            );
+            assert_eq!(
+                serde_json::from_value::<TimestampPrecision>(json!(case.text))
+                    .map_err(|err| err.to_string()),
+                Ok(case.value),
+                "timestamp precision serde deserialize"
+            );
+        }
+    }
+
+    #[test]
+    fn timestamp_source_strings_are_stable() {
+        for case in TIMESTAMP_SOURCE_CASES {
+            assert_eq!(case.value.as_str(), case.text, "timestamp source as_str");
+            assert_eq!(
+                case.value.to_string(),
+                case.text,
+                "timestamp source Display"
+            );
+            assert_eq!(
+                TimestampSource::from_str(case.text),
+                Ok(case.value),
+                "timestamp source FromStr"
+            );
+            assert_eq!(
+                serde_json::to_value(case.value).map_err(|err| err.to_string()),
+                Ok(json!(case.text)),
+                "timestamp source serde serialize"
+            );
+            assert_eq!(
+                serde_json::from_value::<TimestampSource>(json!(case.text))
+                    .map_err(|err| err.to_string()),
+                Ok(case.value),
+                "timestamp source serde deserialize"
+            );
+        }
     }
 
     #[test]
     fn alignment_status_strings_are_stable() {
-        assert_eq!(
-            AlignmentStatus::UnsupportedClockDomain.as_str(),
-            "unsupported_clock_domain",
-            "unsupported status string"
-        );
-        assert_eq!(
-            AlignmentStatus::from_str("legacy_wall_clock_bracketed"),
-            Ok(AlignmentStatus::LegacyWallClockBracketed),
-            "legacy wall clock status parses"
-        );
-        assert_eq!(
-            serde_json::from_value::<AlignmentStatus>(json!("not_estimated"))
-                .map_err(|err| err.to_string()),
-            Ok(AlignmentStatus::NotEstimated),
-            "not estimated status deserializes"
-        );
+        for case in ALIGNMENT_STATUS_CASES {
+            assert_eq!(case.value.as_str(), case.text, "alignment status as_str");
+            assert_eq!(
+                case.value.to_string(),
+                case.text,
+                "alignment status Display"
+            );
+            assert_eq!(
+                AlignmentStatus::from_str(case.text),
+                Ok(case.value),
+                "alignment status FromStr"
+            );
+            assert_eq!(
+                serde_json::to_value(case.value).map_err(|err| err.to_string()),
+                Ok(json!(case.text)),
+                "alignment status serde serialize"
+            );
+            assert_eq!(
+                serde_json::from_value::<AlignmentStatus>(json!(case.text))
+                    .map_err(|err| err.to_string()),
+                Ok(case.value),
+                "alignment status serde deserialize"
+            );
+        }
     }
 
     #[test]
@@ -390,6 +559,30 @@ mod tests {
         assert!(
             AlignmentStatus::from_str("probably_ok").is_err(),
             "unknown alignment status should fail"
+        );
+    }
+
+    #[test]
+    fn conversion_overflow_boundaries_return_none() {
+        assert_eq!(
+            millis_to_nanos(9_223_372_036_854),
+            Some(9_223_372_036_854_000_000),
+            "largest supported millisecond boundary should convert"
+        );
+        assert_eq!(
+            millis_to_nanos(9_223_372_036_855),
+            None,
+            "overflowing millisecond boundary should fail"
+        );
+        assert_eq!(
+            micros_to_nanos(9_223_372_036_854_775),
+            Some(9_223_372_036_854_775_000),
+            "largest supported microsecond boundary should convert"
+        );
+        assert_eq!(
+            micros_to_nanos(9_223_372_036_854_776),
+            None,
+            "overflowing microsecond boundary should fail"
         );
     }
 
@@ -433,24 +626,5 @@ mod tests {
             );
         }
 
-        #[test]
-        fn known_clock_domain_strings_round_trip(
-            domain in proptest::prop_oneof![
-                Just(ClockDomain::AndroidUptimeMs),
-                Just(ClockDomain::AndroidUptimeNs),
-                Just(ClockDomain::DeviceElapsedRealtimeNs),
-                Just(ClockDomain::KernelGeteventUs),
-                Just(ClockDomain::MediaPtsNs),
-                Just(ClockDomain::HostProcessMonotonicNs),
-                Just(ClockDomain::HostWallMs),
-                Just(ClockDomain::DeviceWallMs),
-            ]
-        ) {
-            prop_assert_eq!(
-                ClockDomain::from_str(domain.as_str()),
-                Ok(domain),
-                "known clock domain string should parse back to the same value"
-            );
-        }
     }
 }

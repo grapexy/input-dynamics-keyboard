@@ -249,6 +249,21 @@ hold/flight timing, landing geometry, pointer movement, and pressure/contact
 ranges. It groups IME records by `press_id`; do not treat it as a direct raw
 `getevent` correlation unless a later artifact explicitly adds clock alignment.
 
+Clock reasoning rules for agents:
+
+- Canonical clock domains are `android_uptime_ms`, `android_uptime_ns`,
+  `device_elapsed_realtime_ns`, `kernel_getevent_us`, `media_pts_ns`,
+  `host_process_monotonic_ns`, `host_wall_ms`, and `device_wall_ms`.
+- Do not subtract or order across different clock domains unless a derived
+  artifact provides a transform, uncertainty, and an alignment status.
+- Treat `legacy_wall_clock_bracketed` and `estimated` as lower-confidence
+  timing claims, `unsupported_clock_domain` as not comparable, and
+  `stale_inputs`, `missing_source`, `outside_range`, or `probe_failed` as
+  blockers for the affected timing claim.
+- Treat older labels such as `ime_uptime_ms`, `getevent_time_us`, and
+  `host_wall_ms_bracketed_device_epoch_ms` as pre-vocabulary legacy labels, not
+  canonical domains.
+
 Then derive a run-level press summary:
 
 ```bash
@@ -269,6 +284,10 @@ idk derive dismissals --recording-dir "runs/$RUN_ID"
 The CLI uses the bundled derivation policy by default. Pass `--policy <path>`
 only when a protocol requires a local classifier-threshold override. Do not use
 input profiles for derivation thresholds; profiles control generated input.
+Current dismissal inferences that relate IME lifecycle events to raw `getevent`
+gestures carry `clock_alignment_status: "unsupported_clock_domain"` and
+`time_delta_status: "legacy_mixed_clock_heuristic"`. Use them as classification
+evidence, not as aligned timing evidence.
 
 To build an agent-readable cross-source recording timeline:
 

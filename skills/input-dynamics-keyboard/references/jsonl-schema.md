@@ -25,6 +25,15 @@ Use this reference when validating logs or changing event fields.
   frame time, and wall clocks are provenance/diagnostics only. Do not compare
   different domains unless a derived artifact supplies an explicit transform
   and uncertainty.
+- Treat the clock vocabulary as closed for writers and validators. Readers that
+  need forward compatibility should preserve unknown strings as unknown
+  metadata, not reinterpret them. Legacy derived labels such as
+  `ime_uptime_ms`, `getevent_time_us`, and
+  `host_wall_ms_bracketed_device_epoch_ms` are pre-vocabulary labels, not
+  canonical clock domains.
+- For records carrying event, capture, and write timestamps together, reason per
+  timestamp role. A single record-level `clock_domain` is not enough to describe
+  all timestamp fields safely.
 - Key and pointer records include `press_id` when they belong to a touch
   sequence. `gesture_id` currently matches `press_id` for ordinary key touches.
 - Pointer samples include `active_key_*` fields when keyboard layout context is
@@ -41,6 +50,11 @@ Use this reference when validating logs or changing event fields.
 - Keep observed and inferred dismissal fields separate. Do not treat app-side
   hide reasons as ground truth unless they are actually observed by the event
   source.
+- Current dismissal inference records may include
+  `clock_alignment_status: "unsupported_clock_domain"` and
+  `time_delta_status: "legacy_mixed_clock_heuristic"` when they relate IME
+  lifecycle uptime to raw `getevent` time. Treat those records as classification
+  evidence, not aligned timing evidence.
 - `target_package` identifies the active editor package reported to the IME.
 - `field_episode_id` groups field-scoped records that appear to belong to one
   visible editing episode. It is a logger heuristic, not app-provided truth.

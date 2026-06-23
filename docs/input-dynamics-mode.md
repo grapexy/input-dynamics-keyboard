@@ -71,6 +71,24 @@ uncertainty used for that comparison.
 | `host_wall_ms` | Host wall clock. | Human-readable provenance only. |
 | `device_wall_ms` | Device wall clock. | Legacy diagnostics only; not ordering truth. |
 
+The canonical vocabulary is closed for writers and validators. Public readers
+that need to inspect newer artifacts should preserve unknown strings as unknown
+metadata instead of silently interpreting them. Adding a new canonical string is
+schema-additive, but strict validation code must be updated before treating it
+as known.
+
+Records with more than one timestamp role must not use a single top-level
+`clock_domain` as if it describes every timestamp. Future additive metadata
+should describe source-event, callback/capture, writer, bracket, and derived
+time claims separately.
+
+Some older derived artifacts may contain pre-vocabulary labels such as
+`ime_uptime_ms`, `getevent_time_us`, or
+`host_wall_ms_bracketed_device_epoch_ms`. Treat those as legacy labels, not
+canonical clock domains. Do not silently alias them to canonical domains unless
+a migration artifact or explicit compatibility layer says how confidence and
+uncertainty are preserved.
+
 ## Event Types
 
 Implemented event types:

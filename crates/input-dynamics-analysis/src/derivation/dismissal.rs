@@ -4,11 +4,14 @@ use std::collections::BTreeSet;
 
 use serde_json::{Value, json};
 
+use crate::clock::{AlignmentStatus, ClockDomain};
 use crate::derivation::touch::{EdgeSide, GestureKind, TouchGesture};
 use crate::derivation::{
     DISMISSAL_INFERENCE_SCHEMA, DismissalDerivationPolicy, ImeEvent, RunContext, confidence_value,
     us_to_ms_floor,
 };
+
+const TIME_DELTA_STATUS: &str = "legacy_mixed_clock_heuristic";
 
 #[derive(Clone, Debug)]
 pub(crate) struct DismissalInference {
@@ -67,6 +70,14 @@ impl DismissalInference {
             "inferred_dismissal": self.inferred.as_str(),
             "confidence": confidence_value(self.confidence_ppm),
             "time_delta_ms": self.delta_ms,
+            "time_delta_status": TIME_DELTA_STATUS,
+            "clock_alignment_status": AlignmentStatus::UnsupportedClockDomain.as_str(),
+            "clock_alignment": {
+                "status": AlignmentStatus::UnsupportedClockDomain.as_str(),
+                "ime_event_clock_domain": ClockDomain::AndroidUptimeMs.as_str(),
+                "getevent_gesture_clock_domain": ClockDomain::KernelGeteventUs.as_str(),
+                "reason": "dismissal inference currently matches IME lifecycle uptime to raw getevent time without a validated alignment transform",
+            },
             "observed_ime_event": self.ime_event.event,
             "target_package": self.ime_event.target_package,
             "derivation_policy": policy_summary,
@@ -207,6 +218,23 @@ mod tests {
                 .map(|inference| inference.inferred.as_str()),
             Some("system_back_edge_gesture"),
             "edge gesture should infer system back"
+        );
+        let inference_json = inferences.first().map(|inference| inference.to_json(None));
+        assert_eq!(
+            inference_json
+                .as_ref()
+                .and_then(|record| record.pointer("/clock_alignment_status"))
+                .and_then(serde_json::Value::as_str),
+            Some("unsupported_clock_domain"),
+            "dismissal correlation should not claim canonical clock alignment"
+        );
+        assert_eq!(
+            inference_json
+                .as_ref()
+                .and_then(|record| record.pointer("/time_delta_status"))
+                .and_then(serde_json::Value::as_str),
+            Some("legacy_mixed_clock_heuristic"),
+            "mixed-domain time deltas should be labeled as legacy heuristic"
         );
     }
 

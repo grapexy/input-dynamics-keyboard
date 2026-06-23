@@ -331,7 +331,11 @@ scraping human-oriented text.
 - `derive dismissals --recording-dir <dir>`: derives touch gestures and dismissal
   inferences from a recording. The command reads coordinate facts from
   `manifest.json` and uses the bundled derivation policy by default. Pass
-  `--policy <path>` for a local policy override.
+  `--policy <path>` for a local policy override. Dismissal inferences that
+  match IME lifecycle uptime against raw `getevent` time are explicitly marked
+  `clock_alignment_status: "unsupported_clock_domain"` and
+  `time_delta_status: "legacy_mixed_clock_heuristic"` until a validated
+  alignment transform exists.
 - `derive timeline --recording-dir <dir>`: writes a cross-source recording
   timeline bundle under `derived/timeline/`. Timeline rows reference source
   records and evidence artifacts; raw streams remain canonical.
@@ -411,6 +415,14 @@ elapsed-realtime timestamp, raw `getevent` timestamps stay in the
 `kernel_getevent_us` domain until aligned, and video frame timestamps will use
 media PTS. Do not treat wall-clock fields as ordering truth; they are
 diagnostic/provenance fields.
+
+The public vocabulary is strict for writers and validators. Existing derived
+artifacts that predate this vocabulary may still contain labels such as
+`ime_uptime_ms`, `getevent_time_us`, or
+`host_wall_ms_bracketed_device_epoch_ms`; treat those as legacy, not canonical.
+Future records that carry event, capture, and write timestamps should describe
+each timestamp role separately instead of relying on one record-level
+`clock_domain`.
 
 When `record` is run with `--with-evidence`, `manifest.json` includes
 `evidence.enabled: true`, `evidence.policy: start_end`, and the start/end
@@ -496,6 +508,11 @@ This writes:
 
 - `derived/touch_gestures.jsonl`
 - `derived/dismissal_inferences.jsonl`
+
+`dismissal_inferences.jsonl` keeps legacy `time_delta_ms` for compatibility,
+but its current IME/getevent timing relationship is not canonical. Treat
+records with `clock_alignment_status: "unsupported_clock_domain"` as
+classification evidence only, not as aligned timing evidence.
 
 To create a cross-source timeline index:
 
