@@ -5,6 +5,9 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
+use input_dynamics_analysis::clock::{
+    ClockDomain, TimestampPrecision, TimestampSource, millis_to_nanos,
+};
 use serde_json::{Value, json};
 
 use crate::commands::path_string;
@@ -62,6 +65,7 @@ pub(crate) fn validate_logs(path: &Path, run_id: Option<&str>) -> CliResult<Valu
         "session_id_mismatch_count": counts.session_id_mismatch_count,
         "event_order_violation_count": counts.event_order_violation_count,
         "password_record_count": counts.password_record_count,
+        "invalid_timestamp_metadata_count": counts.invalid_timestamp_metadata_count,
         "failure_reasons": failure_reasons,
         "diagnostic_reasons": diagnostic_reasons,
     }))
@@ -109,6 +113,7 @@ struct ValidationCounts {
     session_id_mismatch_count: u64,
     event_order_violation_count: u64,
     password_record_count: u64,
+    invalid_timestamp_metadata_count: u64,
     first_session_id: Option<String>,
     seen_session_start: bool,
     seen_session_stop: bool,
@@ -118,6 +123,7 @@ impl ValidationCounts {
     fn update(&mut self, value: &Value) -> CliResult<()> {
         increment(&mut self.selected_count)?;
         self.validate_required_fields(value)?;
+        self.validate_timestamp_metadata(value)?;
         self.validate_touch_sequence_ids(value)?;
         self.validate_session_id(value)?;
         self.validate_event_order(value)?;
@@ -159,6 +165,7 @@ impl ValidationCounts {
             && self.session_id_mismatch_count == 0
             && self.event_order_violation_count == 0
             && self.password_record_count == 0
+            && self.invalid_timestamp_metadata_count == 0
     }
 
     fn failure_reasons(&self) -> Vec<&'static str> {
@@ -205,6 +212,9 @@ impl ValidationCounts {
         if self.password_record_count > 0 {
             reasons.push("password_field_records");
         }
+        if self.invalid_timestamp_metadata_count > 0 {
+            reasons.push("invalid_timestamp_metadata");
+        }
         reasons
     }
 
@@ -246,6 +256,122 @@ impl ValidationCounts {
             }
         }
 
+        Ok(())
+    }
+
+    fn validate_timestamp_metadata(&mut self, value: &Value) -> CliResult<()> {
+        let has_timestamp_metadata = timestamp_role_names()
+            .iter()
+            .any(|role_name| value.get(role_name).is_some())
+            || value.get("t_capture_elapsed_realtime_ns").is_some();
+
+        for role_name in timestamp_role_names() {
+            if let Some(role) = value.get(role_name) {
+                self.validate_timestamp_role(value, role_name, role)?;
+            }
+        }
+
+        if has_timestamp_metadata {
+            self.validate_required_timestamp_roles(value)?;
+            self.validate_capture_write_order(value)?;
+        }
+        Ok(())
+    }
+
+    fn validate_timestamp_role(
+        &mut self,
+        record: &Value,
+        role_name: &str,
+        role: &Value,
+    ) -> CliResult<()> {
+        let mut valid = role.is_object();
+        let clock_domain = required_string(role, "clock_domain");
+        let timestamp_source = required_string(role, "timestamp_source");
+        let timestamp_precision = required_string(role, "timestamp_precision");
+        let field = required_string(role, "field");
+        let expectation = timestamp_role_expectation(record, role_name);
+
+        valid &= clock_domain.is_some_and(|text| text.parse::<ClockDomain>().is_ok());
+        valid &= timestamp_source.is_some_and(|text| text.parse::<TimestampSource>().is_ok());
+        valid &= timestamp_precision.is_some_and(|text| text.parse::<TimestampPrecision>().is_ok());
+        valid &= expectation.is_some_and(|expected| timestamp_role_matches(role, expected));
+
+        if let Some(field_name) = field {
+            valid &= record.get(field_name).and_then(non_negative_i64).is_some();
+        } else {
+            valid = false;
+        }
+
+        valid &= Self::validate_timestamp_companion(record, role, field);
+
+        if !valid {
+            increment(&mut self.invalid_timestamp_metadata_count)?;
+        }
+        Ok(())
+    }
+
+    fn validate_timestamp_companion(record: &Value, role: &Value, field: Option<&str>) -> bool {
+        let Some(field_ns) = role.get("field_ns") else {
+            return role.get("field_ns_precision").is_none();
+        };
+        let Some(field_ns_name) = field_ns.as_str().filter(|text| !text.is_empty()) else {
+            return false;
+        };
+        let Some(field_ns_precision) = required_string(role, "field_ns_precision") else {
+            return false;
+        };
+        let Ok(precision) = field_ns_precision.parse::<TimestampPrecision>() else {
+            return false;
+        };
+        let Some(ns_value) = record.get(field_ns_name).and_then(non_negative_i64) else {
+            return false;
+        };
+        if precision != TimestampPrecision::MillisecondsConvertedToNanoseconds {
+            return true;
+        }
+        let Some(field_name) = field else {
+            return false;
+        };
+        let Some(ms_value) = record.get(field_name).and_then(non_negative_i64) else {
+            return false;
+        };
+        millis_to_nanos(ms_value) == Some(ns_value)
+    }
+
+    fn validate_required_timestamp_roles(&mut self, value: &Value) -> CliResult<()> {
+        let mut valid = value.get("capture_time").is_some();
+        valid &= value.get("write_time").is_some();
+        match value.get("event").and_then(Value::as_str) {
+            Some("pointer_sample") => {
+                valid &= value.get("event_time").is_some();
+                valid &= value.get("down_time").is_some();
+            }
+            Some("system_back_event") => {
+                valid &= value.get("event_time").is_some();
+            }
+            Some(event) if requires_touch_sequence_id(event) && event.starts_with("key_") => {
+                valid &= value.get("event_time").is_some();
+            }
+            Some(_) | None => {}
+        }
+        if !valid {
+            increment(&mut self.invalid_timestamp_metadata_count)?;
+        }
+        Ok(())
+    }
+
+    fn validate_capture_write_order(&mut self, value: &Value) -> CliResult<()> {
+        let capture_time_ns = value
+            .get("t_capture_elapsed_realtime_ns")
+            .and_then(non_negative_i64);
+        let write_time_ns = value
+            .get("t_elapsed_realtime_ns")
+            .and_then(non_negative_i64);
+        if let (Some(capture_ns), Some(write_ns)) = (capture_time_ns, write_time_ns) {
+            if capture_ns > write_ns {
+                increment(&mut self.invalid_timestamp_metadata_count)?;
+            }
+        }
         Ok(())
     }
 
@@ -351,6 +477,112 @@ fn is_non_empty_string(value: &Value) -> bool {
     value.as_str().is_some_and(|text| !text.is_empty())
 }
 
+#[derive(Clone, Copy)]
+struct TimestampRoleExpectation {
+    clock_domain: ClockDomain,
+    timestamp_source: TimestampSource,
+    timestamp_precision: TimestampPrecision,
+    field: &'static str,
+    field_ns: Option<&'static str>,
+    field_ns_precision: Option<TimestampPrecision>,
+}
+
+const fn timestamp_role_names() -> [&'static str; 4] {
+    ["event_time", "down_time", "capture_time", "write_time"]
+}
+
+fn timestamp_role_expectation(record: &Value, role_name: &str) -> Option<TimestampRoleExpectation> {
+    match role_name {
+        "event_time" => event_time_expectation(record),
+        "down_time" => down_time_expectation(record),
+        "capture_time" => Some(TimestampRoleExpectation {
+            clock_domain: ClockDomain::DeviceElapsedRealtimeNs,
+            timestamp_source: TimestampSource::CallbackCapture,
+            timestamp_precision: TimestampPrecision::Nanoseconds,
+            field: "t_capture_elapsed_realtime_ns",
+            field_ns: None,
+            field_ns_precision: None,
+        }),
+        "write_time" => Some(TimestampRoleExpectation {
+            clock_domain: ClockDomain::DeviceElapsedRealtimeNs,
+            timestamp_source: TimestampSource::Writer,
+            timestamp_precision: TimestampPrecision::Nanoseconds,
+            field: "t_elapsed_realtime_ns",
+            field_ns: None,
+            field_ns_precision: None,
+        }),
+        _ => None,
+    }
+}
+
+fn event_time_expectation(record: &Value) -> Option<TimestampRoleExpectation> {
+    let event = record.get("event").and_then(Value::as_str)?;
+    let timestamp_source = match event {
+        "system_back_event" => TimestampSource::KeyEvent,
+        "pointer_sample" | "key_down" | "key_up" | "key_commit" => TimestampSource::MotionEvent,
+        "key_repeat" | "key_long_press" | "key_cancel" => TimestampSource::SyntheticHandler,
+        _ => return None,
+    };
+    Some(android_uptime_millisecond_expectation(
+        timestamp_source,
+        "t_event_uptime_ms",
+        "t_event_uptime_ns",
+    ))
+}
+
+fn down_time_expectation(record: &Value) -> Option<TimestampRoleExpectation> {
+    if record.get("event").and_then(Value::as_str) != Some("pointer_sample") {
+        return None;
+    }
+    Some(android_uptime_millisecond_expectation(
+        TimestampSource::MotionEvent,
+        "t_down_uptime_ms",
+        "t_down_uptime_ns",
+    ))
+}
+
+const fn android_uptime_millisecond_expectation(
+    timestamp_source: TimestampSource,
+    field: &'static str,
+    field_ns: &'static str,
+) -> TimestampRoleExpectation {
+    TimestampRoleExpectation {
+        clock_domain: ClockDomain::AndroidUptimeMs,
+        timestamp_source,
+        timestamp_precision: TimestampPrecision::Milliseconds,
+        field,
+        field_ns: Some(field_ns),
+        field_ns_precision: Some(TimestampPrecision::MillisecondsConvertedToNanoseconds),
+    }
+}
+
+fn timestamp_role_matches(role: &Value, expectation: TimestampRoleExpectation) -> bool {
+    required_string(role, "clock_domain") == Some(expectation.clock_domain.as_str())
+        && required_string(role, "timestamp_source") == Some(expectation.timestamp_source.as_str())
+        && required_string(role, "timestamp_precision")
+            == Some(expectation.timestamp_precision.as_str())
+        && required_string(role, "field") == Some(expectation.field)
+        && optional_string(role, "field_ns") == expectation.field_ns
+        && optional_string(role, "field_ns_precision")
+            == expectation
+                .field_ns_precision
+                .map(TimestampPrecision::as_str)
+}
+
+fn required_string<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+}
+
+fn optional_string<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+}
+
 fn requires_touch_sequence_id(event: &str) -> bool {
     matches!(
         event,
@@ -366,6 +598,13 @@ fn requires_touch_sequence_id(event: &str) -> bool {
 
 fn is_non_negative_integer(value: &Value) -> bool {
     value.as_u64().is_some() || value.as_i64().is_some_and(|number| number >= 0)
+}
+
+fn non_negative_i64(value: &Value) -> Option<i64> {
+    if let Some(number) = value.as_i64().filter(|number| *number >= 0) {
+        return Some(number);
+    }
+    value.as_u64().and_then(|number| i64::try_from(number).ok())
 }
 
 fn record_matches_run_id(value: &Value, run_id: Option<&str>) -> bool {
@@ -598,6 +837,300 @@ mod tests {
         assert_eq!(
             counts.missing_required_field_count, 3,
             "session_id and timestamps should be required"
+        );
+    }
+
+    #[test]
+    fn validation_counts_accept_canonical_timestamp_metadata() {
+        let mut counts = ValidationCounts::default();
+        let record = json!({
+            "schema": "input_dynamics_event.v1",
+            "session_id": "session-1",
+            "event": "key_down",
+            "t_wall_ms": 1_u64,
+            "t_uptime_ms": 2_u64,
+            "t_elapsed_realtime_ns": 5_u64,
+            "t_capture_elapsed_realtime_ns": 4_u64,
+            "t_event_uptime_ms": 5_u64,
+            "t_event_uptime_ns": 5_000_000_u64,
+            "press_id": 1_u64,
+            "gesture_id": 1_u64,
+            "target_package": "org.example.input",
+            "password_field": false,
+            "event_time": {
+                "clock_domain": "android_uptime_ms",
+                "timestamp_source": "motion_event",
+                "timestamp_precision": "milliseconds",
+                "field": "t_event_uptime_ms",
+                "field_ns": "t_event_uptime_ns",
+                "field_ns_precision": "milliseconds_converted_to_nanoseconds"
+            },
+            "capture_time": {
+                "clock_domain": "device_elapsed_realtime_ns",
+                "timestamp_source": "callback_capture",
+                "timestamp_precision": "nanoseconds",
+                "field": "t_capture_elapsed_realtime_ns"
+            },
+            "write_time": {
+                "clock_domain": "device_elapsed_realtime_ns",
+                "timestamp_source": "writer",
+                "timestamp_precision": "nanoseconds",
+                "field": "t_elapsed_realtime_ns"
+            }
+        });
+
+        let update_result = counts.update(&record);
+
+        assert!(
+            update_result.is_ok(),
+            "canonical metadata should update counts"
+        );
+        assert_eq!(
+            counts.invalid_timestamp_metadata_count, 0,
+            "canonical timestamp metadata should not be invalid"
+        );
+    }
+
+    #[test]
+    fn validation_counts_reject_unknown_timestamp_vocabulary() {
+        let mut counts = ValidationCounts::default();
+        let record = json!({
+            "schema": "input_dynamics_event.v1",
+            "session_id": "session-1",
+            "event": "key_down",
+            "t_wall_ms": 1_u64,
+            "t_uptime_ms": 2_u64,
+            "t_elapsed_realtime_ns": 5_u64,
+            "t_capture_elapsed_realtime_ns": 4_u64,
+            "t_event_uptime_ms": 5_u64,
+            "t_event_uptime_ns": 5_000_000_u64,
+            "press_id": 1_u64,
+            "gesture_id": 1_u64,
+            "target_package": "org.example.input",
+            "password_field": false,
+            "event_time": {
+                "clock_domain": "android_uptime_ms",
+                "timestamp_source": "misspelled_source",
+                "timestamp_precision": "milliseconds",
+                "field": "t_event_uptime_ms",
+                "field_ns": "t_event_uptime_ns",
+                "field_ns_precision": "milliseconds_converted_to_nanoseconds"
+            },
+            "capture_time": {
+                "clock_domain": "device_elapsed_realtime_ns",
+                "timestamp_source": "callback_capture",
+                "timestamp_precision": "nanoseconds",
+                "field": "t_capture_elapsed_realtime_ns"
+            },
+            "write_time": {
+                "clock_domain": "device_elapsed_realtime_ns",
+                "timestamp_source": "writer",
+                "timestamp_precision": "nanoseconds",
+                "field": "t_elapsed_realtime_ns"
+            }
+        });
+
+        let update_result = counts.update(&record);
+
+        assert!(
+            update_result.is_ok(),
+            "invalid metadata should still be counted"
+        );
+        assert_eq!(
+            counts.invalid_timestamp_metadata_count, 1,
+            "unknown timestamp source should fail metadata validation"
+        );
+        assert!(
+            counts
+                .failure_reasons()
+                .contains(&"invalid_timestamp_metadata"),
+            "failure reasons should include timestamp metadata"
+        );
+    }
+
+    #[test]
+    fn validation_counts_reject_mismatched_timestamp_companion() {
+        let mut counts = ValidationCounts::default();
+        let record = json!({
+            "schema": "input_dynamics_event.v1",
+            "session_id": "session-1",
+            "event": "pointer_sample",
+            "t_wall_ms": 1_u64,
+            "t_uptime_ms": 2_u64,
+            "t_elapsed_realtime_ns": 5_u64,
+            "t_capture_elapsed_realtime_ns": 4_u64,
+            "t_event_uptime_ms": 5_u64,
+            "t_event_uptime_ns": 6_u64,
+            "t_down_uptime_ms": 4_u64,
+            "t_down_uptime_ns": 4_000_000_u64,
+            "press_id": 1_u64,
+            "gesture_id": 1_u64,
+            "target_package": "org.example.input",
+            "password_field": false,
+            "event_time": {
+                "clock_domain": "android_uptime_ms",
+                "timestamp_source": "motion_event",
+                "timestamp_precision": "milliseconds",
+                "field": "t_event_uptime_ms",
+                "field_ns": "t_event_uptime_ns",
+                "field_ns_precision": "milliseconds_converted_to_nanoseconds"
+            },
+            "down_time": {
+                "clock_domain": "android_uptime_ms",
+                "timestamp_source": "motion_event",
+                "timestamp_precision": "milliseconds",
+                "field": "t_down_uptime_ms",
+                "field_ns": "t_down_uptime_ns",
+                "field_ns_precision": "milliseconds_converted_to_nanoseconds"
+            },
+            "capture_time": {
+                "clock_domain": "device_elapsed_realtime_ns",
+                "timestamp_source": "callback_capture",
+                "timestamp_precision": "nanoseconds",
+                "field": "t_capture_elapsed_realtime_ns"
+            },
+            "write_time": {
+                "clock_domain": "device_elapsed_realtime_ns",
+                "timestamp_source": "writer",
+                "timestamp_precision": "nanoseconds",
+                "field": "t_elapsed_realtime_ns"
+            }
+        });
+
+        let update_result = counts.update(&record);
+
+        assert!(
+            update_result.is_ok(),
+            "invalid metadata should still be counted"
+        );
+        assert_eq!(
+            counts.invalid_timestamp_metadata_count, 1,
+            "mismatched converted ns companion should fail metadata validation"
+        );
+    }
+
+    #[test]
+    fn validation_counts_reject_capture_timestamp_without_metadata() {
+        let mut counts = ValidationCounts::default();
+        let record = json!({
+            "schema": "input_dynamics_event.v1",
+            "session_id": "session-1",
+            "event": "session_start",
+            "t_wall_ms": 1_u64,
+            "t_uptime_ms": 2_u64,
+            "t_capture_elapsed_realtime_ns": 4_u64,
+            "input_actor": "human",
+            "input_controller": null,
+            "input_cadence_policy": "manual"
+        });
+
+        let update_result = counts.update(&record);
+
+        assert!(
+            update_result.is_ok(),
+            "partial new timestamp fields should still be counted"
+        );
+        assert_eq!(
+            counts.invalid_timestamp_metadata_count, 1,
+            "new capture timestamp field without metadata should fail"
+        );
+    }
+
+    #[test]
+    fn validation_counts_reject_wrong_timestamp_role_source() {
+        let mut counts = ValidationCounts::default();
+        let record = json!({
+            "schema": "input_dynamics_event.v1",
+            "session_id": "session-1",
+            "event": "system_back_event",
+            "t_wall_ms": 1_u64,
+            "t_uptime_ms": 2_u64,
+            "t_elapsed_realtime_ns": 5_u64,
+            "t_capture_elapsed_realtime_ns": 4_u64,
+            "t_event_uptime_ms": 5_u64,
+            "t_event_uptime_ns": 5_000_000_u64,
+            "target_package": "org.example.input",
+            "password_field": false,
+            "event_time": {
+                "clock_domain": "android_uptime_ms",
+                "timestamp_source": "synthetic_handler",
+                "timestamp_precision": "milliseconds",
+                "field": "t_event_uptime_ms",
+                "field_ns": "t_event_uptime_ns",
+                "field_ns_precision": "milliseconds_converted_to_nanoseconds"
+            },
+            "capture_time": {
+                "clock_domain": "device_elapsed_realtime_ns",
+                "timestamp_source": "callback_capture",
+                "timestamp_precision": "nanoseconds",
+                "field": "t_capture_elapsed_realtime_ns"
+            },
+            "write_time": {
+                "clock_domain": "device_elapsed_realtime_ns",
+                "timestamp_source": "writer",
+                "timestamp_precision": "nanoseconds",
+                "field": "t_elapsed_realtime_ns"
+            }
+        });
+
+        let update_result = counts.update(&record);
+
+        assert!(
+            update_result.is_ok(),
+            "invalid role source should still be counted"
+        );
+        assert_eq!(
+            counts.invalid_timestamp_metadata_count, 1,
+            "system back event_time must use key_event"
+        );
+    }
+
+    #[test]
+    fn validation_counts_reject_callback_only_event_time() {
+        let mut counts = ValidationCounts::default();
+        let record = json!({
+            "schema": "input_dynamics_event.v1",
+            "session_id": "session-1",
+            "event": "field_enter",
+            "t_wall_ms": 1_u64,
+            "t_uptime_ms": 2_u64,
+            "t_elapsed_realtime_ns": 5_u64,
+            "t_capture_elapsed_realtime_ns": 4_u64,
+            "t_event_uptime_ms": 5_u64,
+            "t_event_uptime_ns": 5_000_000_u64,
+            "target_package": "org.example.input",
+            "password_field": false,
+            "event_time": {
+                "clock_domain": "android_uptime_ms",
+                "timestamp_source": "motion_event",
+                "timestamp_precision": "milliseconds",
+                "field": "t_event_uptime_ms",
+                "field_ns": "t_event_uptime_ns",
+                "field_ns_precision": "milliseconds_converted_to_nanoseconds"
+            },
+            "capture_time": {
+                "clock_domain": "device_elapsed_realtime_ns",
+                "timestamp_source": "callback_capture",
+                "timestamp_precision": "nanoseconds",
+                "field": "t_capture_elapsed_realtime_ns"
+            },
+            "write_time": {
+                "clock_domain": "device_elapsed_realtime_ns",
+                "timestamp_source": "writer",
+                "timestamp_precision": "nanoseconds",
+                "field": "t_elapsed_realtime_ns"
+            }
+        });
+
+        let update_result = counts.update(&record);
+
+        assert!(
+            update_result.is_ok(),
+            "callback-only event_time should still be counted"
+        );
+        assert_eq!(
+            counts.invalid_timestamp_metadata_count, 1,
+            "callback-only records must not carry event_time"
         );
     }
 

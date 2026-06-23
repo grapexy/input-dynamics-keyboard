@@ -63,6 +63,17 @@ object ResearchSessionLogger {
     private const val CHEAP_RECORD_COUNT_MAX_BYTES = 10L * 1024L * 1024L
     private const val FIELD_EPISODE_REUSE_WINDOW_MS = 1_500L
     private const val MIN_ACTIVE_KEY_NEAR_THRESHOLD_PX = 8.0
+    private const val CLOCK_DOMAIN_ANDROID_UPTIME_MS = "android_uptime_ms"
+    private const val CLOCK_DOMAIN_DEVICE_ELAPSED_REALTIME_NS = "device_elapsed_realtime_ns"
+    private const val TIMESTAMP_PRECISION_MILLISECONDS = "milliseconds"
+    private const val TIMESTAMP_PRECISION_NANOSECONDS = "nanoseconds"
+    private const val TIMESTAMP_PRECISION_MILLISECONDS_CONVERTED_TO_NANOSECONDS =
+        "milliseconds_converted_to_nanoseconds"
+    private const val TIMESTAMP_SOURCE_MOTION_EVENT = "motion_event"
+    private const val TIMESTAMP_SOURCE_KEY_EVENT = "key_event"
+    private const val TIMESTAMP_SOURCE_CALLBACK_CAPTURE = "callback_capture"
+    private const val TIMESTAMP_SOURCE_SYNTHETIC_HANDLER = "synthetic_handler"
+    private const val TIMESTAMP_SOURCE_WRITER = "writer"
 
     private val ioExecutor = Executors.newSingleThreadExecutor()
     private val pressIdCounter = AtomicLong(0)
@@ -355,7 +366,8 @@ object ResearchSessionLogger {
                 "dismissal_source_observed" to "system_back",
                 "dismissal_confidence" to "high",
                 "dismissal_evidence" to jsonArrayOf("key_event")
-            )
+            ),
+            eventTime = eventTimeMetadata(TIMESTAMP_SOURCE_KEY_EVENT)
         )
     }
 
@@ -526,7 +538,14 @@ object ResearchSessionLogger {
                 "key_popup_keys" to popupKeysJson(popupKeys)
             )
         }
-        appendEvent(appContext, session, event, fields, includeFieldState = true)
+        appendEvent(
+            appContext,
+            session,
+            event,
+            fields,
+            includeFieldState = true,
+            eventTime = keyEventTimeMetadata(event)
+        )
     }
 
     @JvmStatic
@@ -551,7 +570,8 @@ object ResearchSessionLogger {
     private fun logLifecycleObservation(
         context: Context,
         event: String,
-        fields: Map<String, Any?> = emptyMap()
+        fields: Map<String, Any?> = emptyMap(),
+        eventTime: TimestampMetadata? = null
     ) {
         val appContext = rememberContext(context)
         if (!isEnabled(appContext) || !isSessionActive(appContext)) return
@@ -564,7 +584,8 @@ object ResearchSessionLogger {
             ResearchKeyboardLayoutSnapshot.currentStateFields(appContext) +
                     ResearchCoordinateFrameSnapshot.current(appContext).fields() +
                     fields,
-            fieldSnapshot
+            fieldSnapshot,
+            eventTime = eventTime
         )
     }
 
@@ -763,12 +784,14 @@ object ResearchSessionLogger {
         session: SessionSnapshot,
         event: String,
         fields: Map<String, Any?>,
-        includeFieldState: Boolean
+        includeFieldState: Boolean,
+        eventTime: TimestampMetadata? = null,
+        downTime: TimestampMetadata? = null
     ) {
         appendEvents(
             context,
             session,
-            listOf(PendingEvent(event, fields)),
+            listOf(PendingEvent(event, fields, eventTime, downTime)),
             if (includeFieldState) fieldSnapshot() else null
         )
     }
@@ -778,12 +801,14 @@ object ResearchSessionLogger {
         session: SessionSnapshot,
         event: String,
         fields: Map<String, Any?>,
-        fieldSnapshot: FieldSnapshot
+        fieldSnapshot: FieldSnapshot,
+        eventTime: TimestampMetadata? = null,
+        downTime: TimestampMetadata? = null
     ) {
         appendEvents(
             context,
             session,
-            listOf(PendingEvent(event, fields)),
+            listOf(PendingEvent(event, fields, eventTime, downTime)),
             fieldSnapshot
         )
     }
@@ -796,12 +821,16 @@ object ResearchSessionLogger {
     ) {
         if (events.isEmpty()) return
         val appContext = context.applicationContext
+        val captureTimestamp = CaptureTimestamp.now()
+        val capturedEvents = events.map { CapturedPendingEvent(it, captureTimestamp) }
         ioExecutor.execute {
             val target = resolveLogDirectory(appContext)
             val file = File(target.directory, "session-${session.sessionId}.jsonl")
             FileOutputStream(file, true).use { output ->
-                events.forEach { event ->
+                capturedEvents.forEach { capturedEvent ->
+                    val event = capturedEvent.event
                     val uptimeMs = SystemClock.uptimeMillis()
+                    val elapsedRealtimeNs = SystemClock.elapsedRealtimeNanos()
                     val record = JSONObject()
                         .put("schema", SCHEMA)
                         .put("session_id", session.sessionId)
@@ -810,7 +839,7 @@ object ResearchSessionLogger {
                         .put("t_wall_ms", System.currentTimeMillis())
                         .put("t_uptime_ms", uptimeMs)
                         .put("t_uptime_ns", TimeUnit.MILLISECONDS.toNanos(uptimeMs))
-                        .put("t_elapsed_realtime_ns", SystemClock.elapsedRealtimeNanos())
+                        .put("t_elapsed_realtime_ns", elapsedRealtimeNs)
                         .put("package_name", appContext.packageName)
                         .put("storage", if (target.external) "app_specific_external" else "internal_fallback")
 
@@ -826,6 +855,12 @@ object ResearchSessionLogger {
                     }
                     addNanosecondCompanion(record, "t_event_uptime_ms", "t_event_uptime_ns")
                     addNanosecondCompanion(record, "t_down_uptime_ms", "t_down_uptime_ns")
+                    record
+                        .put("t_capture_elapsed_realtime_ns", capturedEvent.captureTimestamp.elapsedRealtimeNs)
+                        .put("capture_time", captureTimeMetadata().toJson())
+                        .put("write_time", writeTimeMetadata().toJson())
+                    event.eventTime?.let { record.put("event_time", it.toJson()) }
+                    event.downTime?.let { record.put("down_time", it.toJson()) }
 
                     output.write(record.toString().toByteArray(Charsets.UTF_8))
                     output.write('\n'.code)
@@ -938,7 +973,12 @@ object ResearchSessionLogger {
         if (historyIndex != null) {
             fields["history_index"] = historyIndex
         }
-        return PendingEvent("pointer_sample", fields)
+        return PendingEvent(
+            "pointer_sample",
+            fields,
+            eventTime = eventTimeMetadata(TIMESTAMP_SOURCE_MOTION_EVENT),
+            downTime = downTimeMetadata(TIMESTAMP_SOURCE_MOTION_EVENT)
+        )
     }
 
     private fun activeKeyContextFields(keyboard: Keyboard?, x: Float, y: Float): Map<String, Any?> {
@@ -1336,6 +1376,58 @@ object ResearchSessionLogger {
         record.put(nanosField, TimeUnit.MILLISECONDS.toNanos(millis))
     }
 
+    private fun eventTimeMetadata(timestampSource: String): TimestampMetadata =
+        uptimeMillisecondsMetadata(
+            timestampSource = timestampSource,
+            field = "t_event_uptime_ms",
+            fieldNs = "t_event_uptime_ns"
+        )
+
+    private fun keyEventTimeMetadata(event: String): TimestampMetadata =
+        eventTimeMetadata(
+            when (event) {
+                "key_down", "key_up", "key_commit" -> TIMESTAMP_SOURCE_MOTION_EVENT
+                else -> TIMESTAMP_SOURCE_SYNTHETIC_HANDLER
+            }
+        )
+
+    private fun downTimeMetadata(timestampSource: String): TimestampMetadata =
+        uptimeMillisecondsMetadata(
+            timestampSource = timestampSource,
+            field = "t_down_uptime_ms",
+            fieldNs = "t_down_uptime_ns"
+        )
+
+    private fun uptimeMillisecondsMetadata(
+        timestampSource: String,
+        field: String,
+        fieldNs: String
+    ): TimestampMetadata =
+        TimestampMetadata(
+            clockDomain = CLOCK_DOMAIN_ANDROID_UPTIME_MS,
+            timestampSource = timestampSource,
+            timestampPrecision = TIMESTAMP_PRECISION_MILLISECONDS,
+            field = field,
+            fieldNs = fieldNs,
+            fieldNsPrecision = TIMESTAMP_PRECISION_MILLISECONDS_CONVERTED_TO_NANOSECONDS
+        )
+
+    private fun captureTimeMetadata(): TimestampMetadata =
+        TimestampMetadata(
+            clockDomain = CLOCK_DOMAIN_DEVICE_ELAPSED_REALTIME_NS,
+            timestampSource = TIMESTAMP_SOURCE_CALLBACK_CAPTURE,
+            timestampPrecision = TIMESTAMP_PRECISION_NANOSECONDS,
+            field = "t_capture_elapsed_realtime_ns"
+        )
+
+    private fun writeTimeMetadata(): TimestampMetadata =
+        TimestampMetadata(
+            clockDomain = CLOCK_DOMAIN_DEVICE_ELAPSED_REALTIME_NS,
+            timestampSource = TIMESTAMP_SOURCE_WRITER,
+            timestampPrecision = TIMESTAMP_PRECISION_NANOSECONDS,
+            field = "t_elapsed_realtime_ns"
+        )
+
     private fun logFilesJson(context: Context): JSONArray {
         val files = listLogFiles(context)
         val array = JSONArray()
@@ -1503,8 +1595,48 @@ object ResearchSessionLogger {
 
     private data class PendingEvent(
         val name: String,
-        val fields: Map<String, Any?>
+        val fields: Map<String, Any?>,
+        val eventTime: TimestampMetadata? = null,
+        val downTime: TimestampMetadata? = null
     )
+
+    private data class CapturedPendingEvent(
+        val event: PendingEvent,
+        val captureTimestamp: CaptureTimestamp
+    )
+
+    private data class CaptureTimestamp(
+        val elapsedRealtimeNs: Long
+    ) {
+        companion object {
+            fun now(): CaptureTimestamp =
+                CaptureTimestamp(SystemClock.elapsedRealtimeNanos())
+        }
+    }
+
+    private data class TimestampMetadata(
+        val clockDomain: String,
+        val timestampSource: String,
+        val timestampPrecision: String,
+        val field: String,
+        val fieldNs: String? = null,
+        val fieldNsPrecision: String? = null
+    ) {
+        fun toJson(): JSONObject {
+            val json = JSONObject()
+                .put("clock_domain", clockDomain)
+                .put("timestamp_source", timestampSource)
+                .put("timestamp_precision", timestampPrecision)
+                .put("field", field)
+            if (fieldNs != null) {
+                json.put("field_ns", fieldNs)
+            }
+            if (fieldNsPrecision != null) {
+                json.put("field_ns_precision", fieldNsPrecision)
+            }
+            return json
+        }
+    }
 
     private data class FieldSnapshot(
         val targetPackage: String?,

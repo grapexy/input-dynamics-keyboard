@@ -14,10 +14,14 @@ Use this reference when validating logs or changing event fields.
 - `session_start` includes session-level provenance: `input_actor`,
   `input_controller`, `input_cadence_policy`, and optional `input_profile_*`
   fields.
-- Every record includes `t_elapsed_realtime_ns`, a high-resolution monotonic
-  timestamp captured when the record is written. `t_event_uptime_ns` and
+- Every new record includes `t_elapsed_realtime_ns`, a high-resolution
+  monotonic timestamp captured when the record is written, and
+  `t_capture_elapsed_realtime_ns`, a high-resolution monotonic timestamp
+  captured before the async writer enqueue. `t_event_uptime_ns` and
   `t_down_uptime_ns` are nanosecond-unit companions for Android millisecond
-  input event times when those source fields are present.
+  input event times when those source fields are present. Legacy flat fields
+  `t_uptime_ms` and `t_uptime_ns` are writer-time uptime fields, not
+  source-event fields.
 - Preserve clock domains when reasoning from logs. `android_uptime_ms` /
   `android_uptime_ns` are Android input-event source clocks,
   `device_elapsed_realtime_ns` is the elapsed realtime status/control clock,
@@ -34,6 +38,20 @@ Use this reference when validating logs or changing event fields.
 - For records carrying event, capture, and write timestamps together, reason per
   timestamp role. A single record-level `clock_domain` is not enough to describe
   all timestamp fields safely.
+- New timestamp-role objects use `clock_domain`, `timestamp_source`,
+  `timestamp_precision`, and `field`. Objects with converted nanosecond-unit
+  companions also include `field_ns` and `field_ns_precision`.
+- New records include `capture_time` and `write_time`. Event-bearing records
+  include `event_time`; pointer samples also include `down_time`.
+- The validator accepts older `input_dynamics_event.v1` records without
+  timestamp-role metadata as legacy-compatible input. Once a record includes the
+  new capture timestamp or a timestamp-role object, validation requires the
+  complete current metadata shape for that event family.
+- Source mapping: pointer samples use `motion_event`; soft-key semantic records
+  `key_down`, `key_up`, and `key_commit` use `motion_event`; timer-driven
+  soft-key records `key_repeat`, `key_long_press`, and `key_cancel` use
+  `synthetic_handler`; `system_back_event` uses `key_event`; callback-only
+  records omit `event_time`.
 - Key and pointer records include `press_id` when they belong to a touch
   sequence. `gesture_id` currently matches `press_id` for ordinary key touches.
 - Pointer samples include `active_key_*` fields when keyboard layout context is
@@ -89,10 +107,15 @@ include:
 - `t_uptime_ns`
 - `t_wall_ms`
 - `t_elapsed_realtime_ns`
+- `t_capture_elapsed_realtime_ns`
 - `t_event_uptime_ms`
 - `t_event_uptime_ns`
 - `t_down_uptime_ms`
 - `t_down_uptime_ns`
+- `event_time`
+- `down_time`
+- `capture_time`
+- `write_time`
 - `target_package`
 - `field_episode_id`
 - `ime_options`

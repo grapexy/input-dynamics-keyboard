@@ -39,11 +39,12 @@ scope unless a written protocol changes that.
 
 ## Event Sources
 
-Input dynamics timing uses Android input timestamps from touch events:
+Input dynamics timing uses Android input timestamps from touch and key events:
 
 - `MotionEvent.getEventTime()` for millisecond event time in uptime base
 - `MotionEvent.getDownTime()` for gesture start time
 - `MotionEvent.getHistoricalEventTime()` for coalesced move history
+- `KeyEvent.getEventTime()` for observed system Back key event time
 - `MotionEvent.getPressure()` and `MotionEvent.getSize()` when available
 - `MotionEvent` action, pointer, source, device, tool-type, and classification
   metadata for reconstructing touch phases
@@ -51,11 +52,14 @@ Input dynamics timing uses Android input timestamps from touch events:
   records with device-level event streams
 
 Each JSONL record also includes `t_elapsed_realtime_ns`, a high-resolution
-monotonic timestamp captured when the record is written. Existing Android input
-event timestamps remain millisecond uptime values. The logger includes
-nanosecond-unit companions such as `t_event_uptime_ns` and `t_down_uptime_ns`
-when those millisecond source fields are present; these fields are for unit
-alignment, not extra source-event precision.
+monotonic timestamp captured when the record is written, and
+`t_capture_elapsed_realtime_ns`, a high-resolution monotonic timestamp captured
+before the async writer enqueue. Existing Android input event timestamps remain
+millisecond uptime values. The logger includes nanosecond-unit companions such
+as `t_event_uptime_ns` and `t_down_uptime_ns` when those millisecond source
+fields are present; these fields are for unit alignment, not extra source-event
+precision. Legacy flat fields `t_uptime_ms` and `t_uptime_ns` are writer-time
+uptime fields, not source-event fields.
 
 Clock domains are intentionally explicit. Do not compare timestamps from
 different domains unless a derived artifact also names the transform and
@@ -78,9 +82,35 @@ schema-additive, but strict validation code must be updated before treating it
 as known.
 
 Records with more than one timestamp role must not use a single top-level
-`clock_domain` as if it describes every timestamp. Future additive metadata
-should describe source-event, callback/capture, writer, bracket, and derived
-time claims separately.
+`clock_domain` as if it describes every timestamp. New JSONL records describe
+timestamp roles separately with nested metadata objects:
+
+| Object | Applies To | Meaning |
+| --- | --- | --- |
+| `event_time` | Event-bearing records with `t_event_uptime_ms` | Source-event timestamp metadata. |
+| `down_time` | Pointer samples with `t_down_uptime_ms` | Gesture-start timestamp metadata. |
+| `capture_time` | Every new record | Callback/capture timestamp metadata, before async writer enqueue. |
+| `write_time` | Every new record | Async writer timestamp metadata. |
+
+Each timestamp metadata object includes `clock_domain`, `timestamp_source`,
+`timestamp_precision`, and `field`. Objects that reference millisecond source
+fields with nanosecond-unit companions also include `field_ns` and
+`field_ns_precision`.
+
+The validator accepts older `input_dynamics_event.v1` records that predate
+timestamp-role metadata as legacy-compatible input. Once a record includes the
+new capture timestamp or any timestamp-role object, validation requires the
+complete current role metadata for that event family.
+
+Current source mapping:
+
+| Record family | Timestamp source |
+| --- | --- |
+| `pointer_sample` `event_time` / `down_time` | `motion_event` |
+| Soft-key semantic records `key_down`, `key_up`, and `key_commit` | `motion_event` |
+| Timer-driven soft-key semantic records `key_repeat`, `key_long_press`, and `key_cancel` | `synthetic_handler` |
+| `system_back_event` | `key_event` |
+| Lifecycle, field, text-edit, editor-action, suggestion, manual, and session records | No `event_time`; use `capture_time` and `write_time`. |
 
 Some older derived artifacts may contain pre-vocabulary labels such as
 `ime_uptime_ms`, `getevent_time_us`, or
@@ -132,6 +162,9 @@ Logs are newline-delimited JSON. Every record has:
 - `t_uptime_ms`
 - `t_uptime_ns`
 - `t_elapsed_realtime_ns`
+- `t_capture_elapsed_realtime_ns`
+- `capture_time`
+- `write_time`
 
 The current schema value is:
 
@@ -145,6 +178,8 @@ Input-scoped non-password records can also include:
 - `gesture_id`
 - `t_event_uptime_ms`
 - `t_event_uptime_ns`
+- `event_time`
+- `down_time`
 - `pointer_id`
 - `pointer_index`
 - `pointer_count`
@@ -377,7 +412,7 @@ keyboard view is available.
 Example record:
 
 ```json
-{"schema":"input_dynamics_event.v1","session_id":"20260621-102007-197e66cd","external_run_id":"run-YYYYMMDD-HHMMSS-human-android","event":"key_down","t_wall_ms":1782037207000,"t_uptime_ms":67690000,"t_event_uptime_ms":67689950,"target_package":"org.example.input","key_code":97,"key_label":"a","key_output_text":null,"key_class":"letter","key_touch_x_ratio":0.52,"key_touch_y_ratio":0.44,"password_field":false}
+{"schema":"input_dynamics_event.v1","session_id":"20260621-102007-197e66cd","external_run_id":"run-YYYYMMDD-HHMMSS-human-android","event":"key_down","t_wall_ms":1782037207000,"t_uptime_ms":67690000,"t_uptime_ns":67690000000000,"t_elapsed_realtime_ns":1800200300400500,"t_capture_elapsed_realtime_ns":1800200300000000,"t_event_uptime_ms":67689950,"t_event_uptime_ns":67689950000000,"event_time":{"clock_domain":"android_uptime_ms","timestamp_source":"motion_event","timestamp_precision":"milliseconds","field":"t_event_uptime_ms","field_ns":"t_event_uptime_ns","field_ns_precision":"milliseconds_converted_to_nanoseconds"},"capture_time":{"clock_domain":"device_elapsed_realtime_ns","timestamp_source":"callback_capture","timestamp_precision":"nanoseconds","field":"t_capture_elapsed_realtime_ns"},"write_time":{"clock_domain":"device_elapsed_realtime_ns","timestamp_source":"writer","timestamp_precision":"nanoseconds","field":"t_elapsed_realtime_ns"},"target_package":"org.example.input","key_code":97,"key_label":"a","key_output_text":null,"key_class":"letter","key_touch_x_ratio":0.52,"key_touch_y_ratio":0.44,"password_field":false}
 ```
 
 ## Storage

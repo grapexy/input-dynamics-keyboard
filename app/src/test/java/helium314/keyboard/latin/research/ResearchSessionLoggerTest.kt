@@ -2,6 +2,7 @@
 package helium314.keyboard.latin.research
 
 import android.text.InputType
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.inputmethod.EditorInfo
@@ -115,6 +116,24 @@ class ResearchSessionLoggerTest {
         assertEquals("keyboard_unavailable", pointerSample.getString("active_key_lookup"))
         assertEquals(1_010_000_000L, pointerSample.getLong("t_event_uptime_ns"))
         assertEquals(1_000_000_000L, pointerSample.getLong("t_down_uptime_ns"))
+        assertTimestampClaim(
+            pointerSample.getJSONObject("event_time"),
+            clockDomain = "android_uptime_ms",
+            timestampSource = "motion_event",
+            timestampPrecision = "milliseconds",
+            field = "t_event_uptime_ms",
+            fieldNs = "t_event_uptime_ns",
+            fieldNsPrecision = "milliseconds_converted_to_nanoseconds"
+        )
+        assertTimestampClaim(
+            pointerSample.getJSONObject("down_time"),
+            clockDomain = "android_uptime_ms",
+            timestampSource = "motion_event",
+            timestampPrecision = "milliseconds",
+            field = "t_down_uptime_ms",
+            fieldNs = "t_down_uptime_ns",
+            fieldNsPrecision = "milliseconds_converted_to_nanoseconds"
+        )
         assertFalse(pointerSample.getBoolean("keyboard_state_available"))
         assertEquals("keyboard_unavailable", pointerSample.getString("keyboard_state_unavailable_reason"))
         assertTrue(pointerSample.has("keyboard_mode"))
@@ -136,6 +155,14 @@ class ResearchSessionLoggerTest {
             eventTime = 1_234L,
             key = null
         )
+        ResearchSessionLogger.logKeyEvent(
+            "key_repeat",
+            pointerId = 0,
+            x = 10,
+            y = 20,
+            eventTime = 1_240L,
+            key = null
+        )
         ResearchSessionLogger.stopSession(context)
         ResearchSessionLogger.waitForPendingWrites()
 
@@ -143,12 +170,65 @@ class ResearchSessionLoggerTest {
         assertTimestampFields(keyDown)
         assertEquals(1_234L, keyDown.getLong("t_event_uptime_ms"))
         assertEquals(1_234_000_000L, keyDown.getLong("t_event_uptime_ns"))
+        assertTimestampClaim(
+            keyDown.getJSONObject("event_time"),
+            clockDomain = "android_uptime_ms",
+            timestampSource = "motion_event",
+            timestampPrecision = "milliseconds",
+            field = "t_event_uptime_ms",
+            fieldNs = "t_event_uptime_ns",
+            fieldNsPrecision = "milliseconds_converted_to_nanoseconds"
+        )
+        val keyRepeat = readRecords(sessionId).first { it.getString("event") == "key_repeat" }
+        assertTimestampFields(keyRepeat)
+        assertEquals(1_240L, keyRepeat.getLong("t_event_uptime_ms"))
+        assertEquals(1_240_000_000L, keyRepeat.getLong("t_event_uptime_ns"))
+        assertTimestampClaim(
+            keyRepeat.getJSONObject("event_time"),
+            clockDomain = "android_uptime_ms",
+            timestampSource = "synthetic_handler",
+            timestampPrecision = "milliseconds",
+            field = "t_event_uptime_ms",
+            fieldNs = "t_event_uptime_ns",
+            fieldNsPrecision = "milliseconds_converted_to_nanoseconds"
+        )
         assertFalse(keyDown.getBoolean("keyboard_state_available"))
         assertTrue(keyDown.has("keyboard_state_unavailable_reason"))
         assertTrue(keyDown.has("keyboard_mode"))
         assertTrue(keyDown.has("keyboard_element_id"))
         assertTrue(keyDown.has("keyboard_shift_mode"))
         assertTrue(keyDown.has("keyboard_subtype_main_layout_name"))
+    }
+
+    @Test
+    fun `system back records include key event timestamp metadata`() {
+        ResearchSessionLogger.setEnabled(context, true)
+        val sessionId = ResearchSessionLogger.startSession(context, "run-system-back-test")
+        ResearchSessionLogger.onInputFieldStarted(context, textAttributes())
+        ResearchSessionLogger.onSystemBackKeyEvent(
+            context,
+            keyAction = "down",
+            keyCode = KeyEvent.KEYCODE_BACK,
+            eventTime = 2_345L,
+            repeatCount = 0,
+            canceled = false
+        )
+        ResearchSessionLogger.stopSession(context)
+        ResearchSessionLogger.waitForPendingWrites()
+
+        val systemBack = readRecords(sessionId).first { it.getString("event") == "system_back_event" }
+        assertTimestampFields(systemBack)
+        assertEquals(2_345L, systemBack.getLong("t_event_uptime_ms"))
+        assertEquals(2_345_000_000L, systemBack.getLong("t_event_uptime_ns"))
+        assertTimestampClaim(
+            systemBack.getJSONObject("event_time"),
+            clockDomain = "android_uptime_ms",
+            timestampSource = "key_event",
+            timestampPrecision = "milliseconds",
+            field = "t_event_uptime_ms",
+            fieldNs = "t_event_uptime_ns",
+            fieldNsPrecision = "milliseconds_converted_to_nanoseconds"
+        )
     }
 
     @Test
@@ -232,12 +312,16 @@ class ResearchSessionLoggerTest {
         assertEquals("Search", fieldEnterRecords.first().getString("action_label"))
         assertEquals(77, fieldEnterRecords.first().getInt("action_id"))
         assertEquals(42, fieldEnterRecords.first().getInt("editor_field_id"))
+        assertFalse(fieldEnterRecords.first().has("event_time"))
+        assertFalse(fieldEnterRecords.first().has("down_time"))
         assertFalse(fieldEnterRecords.first().getBoolean("keyboard_state_available"))
         assertTrue(fieldEnterRecords.first().has("keyboard_shift_mode"))
 
         val editorAction = records.first { it.getString("event") == "editor_action" }
         assertEquals(episodeId, editorAction.getLong("field_episode_id"))
         assertEquals(EditorInfo.IME_ACTION_SEARCH, editorAction.getInt("action_id"))
+        assertFalse(editorAction.has("event_time"))
+        assertFalse(editorAction.has("down_time"))
         assertEquals("actionSearch", editorAction.getString("action_name"))
         assertEquals(EditorInfo.IME_ACTION_SEARCH, editorAction.getInt("ime_options"))
         assertEquals(InputTypeUtils.IME_ACTION_CUSTOM_LABEL, editorAction.getInt("ime_action"))
@@ -403,7 +487,51 @@ class ResearchSessionLoggerTest {
         assertTrue(record.has("t_uptime_ms"))
         assertTrue(record.has("t_uptime_ns"))
         assertTrue(record.has("t_elapsed_realtime_ns"))
+        assertTrue(record.has("t_capture_elapsed_realtime_ns"))
+        assertTrue(record.has("capture_time"))
+        assertTrue(record.has("write_time"))
         assertEquals(record.getLong("t_uptime_ms") * 1_000_000L, record.getLong("t_uptime_ns"))
         assertTrue(record.getLong("t_elapsed_realtime_ns") > 0L)
+        assertTrue(record.getLong("t_capture_elapsed_realtime_ns") > 0L)
+        assertTrue(record.getLong("t_capture_elapsed_realtime_ns") <= record.getLong("t_elapsed_realtime_ns"))
+        assertTimestampClaim(
+            record.getJSONObject("capture_time"),
+            clockDomain = "device_elapsed_realtime_ns",
+            timestampSource = "callback_capture",
+            timestampPrecision = "nanoseconds",
+            field = "t_capture_elapsed_realtime_ns"
+        )
+        assertTimestampClaim(
+            record.getJSONObject("write_time"),
+            clockDomain = "device_elapsed_realtime_ns",
+            timestampSource = "writer",
+            timestampPrecision = "nanoseconds",
+            field = "t_elapsed_realtime_ns"
+        )
+    }
+
+    private fun assertTimestampClaim(
+        claim: JSONObject,
+        clockDomain: String,
+        timestampSource: String,
+        timestampPrecision: String,
+        field: String,
+        fieldNs: String? = null,
+        fieldNsPrecision: String? = null
+    ) {
+        assertEquals(clockDomain, claim.getString("clock_domain"))
+        assertEquals(timestampSource, claim.getString("timestamp_source"))
+        assertEquals(timestampPrecision, claim.getString("timestamp_precision"))
+        assertEquals(field, claim.getString("field"))
+        if (fieldNs == null) {
+            assertFalse(claim.has("field_ns"))
+        } else {
+            assertEquals(fieldNs, claim.getString("field_ns"))
+        }
+        if (fieldNsPrecision == null) {
+            assertFalse(claim.has("field_ns_precision"))
+        } else {
+            assertEquals(fieldNsPrecision, claim.getString("field_ns_precision"))
+        }
     }
 }
