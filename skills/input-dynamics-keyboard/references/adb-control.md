@@ -139,6 +139,10 @@ Expected status fields include:
 - `input_actor`
 - `input_controller`
 - `input_cadence_policy`
+- `input_scope_ready`
+- `input_scope_state`
+- `current_target_package`
+- `current_field_episode_id`
 - `log_directory`
 - `current_log_file_path`
 - `last_log_file_path`

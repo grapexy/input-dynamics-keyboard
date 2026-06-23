@@ -134,6 +134,8 @@ Status includes:
 - current and last session ids
 - current external run id and last external run id
 - input actor, controller, and cadence policy
+- input-scope readiness fields: `input_scope_ready`, `input_scope_state`,
+  `current_target_package`, and `current_field_episode_id`
 - log directory
 - current or last log file path
 - latest status file path

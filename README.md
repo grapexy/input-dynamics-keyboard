@@ -51,6 +51,8 @@ Use this keyboard only in consented, local research settings.
   runtime metadata and cleanup results.
 - Single-owner stateful CLI sessions; competing starts return a non-destructive
   busy result.
+- Strict live-input readiness gates: agent key commands fail unless the uinput
+  controller is ready and the IME has a known non-password input scope.
 - Device-scoped CLI operation with `--serial` for multi-device hosts.
 
 ## Quick Start

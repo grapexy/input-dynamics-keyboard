@@ -148,6 +148,13 @@ idk hide-keyboard --method edge-back --side right
 idk session stop
 ```
 
+This is the only normal live-input path for agents. `session start` must return
+`input.ready_for_input: true`, and `keyboard ensure-visible` must return an IME
+status with `input_scope_ready: true`, before calling `type`, `tap`, or
+`press`. If those commands fail with `input_scope_state` or
+`session_lock.state` errors, do not inject input through another mechanism;
+repair the session state or stop the session.
+
 If a controller process is interrupted, use `idk session stop` as the repair
 path. It removes stale runtime files, stops IME logging, and reports whether
 the saved virtual touchscreen event path is gone. For controller timing or
@@ -309,20 +316,20 @@ idk session stop
 ```
 
 `type <text>` plans the full string from visible layout keys before pressing any
-key and fails on unsupported characters or hidden keyboard state without
-partial typing. `tap` and `press` also fail when the keyboard is hidden; use
-`keyboard ensure-visible` as the explicit recovery command. It uses the focused
-non-password editable field first, or the only visible non-password editable
-field if none is focused. Use `tap --code=<code>` only when there is no
-semantic command. Use `touch tap --x <x> --y <y>` for diagnostic absolute
-screen coordinates. Use `touch tap --hold-ms <ms>` for one-shot long presses;
-do not invent a separate `touch hold` workflow. Use `touch swipe` and `touch
-path` only when a protocol needs raw absolute gesture control; otherwise prefer
-semantic commands such as `type`, `press`, and `hide-keyboard`. The CLI routes
-session input and `touch` commands through AOSP `/system/bin/uinput` and should
-fail rather than switch to another touch backend. The active input profile can
-sample key-local landing ratios, hold duration, contact fields, and inter-key
-delay.
+key and fails on unsupported characters, hidden keyboard state, controller
+readiness failure, or missing IME input-scope readiness without partial typing.
+`tap` and `press` use the same readiness gate. Use `keyboard ensure-visible` as
+the explicit setup and recovery command. It uses the focused non-password
+editable field first, or the only visible non-password editable field if none
+is focused. Use `tap --code=<code>` only when there is no semantic command. Use
+`touch tap --x <x> --y <y>` for diagnostic absolute screen coordinates. Use
+`touch tap --hold-ms <ms>` for one-shot long presses; do not invent a separate
+`touch hold` workflow. Use `touch swipe` and `touch path` only when a protocol
+needs raw absolute gesture control; otherwise prefer semantic commands such as
+`type`, `press`, and `hide-keyboard`. The CLI routes session input and `touch`
+commands through AOSP `/system/bin/uinput` and should fail rather than switch
+to another touch backend. The active input profile can sample key-local landing
+ratios, hold duration, contact fields, and inter-key delay.
 
 ## Validation
 

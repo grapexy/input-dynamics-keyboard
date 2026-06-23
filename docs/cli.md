@@ -60,6 +60,13 @@ cargo run --quiet -p input-dynamics -- press delete
 cargo run --quiet -p input-dynamics -- session stop
 ```
 
+This is the canonical live-input path. `session start` must report
+`input.ready_for_input: true`, and `keyboard ensure-visible` must report an IME
+status with `input_scope_ready: true` before agents send `type`, `tap`, or
+`press`. These commands fail instead of injecting input when the controller is
+not ready, the IME session is inactive, or the visible keyboard is not attached
+to a known non-password field.
+
 Only one stateful session can be active for a package/device runtime at a time.
 A competing `session start` for the same package and ADB serial returns JSON
 with `ok: false` and `busy: true` before changing IME or logging state. Agents
@@ -227,13 +234,15 @@ scraping human-oriented text.
   screen-space key centers for coordinate calibration.
 - `layout --wait-visible` / `layout --wait-hidden`: waits for keyboard layout
   visibility state before returning.
-- `keyboard ensure-visible`: if the keyboard is already visible, returns
-  success. Otherwise, with an active stateful session, captures the current
-  accessibility hierarchy, taps the focused non-password editable field through
-  the uinput controller, and waits for visible layout state. If no editable
-  field is focused, it may tap the only visible non-password editable field. It
-  fails rather than guessing when there is no such field or more than one
-  candidate.
+- `keyboard ensure-visible`: establishes the single ready state required for
+  logged live input. When the keyboard is already visible, it still requires
+  `input_scope_ready: true`; a merely visible keyboard is not enough. Otherwise,
+  with an active stateful session, it captures the current accessibility
+  hierarchy, taps the focused non-password editable field through the uinput
+  controller, waits for visible layout state, then waits for
+  `input_scope_ready: true`. If no editable field is focused, it may tap the
+  only visible non-password editable field. It fails rather than guessing when
+  there is no such field, more than one candidate, or no loggable input scope.
 - `observe accessibility [--out <xml>] [--full]`: captures the current Android
   accessibility hierarchy with `uiautomator dump`. Without `--out`, the XML is
   included in JSON output. With `--out`, the XML is written to that path and
@@ -252,15 +261,17 @@ scraping human-oriented text.
   gesture and waits for hidden layout state. Options include
   `--method edge-back`, `--side left|right`, and ratio-based geometry overrides.
 - `tap --label <label>` or `tap --code <code>`: taps a key from layout data
-  through the active session controller. Fails if the keyboard view is hidden.
+  through the active session controller. Fails unless the controller reports
+  `ready_for_input: true` and the IME reports `input_scope_ready: true`.
 - `press delete`, `press enter`, `press space`: taps common keys by semantic
-  name through the active session controller. Fails if the keyboard view is
-  hidden.
+  name through the active session controller. Uses the same readiness gate as
+  `tap`.
 - `type <text>`: types text through visible layout keys in the active session.
   The command plans the full string before pressing any key; unsupported
-  characters and hidden keyboard state fail without partial typing. The active
-  input profile can sample key-local landing ratios, hold duration, contact
-  fields, and inter-key delay.
+  characters, inactive controller state, hidden keyboard state, and missing
+  input-scope readiness fail without partial typing. The active input profile
+  can sample key-local landing ratios, hold duration, contact fields, and
+  inter-key delay.
   `--inter-key-delay-ms`, default `40`, is used when the active controller does
   not provide an inter-key delay sample.
 - `touch doctor`: checks AOSP uinput availability and reports the mirrored
@@ -311,9 +322,9 @@ common non-letter keys and corrections. `tap --code=-7` still works for delete,
 and `tap --code -7` is also accepted, but semantic commands are easier for
 agents to generate correctly. `type`, `tap`, `press`, `hide-keyboard`, `touch
 swipe`, and `touch path` require `session start`; `type`, `tap`, and `press`
-also require visible keyboard layout state. Run `keyboard ensure-visible` when
-a non-password editable field should reopen the keyboard. Use `touch tap` only
-for low-level diagnostic absolute taps.
+also require visible keyboard layout state and IME `input_scope_ready: true`.
+Run `keyboard ensure-visible` to establish that state. Use `touch tap` only for
+low-level diagnostic absolute taps.
 
 `session` input and `touch` commands use AOSP `/system/bin/uinput` for
 touchscreen input. They fail if the device does not expose that command instead
