@@ -4,13 +4,40 @@ package helium314.keyboard.latin.research
 import android.content.Context
 import helium314.keyboard.keyboard.Key
 import helium314.keyboard.keyboard.Keyboard
+import helium314.keyboard.keyboard.KeyboardId
 import helium314.keyboard.keyboard.KeyboardSwitcher
 import helium314.keyboard.keyboard.internal.keyboard_parser.floris.KeyCode
+import helium314.keyboard.latin.WordComposer
 import helium314.keyboard.latin.common.Constants
 import org.json.JSONArray
 import org.json.JSONObject
 
 object ResearchKeyboardLayoutSnapshot {
+    fun currentStateFields(context: Context): Map<String, Any?> {
+        val switcher = KeyboardSwitcher.getInstance()
+        val keyboardView = switcher.mainKeyboardView
+        val keyboard = switcher.keyboard
+        val reason = if (keyboardView == null) {
+            "main_keyboard_view_unavailable"
+        } else {
+            "keyboard_unavailable"
+        }
+        return stateFields(
+            keyboard = keyboard,
+            unavailableReason = reason,
+            shiftMode = if (keyboard != null) switcher.keyboardShiftMode else null,
+            script = if (keyboard != null) switcher.currentKeyboardScript else null
+        )
+    }
+
+    fun stateFieldsForKeyboard(keyboard: Keyboard?): Map<String, Any?> =
+        stateFields(
+            keyboard = keyboard,
+            unavailableReason = "keyboard_unavailable",
+            shiftMode = keyboard?.mId?.getKeyboardCapsMode(),
+            script = null
+        )
+
     fun currentLayoutJson(context: Context): JSONObject {
         val switcher = KeyboardSwitcher.getInstance()
         val keyboardView = switcher.mainKeyboardView
@@ -63,7 +90,15 @@ object ResearchKeyboardLayoutSnapshot {
             .put("keyboard_view_location_on_screen_y_px", locationOnScreen[1])
             .put("keyboard_id", keyboard.mId.toString())
             .put("keyboard_mode", keyboard.mId.mMode)
+            .put("keyboard_mode_name", KeyboardId.modeName(keyboard.mId.mMode))
             .put("keyboard_element_id", keyboard.mId.mElementId)
+            .put("keyboard_element_name", KeyboardId.elementIdToName(keyboard.mId.mElementId))
+            .put("keyboard_shift_mode", switcher.keyboardShiftMode)
+            .put("keyboard_shift_mode_name", capsModeName(switcher.keyboardShiftMode))
+            .put("keyboard_subtype_locale", keyboard.mId.mSubtype.locale.toString())
+            .put("keyboard_subtype_locale_tag", keyboard.mId.mSubtype.locale.toLanguageTag())
+            .put("keyboard_subtype_main_layout_name", keyboard.mId.mSubtype.mainLayoutName)
+            .put("keyboard_script", switcher.currentKeyboardScript)
             .put("keyboard_id_width_px", keyboard.mId.mWidth)
             .put("keyboard_id_height_px", keyboard.mId.mHeight)
             .put("keyboard_occupied_width_px", keyboard.mOccupiedWidth)
@@ -88,6 +123,107 @@ object ResearchKeyboardLayoutSnapshot {
             .put("coordinate_space", "screen_px_and_keyboard_view_local_px")
             .put("key_count", 0)
             .put("keys", JSONArray())
+
+    private fun stateFields(
+        keyboard: Keyboard?,
+        unavailableReason: String,
+        shiftMode: Int?,
+        script: String?
+    ): Map<String, Any?> {
+        if (keyboard == null) return unavailableStateFields(unavailableReason)
+
+        val id = keyboard.mId
+        val subtype = id.mSubtype
+        val effectiveShiftMode = shiftMode ?: id.getKeyboardCapsMode()
+        return mapOf(
+            "keyboard_state_available" to true,
+            "keyboard_state_unavailable_reason" to null,
+            "keyboard_id" to id.toString(),
+            "keyboard_mode" to id.mMode,
+            "keyboard_mode_name" to KeyboardId.modeName(id.mMode),
+            "keyboard_element_id" to id.mElementId,
+            "keyboard_element_name" to KeyboardId.elementIdToName(id.mElementId),
+            "keyboard_shift_mode" to effectiveShiftMode,
+            "keyboard_shift_mode_name" to capsModeName(effectiveShiftMode),
+            "keyboard_shifted" to (effectiveShiftMode != WordComposer.CAPS_MODE_OFF),
+            "keyboard_shift_source" to capsModeSource(effectiveShiftMode),
+            "keyboard_caps_locked" to isCapsLocked(effectiveShiftMode),
+            "keyboard_is_alphabet" to id.isAlphabetKeyboard(),
+            "keyboard_is_alpha_or_symbol" to id.isAlphaOrSymbolKeyboard(),
+            "keyboard_is_alphabet_shifted" to id.isAlphabetShifted(),
+            "keyboard_is_alphabet_shifted_manually" to id.isAlphabetShiftedManually(),
+            "keyboard_is_number_layout" to id.isNumberLayout(),
+            "keyboard_is_emoji" to id.isEmojiKeyboard(),
+            "keyboard_subtype_locale" to subtype.locale.toString(),
+            "keyboard_subtype_locale_tag" to subtype.locale.toLanguageTag(),
+            "keyboard_subtype_main_layout_name" to subtype.mainLayoutName,
+            "keyboard_subtype_is_rtl" to subtype.isRtlSubtype,
+            "keyboard_subtype_is_no_language" to subtype.isNoLanguage,
+            "keyboard_script" to script,
+            "keyboard_id_width_px" to id.mWidth,
+            "keyboard_id_height_px" to id.mHeight
+        )
+    }
+
+    private fun unavailableStateFields(reason: String): Map<String, Any?> =
+        mapOf(
+            "keyboard_state_available" to false,
+            "keyboard_state_unavailable_reason" to reason,
+            "keyboard_id" to null,
+            "keyboard_mode" to null,
+            "keyboard_mode_name" to null,
+            "keyboard_element_id" to null,
+            "keyboard_element_name" to null,
+            "keyboard_shift_mode" to null,
+            "keyboard_shift_mode_name" to null,
+            "keyboard_shifted" to null,
+            "keyboard_shift_source" to null,
+            "keyboard_caps_locked" to null,
+            "keyboard_is_alphabet" to null,
+            "keyboard_is_alpha_or_symbol" to null,
+            "keyboard_is_alphabet_shifted" to null,
+            "keyboard_is_alphabet_shifted_manually" to null,
+            "keyboard_is_number_layout" to null,
+            "keyboard_is_emoji" to null,
+            "keyboard_subtype_locale" to null,
+            "keyboard_subtype_locale_tag" to null,
+            "keyboard_subtype_main_layout_name" to null,
+            "keyboard_subtype_is_rtl" to null,
+            "keyboard_subtype_is_no_language" to null,
+            "keyboard_script" to null,
+            "keyboard_id_width_px" to null,
+            "keyboard_id_height_px" to null
+        )
+
+    private fun capsModeName(mode: Int?): String? =
+        when (mode) {
+            WordComposer.CAPS_MODE_OFF -> "off"
+            WordComposer.CAPS_MODE_MANUAL_SHIFTED -> "manual_shifted"
+            WordComposer.CAPS_MODE_MANUAL_SHIFT_LOCKED -> "manual_shift_locked"
+            WordComposer.CAPS_MODE_AUTO_SHIFTED -> "auto_shifted"
+            WordComposer.CAPS_MODE_AUTO_SHIFT_LOCKED -> "auto_shift_locked"
+            else -> null
+        }
+
+    private fun capsModeSource(mode: Int?): String? =
+        when (mode) {
+            WordComposer.CAPS_MODE_OFF -> "off"
+            WordComposer.CAPS_MODE_MANUAL_SHIFTED,
+            WordComposer.CAPS_MODE_MANUAL_SHIFT_LOCKED -> "manual"
+            WordComposer.CAPS_MODE_AUTO_SHIFTED,
+            WordComposer.CAPS_MODE_AUTO_SHIFT_LOCKED -> "auto"
+            else -> null
+        }
+
+    private fun isCapsLocked(mode: Int?): Boolean? =
+        when (mode) {
+            WordComposer.CAPS_MODE_OFF,
+            WordComposer.CAPS_MODE_MANUAL_SHIFTED,
+            WordComposer.CAPS_MODE_AUTO_SHIFTED -> false
+            WordComposer.CAPS_MODE_MANUAL_SHIFT_LOCKED,
+            WordComposer.CAPS_MODE_AUTO_SHIFT_LOCKED -> true
+            else -> null
+        }
 
     private fun putCoordinateFrame(
         json: JSONObject,

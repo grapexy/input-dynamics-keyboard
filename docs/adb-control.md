@@ -153,7 +153,10 @@ builds. Treat the exact result file as the raw command-result source when a
 
 When the keyboard view is visible, each non-spacer key includes code, label,
 local bounds, hit box, and screen tap center fields for calibration and layout
-validation:
+validation. The snapshot also includes keyboard state fields such as
+`keyboard_mode_name`, `keyboard_element_name`, `keyboard_shift_mode_name`,
+`keyboard_subtype_locale_tag`, `keyboard_subtype_main_layout_name`, and
+`keyboard_script`:
 
 ```json
 {

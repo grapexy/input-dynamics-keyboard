@@ -115,6 +115,12 @@ class ResearchSessionLoggerTest {
         assertEquals("keyboard_unavailable", pointerSample.getString("active_key_lookup"))
         assertEquals(1_010_000_000L, pointerSample.getLong("t_event_uptime_ns"))
         assertEquals(1_000_000_000L, pointerSample.getLong("t_down_uptime_ns"))
+        assertFalse(pointerSample.getBoolean("keyboard_state_available"))
+        assertEquals("keyboard_unavailable", pointerSample.getString("keyboard_state_unavailable_reason"))
+        assertTrue(pointerSample.has("keyboard_mode"))
+        assertTrue(pointerSample.has("keyboard_element_id"))
+        assertTrue(pointerSample.has("keyboard_shift_mode"))
+        assertTrue(pointerSample.has("keyboard_subtype_main_layout_name"))
     }
 
     @Test
@@ -137,6 +143,12 @@ class ResearchSessionLoggerTest {
         assertTimestampFields(keyDown)
         assertEquals(1_234L, keyDown.getLong("t_event_uptime_ms"))
         assertEquals(1_234_000_000L, keyDown.getLong("t_event_uptime_ns"))
+        assertFalse(keyDown.getBoolean("keyboard_state_available"))
+        assertTrue(keyDown.has("keyboard_state_unavailable_reason"))
+        assertTrue(keyDown.has("keyboard_mode"))
+        assertTrue(keyDown.has("keyboard_element_id"))
+        assertTrue(keyDown.has("keyboard_shift_mode"))
+        assertTrue(keyDown.has("keyboard_subtype_main_layout_name"))
     }
 
     @Test
@@ -220,6 +232,8 @@ class ResearchSessionLoggerTest {
         assertEquals("Search", fieldEnterRecords.first().getString("action_label"))
         assertEquals(77, fieldEnterRecords.first().getInt("action_id"))
         assertEquals(42, fieldEnterRecords.first().getInt("editor_field_id"))
+        assertFalse(fieldEnterRecords.first().getBoolean("keyboard_state_available"))
+        assertTrue(fieldEnterRecords.first().has("keyboard_shift_mode"))
 
         val editorAction = records.first { it.getString("event") == "editor_action" }
         assertEquals(episodeId, editorAction.getLong("field_episode_id"))

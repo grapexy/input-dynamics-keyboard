@@ -23,6 +23,10 @@ Use this reference when validating logs or changing event fields.
 - Pointer samples include `active_key_*` fields when keyboard layout context is
   available. These fields describe the key hit box or nearest key for that
   sample and the sample's relation to that key.
+- Input-scoped records include `keyboard_state_available` and related keyboard
+  context fields such as `keyboard_id`, `keyboard_mode`, `keyboard_element_id`,
+  shift/caps state, subtype locale, subtype layout, and keyboard script when
+  available.
 - Lifecycle events include `input_view_start`, `input_view_finish`,
   `input_finish`, `ime_window_shown`, and `ime_window_hidden`.
 - Dismissal-evidence events include `ime_hide_request`,
@@ -86,6 +90,30 @@ include:
 - `selection_end_after`
 - `press_id`
 - `gesture_id`
+- `keyboard_state_available`
+- `keyboard_state_unavailable_reason`
+- `keyboard_id`
+- `keyboard_mode`
+- `keyboard_mode_name`
+- `keyboard_element_id`
+- `keyboard_element_name`
+- `keyboard_shift_mode`
+- `keyboard_shift_mode_name`
+- `keyboard_shifted`
+- `keyboard_shift_source`
+- `keyboard_caps_locked`
+- `keyboard_is_alphabet`
+- `keyboard_is_alpha_or_symbol`
+- `keyboard_is_alphabet_shifted`
+- `keyboard_is_alphabet_shifted_manually`
+- `keyboard_is_number_layout`
+- `keyboard_is_emoji`
+- `keyboard_subtype_locale`
+- `keyboard_subtype_locale_tag`
+- `keyboard_subtype_main_layout_name`
+- `keyboard_subtype_is_rtl`
+- `keyboard_subtype_is_no_language`
+- `keyboard_script`
 - `pointer_id`
 - `key_code`
 - `key_label`

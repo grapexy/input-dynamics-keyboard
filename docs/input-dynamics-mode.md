@@ -284,6 +284,16 @@ hit box, inside the visual key bounds, near the bounds, or outside them. When
 layout context is not available, `active_key_present` is false and
 `active_key_lookup` explains why.
 
+Input-scoped records include `keyboard_state_*` and related keyboard context
+fields when the IME can read its current keyboard state. These include
+`keyboard_id`, `keyboard_mode`, `keyboard_mode_name`, `keyboard_element_id`,
+`keyboard_element_name`, `keyboard_shift_mode`, `keyboard_shift_mode_name`,
+`keyboard_shifted`, `keyboard_shift_source`, `keyboard_caps_locked`,
+`keyboard_subtype_locale`, `keyboard_subtype_locale_tag`,
+`keyboard_subtype_main_layout_name`, and `keyboard_script`. When state is not
+available, `keyboard_state_available` is `false` and
+`keyboard_state_unavailable_reason` explains why.
+
 Pointer samples keep the original legacy `action`, `action_name`, `source`, and
 `device_id` fields for compatibility. New records also include the clearer
 aliases `motion_action`, `motion_action_name`, `motion_source`, and

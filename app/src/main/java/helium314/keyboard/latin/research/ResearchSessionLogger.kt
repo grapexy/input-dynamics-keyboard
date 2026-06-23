@@ -461,6 +461,7 @@ object ResearchSessionLogger {
             "key_present" to (key != null)
         )
         fields += coordinateFrame.fieldsForLocalPoint(x, y)
+        fields += ResearchKeyboardLayoutSnapshot.currentStateFields(appContext)
         if (key != null) {
             val code = key.code
             val keyX = key.x
@@ -538,7 +539,13 @@ object ResearchSessionLogger {
         val appContext = rememberContext(context)
         if (!canLogInputEvent(appContext)) return
         val session = currentSessionSnapshot(appContext) ?: return
-        appendEvent(appContext, session, event, fields, includeFieldState = true)
+        appendEvent(
+            appContext,
+            session,
+            event,
+            ResearchKeyboardLayoutSnapshot.currentStateFields(appContext) + fields,
+            includeFieldState = true
+        )
     }
 
     private fun logLifecycleObservation(
@@ -554,7 +561,9 @@ object ResearchSessionLogger {
             appContext,
             session,
             event,
-            fields + ResearchCoordinateFrameSnapshot.current(appContext).fields(),
+            ResearchKeyboardLayoutSnapshot.currentStateFields(appContext) +
+                    ResearchCoordinateFrameSnapshot.current(appContext).fields() +
+                    fields,
             fieldSnapshot
         )
     }
@@ -742,7 +751,9 @@ object ResearchSessionLogger {
     ) {
         val snapshot = fieldSnapshot ?: return
         val sourceField = source?.let { mapOf("field_enter_source" to it) }.orEmpty()
-        val fields = inputFieldFields(inputAttributes) + sourceField
+        val fields = ResearchKeyboardLayoutSnapshot.currentStateFields(context) +
+                inputFieldFields(inputAttributes) +
+                sourceField
         val session = currentSessionSnapshot(context) ?: return
         appendEvent(context, session, "field_enter", fields, snapshot)
     }
@@ -918,6 +929,7 @@ object ResearchSessionLogger {
             "orientation" to orientation
         )
         fields += coordinateFrame.fieldsForLocalPoint(x, y)
+        fields += ResearchKeyboardLayoutSnapshot.stateFieldsForKeyboard(keyboard)
         fields += activeKeyContextFields(keyboard, x, y)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             fields["classification"] = event.classification
