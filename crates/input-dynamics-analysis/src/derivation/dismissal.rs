@@ -1,11 +1,9 @@
 //! Dismissal inference from derived touch gestures and IME lifecycle events.
 
-use std::collections::BTreeSet;
-
 use serde_json::{Value, json};
 
 use crate::clock::{AlignmentStatus, ClockDomain};
-use crate::derivation::touch::{EdgeSide, GestureKind, TouchGesture};
+use crate::derivation::touch::{EdgeSide, TouchGesture};
 use crate::derivation::{
     DISMISSAL_INFERENCE_SCHEMA, DismissalDerivationPolicy, ImeEvent, RunContext, confidence_value,
     us_to_ms_floor,
@@ -25,19 +23,13 @@ pub(crate) struct DismissalInference {
 
 #[derive(Clone, Copy, Debug)]
 enum DismissalKind {
-    SystemBackEdgeGesture,
-    OutsideKeyboardTap,
     FocusOrAppHideUnknown,
-    Unknown,
 }
 
 impl DismissalKind {
     const fn as_str(self) -> &'static str {
         match self {
-            Self::SystemBackEdgeGesture => "system_back_edge_gesture",
-            Self::OutsideKeyboardTap => "outside_keyboard_tap",
             Self::FocusOrAppHideUnknown => "focus_or_app_hide_unknown",
-            Self::Unknown => "unknown",
         }
     }
 }
@@ -70,13 +62,13 @@ impl DismissalInference {
             "inferred_dismissal": self.inferred.as_str(),
             "confidence": confidence_value(self.confidence_ppm),
             "time_delta_ms": self.delta_ms,
-            "time_delta_status": TIME_DELTA_STATUS,
+            "time_delta_status": self.delta_ms.map(|_delta_ms| TIME_DELTA_STATUS),
             "clock_alignment_status": AlignmentStatus::UnsupportedClockDomain.as_str(),
             "clock_alignment": {
                 "status": AlignmentStatus::UnsupportedClockDomain.as_str(),
                 "ime_event_clock_domain": ClockDomain::AndroidUptimeMs.as_str(),
                 "getevent_gesture_clock_domain": ClockDomain::KernelGeteventUs.as_str(),
-                "reason": "dismissal inference currently matches IME lifecycle uptime to raw getevent time without a validated alignment transform",
+                "reason": "getevent gesture correlation is disabled until a validated alignment transform exists",
             },
             "observed_ime_event": self.ime_event.event,
             "target_package": self.ime_event.target_package,
@@ -87,75 +79,27 @@ impl DismissalInference {
 }
 
 pub(crate) fn derive_dismissal_inferences(
-    gestures: &[TouchGesture],
+    _gestures: &[TouchGesture],
     ime_events: &[ImeEvent],
     context: &RunContext,
-    policy: DismissalDerivationPolicy,
+    _policy: DismissalDerivationPolicy,
 ) -> Vec<DismissalInference> {
     let hide_events = ime_events
         .iter()
         .filter(|event| event.event == "ime_hide_window_called")
         .collect::<Vec<_>>();
-    let mut used_gestures = BTreeSet::new();
     let mut inferences = Vec::new();
     for (index, hide_event) in hide_events.iter().enumerate() {
-        let maybe_gesture = nearest_preceding_gesture(gestures, hide_event, &used_gestures, policy);
-        if let Some(gesture) = maybe_gesture {
-            used_gestures.insert(gesture.id.clone());
-            let delta_ms = hide_event
-                .t_uptime_ms
-                .checked_sub(us_to_ms_floor(gesture.end.t_getevent_us));
-            let (inferred, confidence_ppm) = dismissal_for_gesture(gesture);
-            inferences.push(DismissalInference {
-                id: inference_id(context, index),
-                inferred,
-                confidence_ppm,
-                gesture: Some(gesture.clone()),
-                ime_event: (*hide_event).clone(),
-                delta_ms,
-            });
-        } else {
-            inferences.push(DismissalInference {
-                id: inference_id(context, index),
-                inferred: DismissalKind::Unknown,
-                confidence_ppm: 250_000,
-                gesture: None,
-                ime_event: (*hide_event).clone(),
-                delta_ms: None,
-            });
-        }
+        inferences.push(DismissalInference {
+            id: inference_id(context, index),
+            inferred: DismissalKind::FocusOrAppHideUnknown,
+            confidence_ppm: 250_000,
+            gesture: None,
+            ime_event: (*hide_event).clone(),
+            delta_ms: None,
+        });
     }
     inferences
-}
-
-fn nearest_preceding_gesture<'a>(
-    gestures: &'a [TouchGesture],
-    hide_event: &ImeEvent,
-    used_gestures: &BTreeSet<String>,
-    policy: DismissalDerivationPolicy,
-) -> Option<&'a TouchGesture> {
-    gestures
-        .iter()
-        .filter(|gesture| !used_gestures.contains(&gesture.id))
-        .filter_map(|gesture| {
-            let end_ms = us_to_ms_floor(gesture.end.t_getevent_us);
-            let delta = hide_event.t_uptime_ms.checked_sub(end_ms)?;
-            (0..=policy.hide_correlation_window_ms)
-                .contains(&delta)
-                .then_some((delta, gesture))
-        })
-        .min_by_key(|item| item.0)
-        .map(|(_delta, gesture)| gesture)
-}
-
-const fn dismissal_for_gesture(gesture: &TouchGesture) -> (DismissalKind, i64) {
-    match gesture.classification.kind {
-        GestureKind::ScreenEdgeInwardSwipe => (DismissalKind::SystemBackEdgeGesture, 900_000),
-        GestureKind::OutsideKeyboardTap => (DismissalKind::OutsideKeyboardTap, 750_000),
-        GestureKind::KeyboardAreaTouch
-        | GestureKind::TapUnknownArea
-        | GestureKind::UnknownTouch => (DismissalKind::FocusOrAppHideUnknown, 400_000),
-    }
 }
 
 fn inference_id(context: &RunContext, index: usize) -> String {
@@ -172,7 +116,7 @@ mod tests {
     use crate::derivation::{ImeEvent, RunContext, ScreenConfig, default_derivation_policy};
 
     #[test]
-    fn edge_gesture_infers_system_back_dismissal() {
+    fn mixed_clock_edge_gesture_does_not_infer_system_back_dismissal() {
         let records = vec![
             touch_frame(FrameFixture::new(1, 100_000_000, 1430, 1500, 7).started()),
             touch_frame(FrameFixture::new(2, 100_080_000, 850, 1600, 7).ended()),
@@ -216,10 +160,17 @@ mod tests {
             inferences
                 .first()
                 .map(|inference| inference.inferred.as_str()),
-            Some("system_back_edge_gesture"),
-            "edge gesture should infer system back"
+            Some("focus_or_app_hide_unknown"),
+            "unsupported mixed-clock correlation should not infer system back"
         );
         let inference_json = inferences.first().map(|inference| inference.to_json(None));
+        assert_eq!(
+            inference_json
+                .as_ref()
+                .and_then(|record| record.pointer("/time_delta_ms")),
+            Some(&serde_json::Value::Null),
+            "unsupported mixed-clock correlation should not emit a time delta"
+        );
         assert_eq!(
             inference_json
                 .as_ref()
@@ -233,8 +184,8 @@ mod tests {
                 .as_ref()
                 .and_then(|record| record.pointer("/time_delta_status"))
                 .and_then(serde_json::Value::as_str),
-            Some("legacy_mixed_clock_heuristic"),
-            "mixed-domain time deltas should be labeled as legacy heuristic"
+            None,
+            "missing time deltas should not receive a legacy-delta status"
         );
     }
 

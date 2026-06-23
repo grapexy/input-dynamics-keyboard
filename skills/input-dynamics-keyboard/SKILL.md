@@ -238,7 +238,7 @@ Unless `--no-video` was explicitly used, it should include `video.enabled:
 true`, `video.required: true`, `video.local_path`, and a non-null
 `video.file.sha256`.
 
-To derive touch gestures and dismissal inferences from a completed run:
+To derive per-press summaries from a completed run:
 
 ```bash
 idk derive presses --recording-dir "runs/$RUN_ID"
@@ -284,10 +284,11 @@ idk derive dismissals --recording-dir "runs/$RUN_ID"
 The CLI uses the bundled derivation policy by default. Pass `--policy <path>`
 only when a protocol requires a local classifier-threshold override. Do not use
 input profiles for derivation thresholds; profiles control generated input.
-Current dismissal inferences that relate IME lifecycle events to raw `getevent`
-gestures carry `clock_alignment_status: "unsupported_clock_domain"` and
-`time_delta_status: "legacy_mixed_clock_heuristic"`. Use them as classification
-evidence, not as aligned timing evidence.
+Until a validated alignment transform exists, dismissal inference does not join
+IME lifecycle events to raw `getevent` gestures. Records with
+`clock_alignment_status: "unsupported_clock_domain"` are IME lifecycle evidence
+only, not aligned getevent timing evidence. Older records may include
+`time_delta_ms` with `time_delta_status: "legacy_mixed_clock_heuristic"`.
 
 To build an agent-readable cross-source recording timeline:
 

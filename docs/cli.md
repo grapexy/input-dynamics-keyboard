@@ -331,11 +331,11 @@ scraping human-oriented text.
 - `derive dismissals --recording-dir <dir>`: derives touch gestures and dismissal
   inferences from a recording. The command reads coordinate facts from
   `manifest.json` and uses the bundled derivation policy by default. Pass
-  `--policy <path>` for a local policy override. Dismissal inferences that
-  match IME lifecycle uptime against raw `getevent` time are explicitly marked
-  `clock_alignment_status: "unsupported_clock_domain"` and
-  `time_delta_status: "legacy_mixed_clock_heuristic"` until a validated
-  alignment transform exists.
+  `--policy <path>` for a local policy override. Until a validated alignment
+  transform exists, dismissal inference does not join IME lifecycle uptime to
+  raw `getevent` gestures. Records are marked
+  `clock_alignment_status: "unsupported_clock_domain"` when getevent
+  correlation is unavailable.
 - `derive timeline --recording-dir <dir>`: writes a cross-source recording
   timeline bundle under `derived/timeline/`. Timeline rows reference source
   records and evidence artifacts; raw streams remain canonical.
@@ -509,10 +509,11 @@ This writes:
 - `derived/touch_gestures.jsonl`
 - `derived/dismissal_inferences.jsonl`
 
-`dismissal_inferences.jsonl` keeps legacy `time_delta_ms` for compatibility,
-but its current IME/getevent timing relationship is not canonical. Treat
-records with `clock_alignment_status: "unsupported_clock_domain"` as
-classification evidence only, not as aligned timing evidence.
+`dismissal_inferences.jsonl` does not infer a getevent-backed dismissal cause
+until a validated alignment transform exists. Treat records with
+`clock_alignment_status: "unsupported_clock_domain"` as IME lifecycle evidence
+only, not as aligned getevent timing evidence. Older records may include
+`time_delta_ms` with `time_delta_status: "legacy_mixed_clock_heuristic"`.
 
 To create a cross-source timeline index:
 

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
+use crate::clock::ClockDomain;
 use crate::derivation::{
     DERIVATION_SUMMARY_SCHEMA, DeriveError, DeriveResult, PRESS_SUMMARY_SCHEMA, RunContext,
     find_ime_jsonl, path_text, required_i64, squared_distance, string_field,
@@ -567,7 +568,7 @@ fn press_summary_json(input: &PressSummaryInput<'_>) -> DeriveResult<Value> {
         "password_field": false,
         "source": "ime_jsonl",
         "source_ref": source_ref(input.recording_dir, input.ime_jsonl, input.key.press_id, &input.builder.line_indexes),
-        "clock_domain": "ime_uptime_ms",
+        "clock_domain": ClockDomain::AndroidUptimeMs.as_str(),
         "clock_alignment": {
             "getevent": CLOCK_ALIGNMENT_STATUS,
         },

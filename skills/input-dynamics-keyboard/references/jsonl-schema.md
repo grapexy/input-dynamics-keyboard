@@ -50,11 +50,11 @@ Use this reference when validating logs or changing event fields.
 - Keep observed and inferred dismissal fields separate. Do not treat app-side
   hide reasons as ground truth unless they are actually observed by the event
   source.
-- Current dismissal inference records may include
-  `clock_alignment_status: "unsupported_clock_domain"` and
-  `time_delta_status: "legacy_mixed_clock_heuristic"` when they relate IME
-  lifecycle uptime to raw `getevent` time. Treat those records as classification
-  evidence, not aligned timing evidence.
+- Current dismissal inference records use
+  `clock_alignment_status: "unsupported_clock_domain"` when getevent
+  correlation is unavailable. Treat those records as IME lifecycle evidence, not
+  aligned getevent timing evidence. Older records may include `time_delta_ms`
+  with `time_delta_status: "legacy_mixed_clock_heuristic"`.
 - `target_package` identifies the active editor package reported to the IME.
 - `field_episode_id` groups field-scoped records that appear to belong to one
   visible editing episode. It is a logger heuristic, not app-provided truth.

@@ -10,6 +10,7 @@ use std::time::UNIX_EPOCH;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::clock::{AlignmentStatus, ClockDomain};
 use crate::derivation::jsonl::write_jsonl;
 use crate::derivation::{
     DeriveError, DeriveResult, TIMELINE_EVENT_SCHEMA, TIMELINE_INDEX_SCHEMA, find_ime_jsonl,
@@ -17,7 +18,7 @@ use crate::derivation::{
 };
 
 const ORDER_METHOD: &str = "best_effort_clock_domain_milliseconds_then_source_order";
-const CLOCK_ALIGNMENT_STATUS: &str = "not_estimated";
+const CLOCK_ALIGNMENT_STATUS: &str = AlignmentStatus::NotEstimated.as_str();
 const IME_SOURCE_RANK: u8 = 10;
 const TOUCH_GESTURE_SOURCE_RANK: u8 = 20;
 const DISMISSAL_SOURCE_RANK: u8 = 30;
@@ -289,7 +290,7 @@ fn append_ime_records(
             "source_layer": "raw_ime",
             "source": "ime_jsonl",
             "source_ref": source_ref(recording_dir, path, record.line_index, extra_refs(&record.value)),
-            "clock_domain": "ime_uptime_ms",
+            "clock_domain": ClockDomain::AndroidUptimeMs.as_str(),
             "ordering": ordering_json(ORDER_METHOD, CLOCK_ALIGNMENT_STATUS),
             "t_uptime_ms": record.value.get("t_uptime_ms").cloned().unwrap_or(Value::Null),
             "t_wall_ms": record.value.get("t_wall_ms").cloned().unwrap_or(Value::Null),
@@ -365,7 +366,7 @@ fn touch_gesture_timeline_record(
         "source_layer": "derived",
         "source": "derived_touch_gesture",
         "source_ref": source_ref(recording_dir, path, line_index, extra_refs(record)),
-        "clock_domain": "getevent_time_us",
+        "clock_domain": ClockDomain::KernelGeteventUs.as_str(),
         "ordering": ordering_json(ORDER_METHOD, CLOCK_ALIGNMENT_STATUS),
         "external_run_id": record.get("external_run_id").cloned().unwrap_or(Value::Null),
         "session_id": record.get("session_id").cloned().unwrap_or(Value::Null),
@@ -396,12 +397,15 @@ fn dismissal_timeline_record(
         "source_layer": "derived",
         "source": "derived_dismissal_inference",
         "source_ref": source_ref(recording_dir, path, line_index, extra_refs(record)),
-        "clock_domain": "ime_uptime_ms",
+        "clock_domain": ClockDomain::AndroidUptimeMs.as_str(),
         "ordering": ordering_json(ORDER_METHOD, CLOCK_ALIGNMENT_STATUS),
         "inference_id": record.get("inference_id").cloned().unwrap_or(Value::Null),
         "inferred_dismissal": record.get("inferred_dismissal").cloned().unwrap_or(Value::Null),
         "confidence": record.get("confidence").cloned().unwrap_or(Value::Null),
         "time_delta_ms": record.get("time_delta_ms").cloned().unwrap_or(Value::Null),
+        "time_delta_status": record.get("time_delta_status").cloned().unwrap_or(Value::Null),
+        "clock_alignment_status": record.get("clock_alignment_status").cloned().unwrap_or(Value::Null),
+        "clock_alignment": record.get("clock_alignment").cloned().unwrap_or(Value::Null),
         "observed_ime_event": record.get("observed_ime_event").cloned().unwrap_or(Value::Null),
         "target_package": record.get("target_package").cloned().unwrap_or(Value::Null),
         "evidence": record.get("evidence").cloned().unwrap_or(Value::Null),
@@ -431,8 +435,9 @@ fn append_video_records(
                 "path": relative_path_text(recording_dir, path),
                 "phase": phase,
             },
-            "clock_domain": "host_wall_ms_bracketed_device_epoch_ms",
-            "ordering": ordering_json(ORDER_METHOD, CLOCK_ALIGNMENT_STATUS),
+            "clock_domain": ClockDomain::HostWallMs.as_str(),
+            "clock_alignment_status": AlignmentStatus::LegacyWallClockBracketed.as_str(),
+            "ordering": ordering_json(ORDER_METHOD, AlignmentStatus::LegacyWallClockBracketed.as_str()),
             "phase": phase,
             "remote_path": timing_record.get("remote_path").cloned().unwrap_or(Value::Null),
             "local_path": timing_record.get("local_path").cloned().unwrap_or(Value::Null),
@@ -966,8 +971,24 @@ mod tests {
                         .pointer("/source_ref/gesture_id")
                         .and_then(Value::as_str)
                         == Some("gesture-1")
+                    && record.get("clock_domain").and_then(Value::as_str)
+                        == Some("kernel_getevent_us")
             }),
-            "touch gesture source refs should be present"
+            "touch gesture source refs and canonical clock domain should be present"
+        );
+        assert!(
+            output.iter().any(|record| {
+                record.get("record_kind").and_then(Value::as_str) == Some("dismissal_inference")
+                    && record.get("clock_alignment_status").and_then(Value::as_str)
+                        == Some("unsupported_clock_domain")
+                    && record.get("time_delta_status").and_then(Value::as_str)
+                        == Some("legacy_mixed_clock_heuristic")
+                    && record
+                        .pointer("/clock_alignment/status")
+                        .and_then(Value::as_str)
+                        == Some("unsupported_clock_domain")
+            }),
+            "dismissal timeline rows should preserve clock-safety metadata"
         );
         let Some(index) = assert_ok(read_json(&timeline_dir.join("index.json")), "read index")
         else {
@@ -1076,6 +1097,15 @@ mod tests {
             video_phases,
             vec!["start", "stop"],
             "video start and stop markers should be present in timeline order"
+        );
+        assert!(
+            output.iter().any(|record| {
+                record.get("record_kind").and_then(Value::as_str) == Some("video_marker")
+                    && record.get("clock_domain").and_then(Value::as_str) == Some("host_wall_ms")
+                    && record.get("clock_alignment_status").and_then(Value::as_str)
+                        == Some("legacy_wall_clock_bracketed")
+            }),
+            "video markers should expose canonical clock domain and legacy alignment status"
         );
         let Some(index) = assert_ok(read_json(&timeline_dir.join("index.json")), "read index")
         else {
@@ -1233,6 +1263,15 @@ mod tests {
             "inference_id": "dismissal-1",
             "inferred_dismissal": "system_back_edge_gesture",
             "confidence": {"decimal_ppm": 900_000_i64},
+            "time_delta_ms": 10_i64,
+            "time_delta_status": "legacy_mixed_clock_heuristic",
+            "clock_alignment_status": "unsupported_clock_domain",
+            "clock_alignment": {
+                "status": "unsupported_clock_domain",
+                "ime_event_clock_domain": "android_uptime_ms",
+                "getevent_gesture_clock_domain": "kernel_getevent_us",
+                "reason": "fixture"
+            },
             "target_package": "example.app",
             "evidence": [
                 {"kind": "getevent_gesture", "gesture_id": "gesture-1"},
