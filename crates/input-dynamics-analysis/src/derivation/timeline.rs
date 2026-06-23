@@ -425,7 +425,31 @@ fn append_video_records(
         let Some(phase_record) = timing_record.get(phase) else {
             continue;
         };
-        let value = json!({
+        let marker_clock = video_marker_clock(phase_record);
+        let value = if let Some(clock) = marker_clock {
+            json!({
+                "schema": TIMELINE_EVENT_SCHEMA,
+                "record_kind": "video_marker",
+                "event": format!("video_{phase}"),
+                "source_layer": "video",
+                "source": "video_timing",
+                "source_ref": {
+                    "path": relative_path_text(recording_dir, path),
+                    "phase": phase,
+                },
+                "clock_domain": ClockDomain::DeviceElapsedRealtimeNs.as_str(),
+                "clock_alignment_status": AlignmentStatus::NotEstimated.as_str(),
+                "ordering": ordering_json(ORDER_METHOD, AlignmentStatus::NotEstimated.as_str()),
+                "phase": phase,
+                "t_elapsed_realtime_ns": clock.elapsed_realtime_ns,
+                "remote_path": timing_record.get("remote_path").cloned().unwrap_or(Value::Null),
+                "local_path": timing_record.get("local_path").cloned().unwrap_or(Value::Null),
+                "clock_bracket": clock.bracket,
+                "marker": phase_record,
+                "file": timing_record.get("file").cloned().unwrap_or(Value::Null),
+            })
+        } else {
+            json!({
             "schema": TIMELINE_EVENT_SCHEMA,
             "record_kind": "video_marker",
             "event": format!("video_{phase}"),
@@ -443,11 +467,14 @@ fn append_video_records(
             "local_path": timing_record.get("local_path").cloned().unwrap_or(Value::Null),
             "marker": phase_record,
             "file": timing_record.get("file").cloned().unwrap_or(Value::Null),
-        });
+            })
+        };
         timeline.push(TimelineRecord {
             order: TimelineOrder {
                 group: video_order_group(phase),
-                time_ms: video_order_time_ms(phase_record),
+                time_ms: marker_clock
+                    .and_then(|clock| elapsed_realtime_ms(clock.elapsed_realtime_ns))
+                    .or_else(|| video_order_time_ms(phase_record)),
                 source_rank: VIDEO_SOURCE_RANK,
                 source_line_index: None,
             },
@@ -772,6 +799,37 @@ fn video_order_time_ms(record: &Value) -> Option<i64> {
     record
         .get("host_wall_ms_before_device_timestamp")
         .and_then(Value::as_i64)
+}
+
+#[derive(Clone, Copy)]
+struct VideoMarkerClock<'a> {
+    elapsed_realtime_ns: i64,
+    bracket: &'a Value,
+}
+
+fn video_marker_clock(record: &Value) -> Option<VideoMarkerClock<'_>> {
+    let before = record.get("before")?;
+    let _after = record.get("after")?;
+    let probe = before.get("device_clock_probe")?;
+    if probe.get("schema").and_then(Value::as_str) != Some("input_dynamics_device_clock_probe.v1") {
+        return None;
+    }
+    if probe.get("canonical_clock_domain").and_then(Value::as_str)
+        != Some(ClockDomain::DeviceElapsedRealtimeNs.as_str())
+    {
+        return None;
+    }
+    let elapsed_realtime_ns = before
+        .get("t_elapsed_realtime_ns")
+        .and_then(Value::as_i64)?;
+    Some(VideoMarkerClock {
+        elapsed_realtime_ns,
+        bracket: record,
+    })
+}
+
+const fn elapsed_realtime_ms(elapsed_realtime_ns: i64) -> Option<i64> {
+    elapsed_realtime_ns.checked_div(1_000_000)
 }
 
 fn optional_time_order(left: Option<i64>, right: Option<i64>) -> Ordering {
@@ -1129,6 +1187,68 @@ mod tests {
         let _cleanup = assert_ok(fs::remove_dir_all(&root), "remove fixture");
     }
 
+    #[test]
+    fn derives_timeline_with_current_video_probe_markers() {
+        let root = unique_temp_dir("timeline-current-video");
+        let Some(()) = assert_ok(create_complete_fixture(&root), "create fixture") else {
+            return;
+        };
+        let Some(()) = assert_ok(
+            create_current_video_fixture(&root),
+            "create current video fixture",
+        ) else {
+            return;
+        };
+
+        let derive_result = derive_timeline(&DeriveTimelineConfig {
+            recording_dir: root.clone(),
+            ime_jsonl: None,
+            touch_gestures_jsonl: None,
+            dismissals_jsonl: None,
+            output_dir: None,
+        });
+        let Some(_summary) = assert_ok(derive_result, "derive timeline") else {
+            return;
+        };
+
+        let timeline_dir = root.join("derived").join("timeline");
+        let Some(output) = assert_ok(
+            read_jsonl(&timeline_dir.join("events.jsonl")),
+            "read timeline events",
+        ) else {
+            return;
+        };
+        let video_records = output
+            .iter()
+            .filter(|record| {
+                record.get("record_kind").and_then(Value::as_str) == Some("video_marker")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            video_records.len(),
+            2_usize,
+            "current video fixture should emit start and stop rows"
+        );
+        assert!(
+            video_records.iter().all(|record| {
+                record.get("clock_domain").and_then(Value::as_str)
+                    == Some("device_elapsed_realtime_ns")
+                    && record.get("clock_alignment_status").and_then(Value::as_str)
+                        == Some("not_estimated")
+                    && record
+                        .get("t_elapsed_realtime_ns")
+                        .and_then(Value::as_i64)
+                        .is_some()
+                    && record
+                        .pointer("/clock_bracket/before/device_clock_probe/schema")
+                        .and_then(Value::as_str)
+                        == Some("input_dynamics_device_clock_probe.v1")
+            }),
+            "current video rows should expose STATUS-backed elapsed realtime markers"
+        );
+        let _cleanup = assert_ok(fs::remove_dir_all(&root), "remove fixture");
+    }
+
     fn create_complete_fixture(root: &Path) -> TestResult<()> {
         let ime_dir = root.join("ime");
         let derived_dir = root.join("derived");
@@ -1191,6 +1311,45 @@ mod tests {
                 "ok": true,
             }),
         )
+    }
+
+    fn create_current_video_fixture(root: &Path) -> TestResult<()> {
+        let video_dir = root.join("video");
+        fs::create_dir_all(&video_dir)?;
+        write_json(
+            &video_dir.join("timing.json"),
+            &json!({
+                "schema": "input_dynamics_video_capture.v1",
+                "enabled": true,
+                "required": true,
+                "remote_path": "/sdcard/Download/input-dynamics-run-test.mp4",
+                "local_path": "video/screen.mp4",
+                "start": {
+                    "before": video_probe_marker("before_screenrecord_start", 10_000_i64),
+                    "after": video_probe_marker("after_screenrecord_start", 11_000_i64),
+                },
+                "stop": {
+                    "before": video_probe_marker("before_screenrecord_stop", 20_000_i64),
+                    "after": video_probe_marker("after_screenrecord_stop", 21_000_i64),
+                },
+                "ok": true,
+            }),
+        )
+    }
+
+    fn video_probe_marker(phase: &str, elapsed_realtime_ns: i64) -> Value {
+        json!({
+            "schema": "input_dynamics_device_clock_probe.v1",
+            "phase": phase,
+            "clock_domain": "device_elapsed_realtime_ns",
+            "clock_alignment_status": "not_estimated",
+            "t_elapsed_realtime_ns": elapsed_realtime_ns,
+            "device_clock_probe": {
+                "schema": "input_dynamics_device_clock_probe.v1",
+                "canonical_clock_domain": "device_elapsed_realtime_ns",
+                "t_elapsed_realtime_ns": elapsed_realtime_ns,
+            },
+        })
     }
 
     fn ime_fixture() -> Vec<Value> {

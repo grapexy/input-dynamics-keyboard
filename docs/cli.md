@@ -416,6 +416,15 @@ elapsed-realtime timestamp, raw `getevent` timestamps stay in the
 media PTS. Do not treat wall-clock fields as ordering truth; they are
 diagnostic/provenance fields.
 
+Screenrecord start/stop timing samples are captured through the same app
+`STATUS` request-result path used by `input-dynamics status`. Each marker
+contains a validated `device_clock_probe` with schema
+`input_dynamics_device_clock_probe.v1`, plus host wall and host process
+monotonic brackets as diagnostics. The probe's canonical device timestamp is
+`device_elapsed_realtime_ns`; uptime is Android uptime metadata and wall time is
+diagnostic. If the request-correlated status result or probe is missing or
+invalid, recording fails instead of falling back to shell wall time.
+
 The public vocabulary is strict for writers and validators. Existing derived
 artifacts that predate this vocabulary may still contain labels such as
 `ime_uptime_ms`, `getevent_time_us`, or
@@ -466,7 +475,7 @@ flags such as `valid_for_analysis`, `has_video`, `needs_video`,
 `needs_derivation`, and `needs_timeline`. Required missing or stale video makes
 `valid_for_analysis` false and adds a canonical `record_with_video` action.
 `next_actions` contains local CLI commands an agent can run to refresh missing
-or stale artifacts.
+or stale artifacts. It does not probe the device or derive new clock alignment.
 
 After recording with the current CLI:
 

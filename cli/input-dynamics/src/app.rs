@@ -15,7 +15,6 @@ pub(crate) const DEFAULT_REPO: &str = "grapexy/input-dynamics-keyboard";
 const IME_CLASS: &str = "helium314.keyboard.latin.LatinIME";
 pub(crate) const LOG_DIR: &str = "input_dynamics_logs";
 const RECEIVER: &str = ".control.InputDynamicsControlReceiver";
-const STATUS_FILE: &str = "input_dynamics_control_status.json";
 const RESULT_FILE_PREFIX: &str = "input_dynamics_control_result_";
 const RESULT_FILE_SUFFIX: &str = ".json";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -143,10 +142,6 @@ impl App {
         format!("{}/{}", self.package, RECEIVER)
     }
 
-    fn remote_status_file(&self) -> String {
-        format!("{}/{}", self.remote_log_dir(), STATUS_FILE)
-    }
-
     fn remote_result_file(&self, request_id: &str) -> String {
         format!(
             "{}/{}",
@@ -160,12 +155,7 @@ impl App {
         let mut last_seen_request_id = None;
         let mut last_error = None;
         loop {
-            for status_result in [
-                self.read_external_request_result(request_id),
-                self.read_internal_request_result(request_id),
-                self.read_external_status(),
-                self.read_internal_status(),
-            ] {
+            for status_result in self.request_result_attempts(request_id) {
                 match status_result {
                     Ok(status) => {
                         let status_request_id = status.get("request_id").and_then(Value::as_str);
@@ -182,13 +172,29 @@ impl App {
 
             if start.elapsed() >= timeout {
                 return Err(CliError::new(format!(
-                    "timed out waiting for request_id {request_id}; last_seen_request_id={}; last_error={}",
+                    "timed out waiting for per-request result JSON for request_id {request_id}; external_result={}; internal_result={}/{}; last_seen_request_id={}; last_error={}",
+                    self.remote_result_file(request_id),
+                    Self::internal_log_dir(),
+                    control_result_file_name(request_id),
                     last_seen_request_id.as_deref().unwrap_or("<none>"),
                     last_error.as_deref().unwrap_or("<none>")
                 )));
             }
             thread::sleep(REQUEST_POLL_INTERVAL);
         }
+    }
+
+    fn request_result_attempts(&self, request_id: &str) -> Vec<CliResult<Value>> {
+        let external = self.read_external_request_result(request_id);
+        if external
+            .as_ref()
+            .ok()
+            .and_then(|status| status.get("request_id").and_then(Value::as_str))
+            == Some(request_id)
+        {
+            return vec![external];
+        }
+        vec![external, self.read_internal_request_result(request_id)]
     }
 
     fn read_external_request_result(&self, request_id: &str) -> CliResult<Value> {
@@ -211,29 +217,6 @@ impl App {
                     Self::internal_log_dir(),
                     control_result_file_name(request_id)
                 ),
-            ],
-            FailureMode::RequireSuccess,
-        )?;
-        let status = serde_json::from_str(output.stdout().trim())?;
-        Ok(status)
-    }
-
-    fn read_external_status(&self) -> CliResult<Value> {
-        let output = self.adb_shell(
-            vec![String::from("cat"), self.remote_status_file()],
-            FailureMode::RequireSuccess,
-        )?;
-        let status = serde_json::from_str(output.stdout().trim())?;
-        Ok(status)
-    }
-
-    fn read_internal_status(&self) -> CliResult<Value> {
-        let output = self.adb_shell(
-            vec![
-                String::from("run-as"),
-                String::from(self.package()),
-                String::from("cat"),
-                format!("{}/{}", Self::internal_log_dir(), STATUS_FILE),
             ],
             FailureMode::RequireSuccess,
         )?;

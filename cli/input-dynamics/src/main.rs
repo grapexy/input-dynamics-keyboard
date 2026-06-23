@@ -4,6 +4,7 @@
 
 pub(crate) mod app;
 pub(crate) mod args;
+pub(crate) mod clock_probe;
 pub(crate) mod commands;
 pub(crate) mod controller;
 pub(crate) mod coordinate_frame;

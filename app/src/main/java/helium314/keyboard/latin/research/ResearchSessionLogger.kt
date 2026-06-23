@@ -58,6 +58,7 @@ object ResearchSessionLogger {
     private const val CONTROL_RESULT_FILE_PREFIX = "input_dynamics_control_result_"
     private const val CONTROL_RESULT_FILE_SUFFIX = ".json"
     private const val SCHEMA = "input_dynamics_event.v1"
+    private const val DEVICE_CLOCK_PROBE_SCHEMA = "input_dynamics_device_clock_probe.v1"
     private const val DEFAULT_INPUT_ACTOR = "human"
     private const val DEFAULT_INPUT_CADENCE_POLICY = "manual"
     private const val CHEAP_RECORD_COUNT_MAX_BYTES = 10L * 1024L * 1024L
@@ -65,6 +66,7 @@ object ResearchSessionLogger {
     private const val MIN_ACTIVE_KEY_NEAR_THRESHOLD_PX = 8.0
     private const val CLOCK_DOMAIN_ANDROID_UPTIME_MS = "android_uptime_ms"
     private const val CLOCK_DOMAIN_DEVICE_ELAPSED_REALTIME_NS = "device_elapsed_realtime_ns"
+    private const val CLOCK_DOMAIN_DEVICE_WALL_MS = "device_wall_ms"
     private const val TIMESTAMP_PRECISION_MILLISECONDS = "milliseconds"
     private const val TIMESTAMP_PRECISION_NANOSECONDS = "nanoseconds"
     private const val TIMESTAMP_PRECISION_MILLISECONDS_CONVERTED_TO_NANOSECONDS =
@@ -621,9 +623,11 @@ object ResearchSessionLogger {
         ok: Boolean = true,
         message: String? = null,
         includeLogs: Boolean = false,
+        pendingWritesDrained: Boolean? = null,
         extraFields: Map<String, Any?> = emptyMap(),
     ): JSONObject {
         val appContext = rememberContext(context)
+        val clockProbe = DeviceClockProbe.capture(requestId)
         val active = isSessionActive(appContext)
         val lastSessionId = currentSessionId(appContext)
         val lastExternalRunId = currentExternalRunId(appContext)
@@ -646,7 +650,6 @@ object ResearchSessionLogger {
             File(logDirectory, controlResultFileName(it))
         }
         val inputScope = inputScopeStatus(appContext, active)
-        val uptimeMs = SystemClock.uptimeMillis()
         val json = JSONObject()
             .put("package_name", appContext.packageName)
             .put("request_id", jsonValue(requestId))
@@ -654,6 +657,10 @@ object ResearchSessionLogger {
             .put("version_code", versionCode)
             .put("build_variant", BuildConfig.BUILD_TYPE)
             .put("debug", BuildConfig.DEBUG)
+            .put("android_sdk_int", Build.VERSION.SDK_INT)
+            .put("android_release", Build.VERSION.RELEASE)
+            .put("device_manufacturer", Build.MANUFACTURER)
+            .put("device_model", Build.MODEL)
             .put("enabled", isEnabled(appContext))
             .put("active", active)
             .put("current_session_id", jsonValue(if (active) lastSessionId else null))
@@ -679,10 +686,12 @@ object ResearchSessionLogger {
             .put("status_file_path", statusFile.absolutePath)
             .put("result_file_path", jsonValue(resultFile?.absolutePath))
             .put("log_file_count", listLogFiles(appContext).size)
-            .put("t_wall_ms", System.currentTimeMillis())
-            .put("t_uptime_ms", uptimeMs)
-            .put("t_uptime_ns", TimeUnit.MILLISECONDS.toNanos(uptimeMs))
-            .put("t_elapsed_realtime_ns", SystemClock.elapsedRealtimeNanos())
+            .put("t_wall_ms", clockProbe.wallMs)
+            .put("t_uptime_ms", clockProbe.uptimeMs)
+            .put("t_uptime_ns", clockProbe.uptimeNs)
+            .put("t_elapsed_realtime_ns", clockProbe.elapsedRealtimeNs)
+            .put("device_clock_probe", deviceClockProbeJson(clockProbe, pendingWritesDrained))
+            .put("pending_writes_drained", jsonValue(pendingWritesDrained))
             .put("ok", ok)
             .put("command", jsonValue(command))
             .put("message", jsonValue(message))
@@ -722,10 +731,17 @@ object ResearchSessionLogger {
         runCatching {
             Os.rename(tempFile.absolutePath, file.absolutePath)
         }.getOrElse {
-            if (!tempFile.renameTo(file)) {
-                tempFile.copyTo(file, overwrite = true)
-                tempFile.delete()
-            }
+            replaceWithTempFile(tempFile, file)
+        }
+        if (!file.exists() && tempFile.exists()) {
+            replaceWithTempFile(tempFile, file)
+        }
+    }
+
+    private fun replaceWithTempFile(tempFile: File, file: File) {
+        if (!tempFile.renameTo(file)) {
+            tempFile.copyTo(file, overwrite = true)
+            tempFile.delete()
         }
     }
 
@@ -1427,6 +1443,65 @@ object ResearchSessionLogger {
             timestampPrecision = TIMESTAMP_PRECISION_NANOSECONDS,
             field = "t_elapsed_realtime_ns"
         )
+
+    private fun statusElapsedRealtimeMetadata(): TimestampMetadata =
+        TimestampMetadata(
+            clockDomain = CLOCK_DOMAIN_DEVICE_ELAPSED_REALTIME_NS,
+            timestampSource = TIMESTAMP_SOURCE_CALLBACK_CAPTURE,
+            timestampPrecision = TIMESTAMP_PRECISION_NANOSECONDS,
+            field = "t_elapsed_realtime_ns"
+        )
+
+    private fun statusWallTimeMetadata(): TimestampMetadata =
+        TimestampMetadata(
+            clockDomain = CLOCK_DOMAIN_DEVICE_WALL_MS,
+            timestampSource = TIMESTAMP_SOURCE_CALLBACK_CAPTURE,
+            timestampPrecision = TIMESTAMP_PRECISION_MILLISECONDS,
+            field = "t_wall_ms"
+        )
+
+    private data class DeviceClockProbe(
+        val requestId: String?,
+        val wallMs: Long,
+        val uptimeMs: Long,
+        val elapsedRealtimeNs: Long
+    ) {
+        val uptimeNs: Long = TimeUnit.MILLISECONDS.toNanos(uptimeMs)
+
+        companion object {
+            fun capture(requestId: String?): DeviceClockProbe =
+                DeviceClockProbe(
+                    requestId = requestId,
+                    wallMs = System.currentTimeMillis(),
+                    uptimeMs = SystemClock.uptimeMillis(),
+                    elapsedRealtimeNs = SystemClock.elapsedRealtimeNanos()
+                )
+        }
+    }
+
+    private fun deviceClockProbeJson(
+        probe: DeviceClockProbe,
+        pendingWritesDrained: Boolean?
+    ): JSONObject =
+        JSONObject()
+            .put("schema", DEVICE_CLOCK_PROBE_SCHEMA)
+            .put("request_id", jsonValue(probe.requestId))
+            .put("probe_source", "status_broadcast")
+            .put("captured_by", "android_control_status")
+            .put("canonical_clock_domain", CLOCK_DOMAIN_DEVICE_ELAPSED_REALTIME_NS)
+            .put("t_uptime_ms", probe.uptimeMs)
+            .put("t_uptime_ns", probe.uptimeNs)
+            .put("uptime_time", uptimeMillisecondsMetadata(
+                timestampSource = TIMESTAMP_SOURCE_CALLBACK_CAPTURE,
+                field = "t_uptime_ms",
+                fieldNs = "t_uptime_ns"
+            ).toJson())
+            .put("t_elapsed_realtime_ns", probe.elapsedRealtimeNs)
+            .put("elapsed_realtime_time", statusElapsedRealtimeMetadata().toJson())
+            .put("t_wall_ms", probe.wallMs)
+            .put("wall_time", statusWallTimeMetadata().toJson())
+            .put("wall_time_role", "diagnostic")
+            .put("pending_writes_drained", jsonValue(pendingWritesDrained))
 
     private fun logFilesJson(context: Context): JSONArray {
         val files = listLogFiles(context)

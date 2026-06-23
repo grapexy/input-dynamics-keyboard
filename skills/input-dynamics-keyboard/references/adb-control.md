@@ -3,8 +3,8 @@
 Use this reference when an agent needs exact local commands for Input Dynamics
 Keyboard control, status, layout inspection, log readback, or cleanup.
 
-Prefer the `input-dynamics` host CLI when it is available. Use this file when
-the CLI is unavailable or when debugging raw ADB behavior.
+Prefer the `input-dynamics` host CLI for normal operation. Use this file as a
+raw protocol reference when debugging ADB behavior manually.
 
 The CLI adds a unique `request_id` to each broadcast and waits for
 `input_dynamics_control_result_<request_id>.json`. If you use raw ADB for
@@ -46,7 +46,7 @@ APK="$(ls -t /tmp/input-dynamics-keyboard/*debug.apk | head -n 1)"
 adb install -r "$APK"
 ```
 
-Fallback when testing a source checkout:
+Local source-checkout install for development/testing:
 
 ```bash
 ./gradlew :app:assembleDebug
@@ -150,6 +150,19 @@ Expected status fields include:
 - `result_file_path`
 - `log_file_count`
 - `record_count`
+- `pending_writes_drained`
+- `device_clock_probe`
+
+`device_clock_probe` has schema `input_dynamics_device_clock_probe.v1`. It is
+the canonical status/control timing sample and carries Android uptime, device
+elapsed realtime, and diagnostic device wall time with timestamp metadata. Use
+`device_clock_probe.t_elapsed_realtime_ns` as the canonical device monotonic
+status/control timestamp. `t_uptime_ns` is converted from milliseconds, and
+wall time is diagnostic.
+
+For canonical consumers, require the request-correlated result file and matching
+`request_id`. The mutable latest status file is useful for inspection, but it is
+not a freshness fallback for normal agent workflows.
 
 ## Layout Taps
 
@@ -160,14 +173,10 @@ adb shell am broadcast -n "$PKG/$RECEIVER" -a "$ACTION_PREFIX.KEYBOARD_LAYOUT"
 ```
 
 When `keyboard_layout.available` is true, each key can include screen tap center
-fields. Use those values directly:
-
-```bash
-adb shell input tap <tap_center_screen_x_px> <tap_center_screen_y_px>
-```
-
-This is the preferred automation path when avoiding screenshots and image
-matching.
+fields for diagnostics and calibration. For normal automation, use the CLI
+session, visibility, `type`, `press`, and `tap` commands so readiness gates,
+input provenance, and the canonical uinput path stay active. Do not use raw
+`adb shell input tap` for normal agent-driven input.
 
 ## Pull Logs
 

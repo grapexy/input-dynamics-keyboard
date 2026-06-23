@@ -17,7 +17,7 @@ open class ResearchControlReceiver : BroadcastReceiver() {
             ?.trim()
             ?.takeIf { it.isNotEmpty() }
         val result = handleCommand(appContext, action, intent)
-        ResearchSessionLogger.waitForPendingWrites()
+        val pendingWritesDrained = ResearchSessionLogger.waitForPendingWrites()
         val status = ResearchSessionLogger.controlStatusJson(
             appContext,
             requestId = requestId,
@@ -25,6 +25,7 @@ open class ResearchControlReceiver : BroadcastReceiver() {
             ok = result.ok,
             message = result.message,
             includeLogs = result.includeLogs,
+            pendingWritesDrained = pendingWritesDrained,
             extraFields = result.extraFields,
         )
         ResearchSessionLogger.writeControlStatusJson(appContext, status)

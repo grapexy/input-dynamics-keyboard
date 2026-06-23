@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 package helium314.keyboard.latin.research
 
+import android.content.Intent
 import android.text.InputType
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -380,6 +381,100 @@ class ResearchSessionLoggerTest {
             assertEquals("run-restart-field-second", record.getString("external_run_id"))
             assertFalse(record.optBoolean("password_field", false))
         }
+    }
+
+    @Test
+    fun `control status includes canonical device clock probe`() {
+        val status = ResearchSessionLogger.controlStatusJson(
+            context,
+            requestId = "request-clock-probe",
+            command = "status",
+            pendingWritesDrained = true
+        )
+
+        val probe = status.getJSONObject("device_clock_probe")
+        assertEquals("input_dynamics_device_clock_probe.v1", probe.getString("schema"))
+        assertEquals("request-clock-probe", probe.getString("request_id"))
+        assertEquals("status_broadcast", probe.getString("probe_source"))
+        assertEquals("android_control_status", probe.getString("captured_by"))
+        assertEquals("device_elapsed_realtime_ns", probe.getString("canonical_clock_domain"))
+        assertTrue(probe.getBoolean("pending_writes_drained"))
+        assertEquals(probe.getLong("t_wall_ms"), status.getLong("t_wall_ms"))
+        assertEquals(probe.getLong("t_uptime_ms"), status.getLong("t_uptime_ms"))
+        assertEquals(probe.getLong("t_uptime_ns"), status.getLong("t_uptime_ns"))
+        assertEquals(probe.getLong("t_elapsed_realtime_ns"), status.getLong("t_elapsed_realtime_ns"))
+        assertEquals(probe.getLong("t_uptime_ms") * 1_000_000L, probe.getLong("t_uptime_ns"))
+        assertTrue(probe.getLong("t_elapsed_realtime_ns") > 0L)
+        assertTrue(probe.getLong("t_wall_ms") > 0L)
+        assertEquals("diagnostic", probe.getString("wall_time_role"))
+        assertTrue(status.getBoolean("pending_writes_drained"))
+        assertTrue(status.has("android_sdk_int"))
+
+        assertTimestampClaim(
+            probe.getJSONObject("uptime_time"),
+            clockDomain = "android_uptime_ms",
+            timestampSource = "callback_capture",
+            timestampPrecision = "milliseconds",
+            field = "t_uptime_ms",
+            fieldNs = "t_uptime_ns",
+            fieldNsPrecision = "milliseconds_converted_to_nanoseconds"
+        )
+        assertTimestampClaim(
+            probe.getJSONObject("elapsed_realtime_time"),
+            clockDomain = "device_elapsed_realtime_ns",
+            timestampSource = "callback_capture",
+            timestampPrecision = "nanoseconds",
+            field = "t_elapsed_realtime_ns"
+        )
+        assertTimestampClaim(
+            probe.getJSONObject("wall_time"),
+            clockDomain = "device_wall_ms",
+            timestampSource = "callback_capture",
+            timestampPrecision = "milliseconds",
+            field = "t_wall_ms"
+        )
+    }
+
+    @Test
+    fun `control status clock probes are nondecreasing`() {
+        val first = ResearchSessionLogger.controlStatusJson(context)
+            .getJSONObject("device_clock_probe")
+        val second = ResearchSessionLogger.controlStatusJson(context)
+            .getJSONObject("device_clock_probe")
+
+        assertTrue(second.getLong("t_uptime_ms") >= first.getLong("t_uptime_ms"))
+        assertTrue(second.getLong("t_uptime_ns") >= first.getLong("t_uptime_ns"))
+        assertTrue(second.getLong("t_elapsed_realtime_ns") >= first.getLong("t_elapsed_realtime_ns"))
+    }
+
+    @Test
+    fun `control receiver writes request correlated status result`() {
+        val requestId = "request-receiver-test"
+        val receiver = ResearchControlReceiver()
+
+        receiver.onReceive(
+            context,
+            Intent(ResearchControlReceiver.ACTION_STATUS)
+                .putExtra(ResearchControlReceiver.EXTRA_REQUEST_ID, requestId)
+        )
+
+        val resultFile = ResearchSessionLogger.logDirectory(context)
+            .resolve("input_dynamics_control_result_$requestId.json")
+        assertTrue(
+            resultFile.exists(),
+            ResearchSessionLogger.logDirectory(context).listFiles()
+                ?.map { it.name }
+                ?.sorted()
+                .orEmpty()
+                .joinToString(", ")
+        )
+        val result = JSONObject(resultFile.readText())
+        val probe = result.getJSONObject("device_clock_probe")
+        assertEquals(requestId, result.getString("request_id"))
+        assertEquals(requestId, probe.getString("request_id"))
+        assertEquals("input_dynamics_device_clock_probe.v1", probe.getString("schema"))
+        assertTrue(result.getBoolean("pending_writes_drained"))
+        assertTrue(probe.getBoolean("pending_writes_drained"))
     }
 
     @Test

@@ -5,7 +5,7 @@ research runs. It uses an explicit broadcast receiver and writes command status
 to JSON files next to the JSONL logs.
 
 For normal agent and scripted operation, prefer the host CLI in [cli.md](cli.md).
-Use this page as the raw protocol reference and fallback path. The CLI adds a
+Use this page as the raw protocol reference and diagnostic path. The CLI adds a
 unique `request_id` to each broadcast and waits for the matching
 `input_dynamics_control_result_<request_id>.json` file. The latest
 `input_dynamics_control_status.json` file is still written for inspection and
@@ -142,10 +142,30 @@ Status includes:
 - exact result file path, when `request_id` was supplied
 - log file count
 - cheap record count when available
+- `pending_writes_drained`, when the command came through the receiver
+- `device_clock_probe`, the canonical status/control timing sample
 
 Ordered broadcast result data may also print JSON to stdout on some Android
 builds. Treat the exact result file as the raw command-result source when a
 `request_id` was supplied.
+
+`device_clock_probe` has schema `input_dynamics_device_clock_probe.v1` and is
+the reusable device timing sample for status/control artifacts. It includes:
+
+- `request_id`
+- `probe_source: "status_broadcast"`
+- `captured_by: "android_control_status"`
+- `canonical_clock_domain: "device_elapsed_realtime_ns"`
+- `t_elapsed_realtime_ns` with `elapsed_realtime_time`
+- `t_uptime_ms` and converted `t_uptime_ns` with `uptime_time`
+- diagnostic `t_wall_ms` with `wall_time`
+- `pending_writes_drained`
+
+The uptime nanosecond companion is converted from Android uptime milliseconds;
+do not treat it as native nanosecond precision. Wall time is diagnostic only.
+For canonical recording or evidence anchors, require a request-correlated result
+file with a matching `request_id` and a valid `device_clock_probe`; do not use
+the mutable latest status file as a freshness fallback.
 
 ## Keyboard Layout Snapshot
 

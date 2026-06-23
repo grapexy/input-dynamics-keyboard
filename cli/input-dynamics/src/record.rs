@@ -5,15 +5,15 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Child;
-use std::sync::OnceLock;
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use input_dynamics_analysis::getevent::{GETEVENT_SCHEMA, normalize_file};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::app::{App, LOG_DIR};
+use crate::clock_probe::{capture_device_clock_probe, host_wall_millis, validate_probe_order};
 use crate::commands::{normalize_stats_json, path_string, pull_logs};
 use crate::controller::{self, SessionStartPermit};
 use crate::coordinate_frame::manifest_coordinate_frame;
@@ -26,7 +26,6 @@ use crate::validate::validate_logs;
 const DEFAULT_RECORD_INPUT_CONTROLLER: &str = "input-dynamics-cli";
 const VIDEO_SCHEMA: &str = "input_dynamics_video_capture.v1";
 const VIDEO_STARTUP_CHECK_DELAY: Duration = Duration::from_millis(250);
-static MONOTONIC_REFERENCE: OnceLock<Instant> = OnceLock::new();
 
 pub(crate) struct RecordConfig {
     pub(crate) run_id: String,
@@ -191,7 +190,7 @@ impl VideoCapture {
         fs::create_dir_all(&paths.video)?;
         let remote_path = remote_video_path(&config.run_id);
         let cleanup_before = remove_remote_file(app, &remote_path);
-        let timing_before = timing_marker(app, "before_screenrecord_start")?;
+        let timing_before = capture_device_clock_probe(app, "before_screenrecord_start")?;
         let args = vec![
             String::from("shell"),
             String::from("screenrecord"),
@@ -213,7 +212,7 @@ impl VideoCapture {
                 paths.video_stderr.display()
             )));
         }
-        let timing_after = match timing_marker(app, "after_screenrecord_start") {
+        let timing_after = match capture_device_clock_probe(app, "after_screenrecord_start") {
             Ok(value) => value,
             Err(error) => {
                 let _signal = interrupt_child(&child);
@@ -221,6 +220,7 @@ impl VideoCapture {
                 return Err(error);
             }
         };
+        validate_probe_order(&timing_before, &timing_after)?;
         Ok(Self {
             enabled: true,
             required: true,
@@ -292,7 +292,10 @@ impl VideoCapture {
             return Ok(self.stop.clone());
         }
 
-        let before = timing_marker(app, "before_screenrecord_stop")?;
+        let before = capture_device_clock_probe(app, "before_screenrecord_stop")?;
+        if let Some(previous) = self.start.get("after") {
+            validate_probe_order(previous, &before)?;
+        }
         let Some(mut child) = self.child.take() else {
             return Err(CliError::new("screenrecord child was already taken"));
         };
@@ -312,7 +315,8 @@ impl VideoCapture {
             }
         }
         let status = child.wait()?;
-        let after = timing_marker(app, "after_screenrecord_stop")?;
+        let after = capture_device_clock_probe(app, "after_screenrecord_stop")?;
+        validate_probe_order(&before, &after)?;
         let pull = pull_video(
             app,
             &self.remote_path,
@@ -524,7 +528,7 @@ impl<'a> InputControllerCapture<'a> {
 
 pub(crate) fn record_run(app: &App, config: &RecordConfig) -> CliResult<Value> {
     let paths = prepare_paths(&config.out)?;
-    let host_start_wall_ms = epoch_millis()?;
+    let host_start_wall_ms = host_wall_millis()?;
     let ActiveRecordWindow {
         pre_stop,
         clear,
@@ -576,7 +580,7 @@ pub(crate) fn record_run(app: &App, config: &RecordConfig) -> CliResult<Value> {
         "output": path_string(&paths.getevent_jsonl)?,
         "stats": normalize_stats_json(&getevent_stats),
     });
-    let host_stop_wall_ms = epoch_millis()?;
+    let host_stop_wall_ms = host_wall_millis()?;
     let manifest_parts = ManifestParts {
         host_start_wall_ms,
         host_stop_wall_ms,
@@ -1223,49 +1227,6 @@ fn write_json_file(path: &Path, value: &Value) -> CliResult<()> {
     let text = serde_json::to_string_pretty(value)?;
     fs::write(path, format!("{text}\n"))?;
     Ok(())
-}
-
-fn epoch_millis() -> CliResult<u64> {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| CliError::new(format!("system clock is before Unix epoch: {error}")))?
-        .as_millis();
-    u64::try_from(millis).map_err(|error| CliError::new(format!("millis overflow: {error}")))
-}
-
-fn timing_marker(app: &App, phase: &str) -> CliResult<Value> {
-    let host_wall_ms_before_device_timestamp = epoch_millis()?;
-    let host_monotonic_ns_before_device_timestamp = monotonic_nanos_since_process_start()?;
-    let device_wall_ms = device_epoch_millis(app)?;
-    let host_wall_ms_after_device_timestamp = epoch_millis()?;
-    let host_monotonic_ns_after_device_timestamp = monotonic_nanos_since_process_start()?;
-    Ok(json!({
-        "phase": phase,
-        "host_wall_ms_before_device_timestamp": host_wall_ms_before_device_timestamp,
-        "host_wall_ms_after_device_timestamp": host_wall_ms_after_device_timestamp,
-        "host_monotonic_ns_before_device_timestamp": host_monotonic_ns_before_device_timestamp,
-        "host_monotonic_ns_after_device_timestamp": host_monotonic_ns_after_device_timestamp,
-        "host_monotonic_reference": "cli_process_start",
-        "device_wall_ms": device_wall_ms,
-    }))
-}
-
-fn monotonic_nanos_since_process_start() -> CliResult<u64> {
-    let reference = MONOTONIC_REFERENCE.get_or_init(Instant::now);
-    u64::try_from(reference.elapsed().as_nanos())
-        .map_err(|error| CliError::new(format!("monotonic nanos overflow: {error}")))
-}
-
-fn device_epoch_millis(app: &App) -> CliResult<u64> {
-    let output = app.adb_shell(
-        vec![String::from("date"), String::from("+%s%3N")],
-        FailureMode::RequireSuccess,
-    )?;
-    output
-        .stdout()
-        .trim()
-        .parse::<u64>()
-        .map_err(|error| CliError::new(format!("failed to parse device epoch millis: {error}")))
 }
 
 fn remote_video_path(run_id: &str) -> String {

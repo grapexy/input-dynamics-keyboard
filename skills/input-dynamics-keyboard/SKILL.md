@@ -254,6 +254,12 @@ Clock reasoning rules for agents:
 - Canonical clock domains are `android_uptime_ms`, `android_uptime_ns`,
   `device_elapsed_realtime_ns`, `kernel_getevent_us`, `media_pts_ns`,
   `host_process_monotonic_ns`, `host_wall_ms`, and `device_wall_ms`.
+- `idk status` and recording video markers use the app `STATUS`
+  request-result path. The canonical status/control sample is
+  `device_clock_probe` with schema `input_dynamics_device_clock_probe.v1`.
+- Treat `device_clock_probe.t_elapsed_realtime_ns` as the canonical device
+  monotonic status/control timestamp. Treat uptime fields as Android uptime
+  metadata and wall fields as diagnostics.
 - Do not subtract or order across different clock domains unless a derived
   artifact provides a transform, uncertainty, and an alignment status.
 - Treat `legacy_wall_clock_bracketed` and `estimated` as lower-confidence
@@ -263,6 +269,9 @@ Clock reasoning rules for agents:
 - Treat older labels such as `ime_uptime_ms`, `getevent_time_us`, and
   `host_wall_ms_bracketed_device_epoch_ms` as pre-vocabulary legacy labels, not
   canonical domains.
+- Do not invent lower-level clock workflows during normal runs. Use saved
+  `record` artifacts and `recording inspect`; raw ADB status files are for
+  diagnostics.
 
 Then derive a run-level press summary:
 
@@ -331,8 +340,9 @@ idk pull --out "runs/$RUN_ID"
 idk validate "runs/$RUN_ID" --run-id "$RUN_ID"
 ```
 
-If the CLI is unavailable, use `references/adb-control.md` for exact raw ADB
-command variants and fallbacks.
+If the CLI is unavailable during a normal run, fail clearly and report why.
+Use `references/adb-control.md` only as a raw protocol reference for manual
+diagnostics.
 
 ## Non-Screenshot Automation
 
