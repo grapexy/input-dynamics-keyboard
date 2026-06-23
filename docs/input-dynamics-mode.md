@@ -57,6 +57,20 @@ nanosecond-unit companions such as `t_event_uptime_ns` and `t_down_uptime_ns`
 when those millisecond source fields are present; these fields are for unit
 alignment, not extra source-event precision.
 
+Clock domains are intentionally explicit. Do not compare timestamps from
+different domains unless a derived artifact also names the transform and
+uncertainty used for that comparison.
+
+| Clock domain | Meaning | Typical use |
+| --- | --- | --- |
+| `android_uptime_ms` / `android_uptime_ns` | Android uptime clock used by `MotionEvent` and `KeyEvent`; source-event time, excluding deep sleep. | Key/touch hold and flight timing. |
+| `device_elapsed_realtime_ns` | Android elapsed realtime clock, including deep sleep. | App status/control timestamps and future recording/video/evidence anchors. |
+| `kernel_getevent_us` | Raw `getevent -lt` timestamp domain. | Device-level touch streams before explicit alignment. |
+| `media_pts_ns` | Encoded video media presentation timestamp. | Future video-frame mapping. |
+| `host_process_monotonic_ns` | Host CLI process-relative monotonic clock. | ADB latency diagnostics. |
+| `host_wall_ms` | Host wall clock. | Human-readable provenance only. |
+| `device_wall_ms` | Device wall clock. | Legacy diagnostics only; not ordering truth. |
+
 ## Event Types
 
 Implemented event types:

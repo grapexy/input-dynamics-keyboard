@@ -405,6 +405,13 @@ cleanup status, and the pulled `screen.mp4` file fingerprint. The companion
 `video/timing.json` repeats the video metadata next to the media file for
 artifact-local inspection.
 
+Timing fields use explicit clock domains. Android input event timestamps are
+in the Android uptime domain, `t_elapsed_realtime_ns` is a record/status
+elapsed-realtime timestamp, raw `getevent` timestamps stay in the
+`kernel_getevent_us` domain until aligned, and video frame timestamps will use
+media PTS. Do not treat wall-clock fields as ordering truth; they are
+diagnostic/provenance fields.
+
 When `record` is run with `--with-evidence`, `manifest.json` includes
 `evidence.enabled: true`, `evidence.policy: start_end`, and the start/end
 observation bundle metadata. Accessibility dumps and screenshots may contain

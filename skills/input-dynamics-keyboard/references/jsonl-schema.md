@@ -18,6 +18,13 @@ Use this reference when validating logs or changing event fields.
   timestamp captured when the record is written. `t_event_uptime_ns` and
   `t_down_uptime_ns` are nanosecond-unit companions for Android millisecond
   input event times when those source fields are present.
+- Preserve clock domains when reasoning from logs. `android_uptime_ms` /
+  `android_uptime_ns` are Android input-event source clocks,
+  `device_elapsed_realtime_ns` is the elapsed realtime status/control clock,
+  `kernel_getevent_us` is raw device-level input time, `media_pts_ns` is video
+  frame time, and wall clocks are provenance/diagnostics only. Do not compare
+  different domains unless a derived artifact supplies an explicit transform
+  and uncertainty.
 - Key and pointer records include `press_id` when they belong to a touch
   sequence. `gesture_id` currently matches `press_id` for ordinary key touches.
 - Pointer samples include `active_key_*` fields when keyboard layout context is
