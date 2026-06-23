@@ -261,12 +261,12 @@ fn inspect_requires_declared_video_artifacts() {
 }
 
 #[test]
-fn inspect_accepts_declared_video_artifacts() {
-    let root = unique_temp_dir("recording-inspect-required-video-present");
+fn inspect_accepts_declared_canonical_video_artifacts() {
+    let root = unique_temp_dir("recording-inspect-required-video-canonical");
     let Some(()) = assert_ok(create_fixture(&root, FixtureShape::DerivedOnly), "fixture") else {
         return;
     };
-    let Some(video) = assert_ok(create_video_fixture(&root), "create video fixture") else {
+    let Some(video) = assert_ok(create_current_video_fixture(&root), "create video fixture") else {
         return;
     };
     let Some(()) = assert_ok(write_manifest(&root, Some(video)), "write manifest") else {
@@ -303,6 +303,318 @@ fn inspect_accepts_declared_video_artifacts() {
             .map_or(0_usize, Vec::len),
         0_usize,
         "fresh video should not produce stale reasons"
+    );
+    assert_eq!(
+        result
+            .pointer("/flags/canonical_clock_ready")
+            .and_then(Value::as_bool),
+        Some(true),
+        "canonical video markers should make the recording clock-ready"
+    );
+    assert_eq!(
+        result
+            .pointer("/clock/video/status")
+            .and_then(Value::as_str),
+        Some("bracketed"),
+        "current video marker shape should be classified as bracketed"
+    );
+    assert_eq!(
+        result
+            .pointer("/flags/has_legacy_timing")
+            .and_then(Value::as_bool),
+        Some(false),
+        "current video marker shape should not be legacy"
+    );
+    let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
+}
+
+#[test]
+fn inspect_keeps_declared_legacy_video_readable_but_noncanonical() {
+    let root = unique_temp_dir("recording-inspect-required-video-legacy");
+    let Some(()) = assert_ok(create_fixture(&root, FixtureShape::DerivedOnly), "fixture") else {
+        return;
+    };
+    let Some(video) = assert_ok(create_legacy_video_fixture(&root), "create video fixture") else {
+        return;
+    };
+    let Some(()) = assert_ok(write_manifest(&root, Some(video)), "write manifest") else {
+        return;
+    };
+
+    let Some(result) = assert_ok(inspect_recording(&root), "inspect recording") else {
+        return;
+    };
+
+    assert_eq!(
+        result
+            .pointer("/flags/valid_for_analysis")
+            .and_then(Value::as_bool),
+        Some(true),
+        "legacy video artifacts should remain analysis-readable"
+    );
+    assert_eq!(
+        result
+            .pointer("/flags/canonical_clock_ready")
+            .and_then(Value::as_bool),
+        Some(false),
+        "legacy timing must not be canonical clock-ready"
+    );
+    assert_eq!(
+        result
+            .pointer("/flags/has_legacy_timing")
+            .and_then(Value::as_bool),
+        Some(true),
+        "legacy timing should be explicit"
+    );
+    assert_eq!(
+        result
+            .pointer("/clock/video/status")
+            .and_then(Value::as_str),
+        Some("legacy_wall_clock_bracketed"),
+        "legacy video timing should be classified as legacy wall-clock bracketed"
+    );
+    let action_command = action_command(&result, "record_with_canonical_clocks");
+    assert!(
+        action_command.is_some_and(|command| !command.contains("--with-evidence")),
+        "video-only canonical rerun should not over-capture evidence"
+    );
+    let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
+}
+
+#[test]
+fn inspect_rejects_nonmonotonic_video_clock_markers() -> TestResult<()> {
+    let root = unique_temp_dir("recording-inspect-video-nonmonotonic");
+    create_fixture(&root, FixtureShape::DerivedOnly)?;
+    let mut video = create_current_video_fixture(&root)?;
+    let object = video.as_object_mut().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "video fixture should be an object",
+        )
+    })?;
+    let stop = object
+        .get_mut("stop")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "video stop fixture should be an object",
+            )
+        })?;
+    stop.insert(
+        String::from("before"),
+        probe_marker("before_screenrecord_stop", 9, 19),
+    );
+    write_json(&root.join("video").join("timing.json"), &video)?;
+    write_manifest(&root, Some(video))?;
+    let result = inspect_recording(&root)?;
+
+    ensure_eq(
+        &result
+            .pointer("/clock/video/status")
+            .and_then(Value::as_str),
+        &Some("probe_failed"),
+        "nonmonotonic current markers should fail probe validation",
+    )?;
+    ensure_eq(
+        &result
+            .pointer("/flags/canonical_clock_ready")
+            .and_then(Value::as_bool),
+        &Some(false),
+        "invalid markers must not be canonical",
+    )?;
+    fs::remove_dir_all(&root)?;
+    Ok(())
+}
+
+#[test]
+fn inspect_rejects_malformed_video_clock_wrapper() -> TestResult<()> {
+    let root = unique_temp_dir("recording-inspect-video-bad-wrapper");
+    create_fixture(&root, FixtureShape::DerivedOnly)?;
+    let mut video = create_current_video_fixture(&root)?;
+    let marker = video
+        .pointer_mut("/start/before")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "video start before marker should be an object",
+            )
+        })?;
+    marker.insert(String::from("schema"), json!("bad_probe_wrapper.v1"));
+    write_json(&root.join("video").join("timing.json"), &video)?;
+    write_manifest(&root, Some(video))?;
+    let result = inspect_recording(&root)?;
+
+    ensure_eq(
+        &result
+            .pointer("/clock/video/status")
+            .and_then(Value::as_str),
+        &Some("probe_failed"),
+        "malformed probe wrappers should fail canonical readiness",
+    )?;
+    ensure_eq(
+        &result
+            .pointer("/flags/canonical_clock_ready")
+            .and_then(Value::as_bool),
+        &Some(false),
+        "malformed wrappers must not be canonical",
+    )?;
+    fs::remove_dir_all(&root)?;
+    Ok(())
+}
+
+#[test]
+fn inspect_reports_stale_video_clock_inputs() -> TestResult<()> {
+    let root = unique_temp_dir("recording-inspect-video-clock-stale");
+    create_fixture(&root, FixtureShape::DerivedOnly)?;
+    let video = create_current_video_fixture(&root)?;
+    fs::write(root.join("video").join("screen.mp4"), "changed-video\n")?;
+    write_manifest(&root, Some(video))?;
+    let result = inspect_recording(&root)?;
+
+    ensure_eq(
+        &result
+            .pointer("/clock/video/status")
+            .and_then(Value::as_str),
+        &Some("stale_inputs"),
+        "changed screen video should stale canonical video clock anchors",
+    )?;
+    ensure_eq(
+        &result
+            .pointer("/clock/stale_inputs")
+            .and_then(Value::as_bool),
+        &Some(true),
+        "top-level clock should surface stale inputs",
+    )?;
+    fs::remove_dir_all(&root)?;
+    Ok(())
+}
+
+#[test]
+fn inspect_preserves_evidence_capture_in_missing_video_rerun_action() {
+    let root = unique_temp_dir("recording-inspect-video-evidence-rerun");
+    let Some(()) = assert_ok(create_fixture(&root, FixtureShape::DerivedOnly), "fixture") else {
+        return;
+    };
+    let Some(evidence) = assert_ok(create_legacy_evidence_fixture(&root), "create evidence") else {
+        return;
+    };
+    let Some(()) = assert_ok(
+        write_manifest_with(&root, Some(required_video_manifest()), Some(evidence)),
+        "write manifest",
+    ) else {
+        return;
+    };
+
+    let Some(result) = assert_ok(inspect_recording(&root), "inspect recording") else {
+        return;
+    };
+
+    assert_eq!(
+        result
+            .pointer("/flags/needs_video")
+            .and_then(Value::as_bool),
+        Some(true),
+        "missing required video should need video rerun"
+    );
+    assert_eq!(
+        result
+            .pointer("/flags/needs_canonical_evidence")
+            .and_then(Value::as_bool),
+        Some(true),
+        "legacy requested evidence should be rerun with evidence"
+    );
+    let action_command = action_command(&result, "record_with_video");
+    assert!(
+        action_command.is_some_and(|command| command.contains("--with-evidence")),
+        "video rerun should preserve requested evidence capture"
+    );
+    let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
+}
+
+#[test]
+fn inspect_classifies_canonical_evidence_brackets() {
+    let root = unique_temp_dir("recording-inspect-evidence-canonical");
+    let Some(()) = assert_ok(create_fixture(&root, FixtureShape::DerivedOnly), "fixture") else {
+        return;
+    };
+    let Some(video) = assert_ok(create_current_video_fixture(&root), "create video fixture") else {
+        return;
+    };
+    let Some(evidence) = assert_ok(create_current_evidence_fixture(&root), "create evidence")
+    else {
+        return;
+    };
+    let Some(()) = assert_ok(
+        write_manifest_with(&root, Some(video), Some(evidence)),
+        "write manifest",
+    ) else {
+        return;
+    };
+
+    let Some(result) = assert_ok(inspect_recording(&root), "inspect recording") else {
+        return;
+    };
+
+    assert_eq!(
+        result
+            .pointer("/clock/evidence/status")
+            .and_then(Value::as_str),
+        Some("bracketed"),
+        "current evidence brackets should be canonical"
+    );
+    assert_eq!(
+        result
+            .pointer("/flags/canonical_clock_ready")
+            .and_then(Value::as_bool),
+        Some(true),
+        "canonical video and evidence brackets should be clock-ready"
+    );
+    let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
+}
+
+#[test]
+fn inspect_classifies_legacy_evidence_as_noncanonical() {
+    let root = unique_temp_dir("recording-inspect-evidence-legacy");
+    let Some(()) = assert_ok(create_fixture(&root, FixtureShape::DerivedOnly), "fixture") else {
+        return;
+    };
+    let Some(video) = assert_ok(create_current_video_fixture(&root), "create video fixture") else {
+        return;
+    };
+    let Some(evidence) = assert_ok(create_legacy_evidence_fixture(&root), "create evidence") else {
+        return;
+    };
+    let Some(()) = assert_ok(
+        write_manifest_with(&root, Some(video), Some(evidence)),
+        "write manifest",
+    ) else {
+        return;
+    };
+
+    let Some(result) = assert_ok(inspect_recording(&root), "inspect recording") else {
+        return;
+    };
+
+    assert_eq!(
+        result
+            .pointer("/clock/evidence/status")
+            .and_then(Value::as_str),
+        Some("legacy_wall_clock_bracketed"),
+        "wall-clock evidence indexes should be legacy"
+    );
+    assert_eq!(
+        result
+            .pointer("/flags/canonical_clock_ready")
+            .and_then(Value::as_bool),
+        Some(false),
+        "legacy evidence should block canonical clock readiness when requested"
+    );
+    let action_command = action_command(&result, "record_with_canonical_clocks");
+    assert!(
+        action_command.is_some_and(|command| command.contains("--with-evidence")),
+        "evidence-only canonical rerun should preserve evidence capture"
     );
     let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
 }
@@ -358,6 +670,14 @@ fn create_fixture(root: &Path, shape: FixtureShape) -> TestResult<()> {
 }
 
 fn write_manifest(root: &Path, video: Option<Value>) -> TestResult<()> {
+    write_manifest_with(root, video, None)
+}
+
+fn write_manifest_with(
+    root: &Path,
+    video: Option<Value>,
+    evidence: Option<Value>,
+) -> TestResult<()> {
     let mut manifest = json!({
         "schema": "input_dynamics_record_manifest.v1",
         "external_run_id": "run-test",
@@ -377,6 +697,16 @@ fn write_manifest(root: &Path, video: Option<Value>) -> TestResult<()> {
             .into());
         };
         object.insert(String::from("video"), video_value);
+    }
+    if let Some(evidence_value) = evidence {
+        let Some(object) = manifest.as_object_mut() else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "manifest fixture should be a JSON object",
+            )
+            .into());
+        };
+        object.insert(String::from("evidence"), evidence_value);
     }
     write_json(&root.join("manifest.json"), &manifest)
 }
@@ -406,7 +736,7 @@ fn required_video_manifest() -> Value {
     })
 }
 
-fn create_video_fixture(root: &Path) -> TestResult<Value> {
+fn create_legacy_video_fixture(root: &Path) -> TestResult<Value> {
     let video_dir = root.join("video");
     fs::create_dir_all(&video_dir)?;
     let screen_path = video_dir.join("screen.mp4");
@@ -425,6 +755,215 @@ fn create_video_fixture(root: &Path) -> TestResult<Value> {
     fs::write(video_dir.join("screenrecord.stderr.log"), "")?;
     fs::write(video_dir.join("adb-pull-video.log"), "pulled\n")?;
     Ok(video)
+}
+
+fn create_current_video_fixture(root: &Path) -> TestResult<Value> {
+    let video_dir = root.join("video");
+    fs::create_dir_all(&video_dir)?;
+    let screen_path = video_dir.join("screen.mp4");
+    fs::write(&screen_path, "not-a-real-mp4-for-inspection\n")?;
+    let file = file_fingerprint(&screen_path)?;
+    let video = json!({
+        "schema": "input_dynamics_video_capture.v1",
+        "enabled": true,
+        "required": true,
+        "remote_path": "/sdcard/Download/input-dynamics-run-test.mp4",
+        "local_path": "video/screen.mp4",
+        "timing_path": "video/timing.json",
+        "stdout_log": "video/screenrecord.stdout.log",
+        "stderr_log": "video/screenrecord.stderr.log",
+        "pull_log": "video/adb-pull-video.log",
+        "file": file,
+        "start": {
+            "schema": "input_dynamics_video_capture.v1",
+            "ok": true,
+            "enabled": true,
+            "required": true,
+            "requested": true,
+            "before": probe_marker("before_screenrecord_start", 10, 20),
+            "after": probe_marker("after_screenrecord_start", 11, 21),
+        },
+        "stop": {
+            "ok": true,
+            "enabled": true,
+            "required": true,
+            "requested": true,
+            "before": probe_marker("before_screenrecord_stop", 20, 30),
+            "after": probe_marker("after_screenrecord_stop", 21, 31),
+            "file": file,
+        },
+        "ok": true,
+    });
+    write_json(&video_dir.join("timing.json"), &video)?;
+    fs::write(video_dir.join("screenrecord.stdout.log"), "")?;
+    fs::write(video_dir.join("screenrecord.stderr.log"), "")?;
+    fs::write(video_dir.join("adb-pull-video.log"), "pulled\n")?;
+    Ok(video)
+}
+
+fn create_current_evidence_fixture(root: &Path) -> TestResult<Value> {
+    create_evidence_indexes(root)?;
+    Ok(json!({
+        "enabled": true,
+        "policy": "start_end",
+        "start": current_evidence_phase("start", 12, 22, 13, 23),
+        "end": current_evidence_phase("end", 18, 28, 19, 29),
+    }))
+}
+
+fn create_legacy_evidence_fixture(root: &Path) -> TestResult<Value> {
+    create_evidence_indexes(root)?;
+    Ok(json!({
+        "enabled": true,
+        "policy": "start_end",
+        "start": legacy_evidence_phase("start"),
+        "end": legacy_evidence_phase("end"),
+    }))
+}
+
+fn create_evidence_indexes(root: &Path) -> TestResult<()> {
+    for phase in ["start", "end"] {
+        let phase_dir = root.join("evidence").join(phase);
+        fs::create_dir_all(&phase_dir)?;
+        write_json(
+            &phase_dir.join("index.json"),
+            &json!({
+                "schema": "input_dynamics_observation_bundle.v1",
+                "phase": phase,
+                "captured_wall_ms": 1_800_000_000_000_i64,
+                "artifacts": {
+                    "status": "status.json",
+                    "layout": "layout.json",
+                    "accessibility": "accessibility.xml",
+                    "screenshot": "screenshot.png",
+                    "state": "state.json"
+                },
+                "state": {"ok": true}
+            }),
+        )?;
+    }
+    Ok(())
+}
+
+fn current_evidence_phase(
+    phase: &str,
+    before_uptime_ms: i64,
+    before_elapsed_ms: i64,
+    after_uptime_ms: i64,
+    after_elapsed_ms: i64,
+) -> Value {
+    json!({
+        "schema": "input_dynamics_record_evidence_capture.v1",
+        "enabled": true,
+        "requested": true,
+        "phase": phase,
+        "policy": "start_end",
+        "clock_domain": "device_elapsed_realtime_ns",
+        "clock_alignment_status": "bracketed",
+        "before": probe_marker(&format!("before_evidence_{phase}"), before_uptime_ms, before_elapsed_ms),
+        "after": probe_marker(&format!("after_evidence_{phase}"), after_uptime_ms, after_elapsed_ms),
+        "bundle": {
+            "schema": "input_dynamics_observation_bundle.v1",
+            "index": format!("evidence/{phase}/index.json")
+        }
+    })
+}
+
+fn legacy_evidence_phase(phase: &str) -> Value {
+    json!({
+        "schema": "input_dynamics_record_evidence_capture.v1",
+        "enabled": true,
+        "requested": true,
+        "phase": phase,
+        "policy": "start_end",
+        "bundle": {
+            "schema": "input_dynamics_observation_bundle.v1",
+            "index": format!("evidence/{phase}/index.json")
+        }
+    })
+}
+
+fn probe_marker(phase: &str, uptime_ms: i64, elapsed_realtime_ms: i64) -> Value {
+    let uptime_ns = uptime_ms.saturating_mul(1_000_000);
+    let elapsed_realtime_ns = elapsed_realtime_ms.saturating_mul(1_000_000);
+    let request_id = format!("request-{phase}");
+    json!({
+        "schema": "input_dynamics_device_clock_probe.v1",
+        "phase": phase,
+        "probe_source": "ime_status_broadcast",
+        "request_id": request_id,
+        "package_name": "org.inputdynamics.ime.debug",
+        "command": "STATUS",
+        "result_file_path": "/sdcard/Android/data/org.inputdynamics.ime.debug/files/research_typing_logs/input_dynamics_command_result.json",
+        "status_file_path": "/sdcard/Android/data/org.inputdynamics.ime.debug/files/research_typing_logs/input_dynamics_control_status.json",
+        "host_wall_ms_before_device_timestamp": 1_800_000_000_000_i64,
+        "host_wall_ms_after_device_timestamp": 1_800_000_000_001_i64,
+        "host_monotonic_ns_before_device_timestamp": 1_000_i64,
+        "host_monotonic_ns_after_device_timestamp": 2_000_i64,
+        "host_monotonic_reference": "cli_process_start",
+        "host_bracket": {
+            "clock_domain": "host_process_monotonic_ns",
+            "timestamp_source": "host_process",
+            "timestamp_precision": "nanoseconds",
+            "before_ns": 1_000_i64,
+            "after_ns": 2_000_i64
+        },
+        "host_wall_bracket": {
+            "clock_domain": "host_wall_ms",
+            "timestamp_source": "host_process",
+            "timestamp_precision": "milliseconds",
+            "before_ms": 1_800_000_000_000_i64,
+            "after_ms": 1_800_000_000_001_i64
+        },
+        "clock_domain": "device_elapsed_realtime_ns",
+        "clock_alignment_status": "not_estimated",
+        "device_clock_probe": device_clock_probe(&request_id, uptime_ms, uptime_ns, elapsed_realtime_ns),
+        "t_uptime_ms": uptime_ms,
+        "t_uptime_ns": uptime_ns,
+        "t_elapsed_realtime_ns": elapsed_realtime_ns,
+        "device_wall_ms": 1_800_000_000_000_i64,
+    })
+}
+
+fn device_clock_probe(
+    request_id: &str,
+    uptime_ms: i64,
+    uptime_ns: i64,
+    elapsed_realtime_ns: i64,
+) -> Value {
+    json!({
+        "schema": "input_dynamics_device_clock_probe.v1",
+        "request_id": request_id,
+        "probe_source": "status_broadcast",
+        "captured_by": "android_control_status",
+        "canonical_clock_domain": "device_elapsed_realtime_ns",
+        "wall_time_role": "diagnostic",
+        "pending_writes_drained": true,
+        "t_uptime_ms": uptime_ms,
+        "t_uptime_ns": uptime_ns,
+        "t_elapsed_realtime_ns": elapsed_realtime_ns,
+        "t_wall_ms": 1_800_000_000_000_i64,
+        "uptime_time": {
+            "clock_domain": "android_uptime_ms",
+            "timestamp_source": "callback_capture",
+            "timestamp_precision": "milliseconds",
+            "field": "t_uptime_ms",
+            "field_ns": "t_uptime_ns",
+            "field_ns_precision": "milliseconds_converted_to_nanoseconds"
+        },
+        "elapsed_realtime_time": {
+            "clock_domain": "device_elapsed_realtime_ns",
+            "timestamp_source": "callback_capture",
+            "timestamp_precision": "nanoseconds",
+            "field": "t_elapsed_realtime_ns"
+        },
+        "wall_time": {
+            "clock_domain": "device_wall_ms",
+            "timestamp_source": "callback_capture",
+            "timestamp_precision": "milliseconds",
+            "field": "t_wall_ms"
+        }
+    })
 }
 
 fn create_run_summary_fixture(root: &Path) -> TestResult<()> {
@@ -534,6 +1073,29 @@ fn write_jsonl(path: &Path, values: &[Value]) -> TestResult<()> {
     }
     fs::write(path, text)?;
     Ok(())
+}
+
+fn ensure_eq<T>(actual: &T, expected: &T, label: &str) -> Result<(), String>
+where
+    T: Debug + PartialEq,
+{
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "{label} mismatch: actual={actual:?} expected={expected:?}"
+        ))
+    }
+}
+
+fn action_command<'a>(result: &'a Value, kind: &str) -> Option<&'a str> {
+    result
+        .get("next_actions")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|action| action.get("kind").and_then(Value::as_str) == Some(kind))?
+        .get("command")
+        .and_then(Value::as_str)
 }
 
 fn assert_ok<T, E>(result: Result<T, E>, label: &str) -> Option<T>

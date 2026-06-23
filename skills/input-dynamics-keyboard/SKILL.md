@@ -204,7 +204,10 @@ idk record \
 These bundles are separate from the continuous video captured by default. Use
 `--full-accessibility-evidence` only when a protocol requires uncompressed
 accessibility hierarchy dumps. Treat evidence artifacts as sensitive local run
-data.
+data. Current evidence phase metadata is bracketed by the same STATUS-backed
+`device_clock_probe` helper as screenrecord timing, with
+`before_evidence_start`, `after_evidence_start`, `before_evidence_end`, and
+`after_evidence_end` phases.
 
 For a bounded agent-driven run that also needs persistent uinput controller
 metadata, run `record` with `--with-input-controller` and a duration. Then drive
@@ -317,13 +320,24 @@ idk recording inspect --dir "runs/$RUN_ID"
 ```
 
 Use `flags.valid_for_analysis`, `flags.needs_validation`,
-`flags.has_video`, `flags.needs_video`, `flags.needs_press_summaries`,
-`flags.needs_run_summary`, `flags.needs_derivation`, and
-`flags.needs_timeline` to decide the next step. Required missing or stale video
-makes `valid_for_analysis` false. If `next_actions` is non-empty, prefer those
-CLI commands over ad hoc file inspection. The inspection output fingerprints
-source artifacts and reports stale video, summaries, and timelines, but it does
-not rewrite validation or derived files.
+`flags.has_video`, `flags.needs_video`, `flags.canonical_clock_ready`,
+`flags.has_legacy_timing`, `flags.needs_canonical_recording`,
+`flags.needs_press_summaries`, `flags.needs_run_summary`,
+`flags.needs_derivation`, and `flags.needs_timeline` to decide the next step.
+Required missing or stale video makes `valid_for_analysis` false. The `clock`
+object classifies saved video/evidence anchors as `bracketed`,
+`legacy_wall_clock_bracketed`, `missing_source`, `stale_inputs`,
+`probe_failed`, `not_requested`, or `not_estimated`. If `next_actions` is
+non-empty, prefer those CLI commands over ad hoc file inspection. The
+inspection output fingerprints source artifacts and reports stale video,
+summaries, timelines, and clock-anchor readiness, but it does not rewrite
+validation or derived files.
+
+Do not treat `valid_for_analysis: true` as enough for clock-dependent claims.
+For video/evidence anchors, cross-source timeline claims, or ordering claims
+that depend on canonical clocks, require `flags.canonical_clock_ready: true`,
+`flags.needs_canonical_recording: false`, and no `record_with_video` or
+`record_with_canonical_clocks` action.
 
 5. Use lower-level status and layout commands when debugging:
 

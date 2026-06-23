@@ -435,8 +435,11 @@ each timestamp role separately instead of relying on one record-level
 
 When `record` is run with `--with-evidence`, `manifest.json` includes
 `evidence.enabled: true`, `evidence.policy: start_end`, and the start/end
-observation bundle metadata. Accessibility dumps and screenshots may contain
-visible screen content; keep them with the same care as raw run artifacts.
+observation bundle metadata. Each evidence phase is bracketed by the same
+request-correlated `device_clock_probe` helper used for screenrecord anchors:
+`before_evidence_start`, `after_evidence_start`, `before_evidence_end`, and
+`after_evidence_end`. Accessibility dumps and screenshots may contain visible
+screen content; keep them with the same care as raw run artifacts.
 
 When `record` is run with `--with-input-controller`, `manifest.json` includes:
 
@@ -471,11 +474,25 @@ This command is read-only. It reports the selected IME session JSONL file,
 record counts, artifact fingerprints, video presence and staleness,
 stored-versus-current validation state, timeline source staleness, and boolean
 flags such as `valid_for_analysis`, `has_video`, `needs_video`,
+`canonical_clock_ready`, `has_legacy_timing`, `needs_canonical_recording`,
 `needs_validation`, `needs_press_summaries`, `needs_run_summary`,
-`needs_derivation`, and `needs_timeline`. Required missing or stale video makes
-`valid_for_analysis` false and adds a canonical `record_with_video` action.
-`next_actions` contains local CLI commands an agent can run to refresh missing
-or stale artifacts. It does not probe the device or derive new clock alignment.
+`needs_derivation`, and `needs_timeline`.
+
+The `clock` object classifies saved video and evidence anchors as
+`bracketed`, `legacy_wall_clock_bracketed`, `missing_source`, `stale_inputs`,
+`probe_failed`, `not_requested`, or `not_estimated`. Legacy wall-clock timing
+remains readable, but it does not set `canonical_clock_ready`. Required missing
+or stale video makes `valid_for_analysis` false and adds a canonical
+`record_with_video` action. Missing, legacy, stale, or malformed canonical
+clock anchors add a canonical recorder action. `next_actions` contains local
+CLI commands an agent can run to refresh missing or stale artifacts. It does
+not probe the device or derive new clock alignment.
+
+Treat `valid_for_analysis` as a base artifact/readability gate. For any
+video/evidence anchor claim, cross-source timeline claim, or ordering claim that
+depends on canonical clocks, also require `flags.canonical_clock_ready: true`,
+`flags.needs_canonical_recording: false`, and no recorder rerun action in
+`next_actions`.
 
 After recording with the current CLI:
 

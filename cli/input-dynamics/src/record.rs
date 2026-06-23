@@ -24,6 +24,7 @@ use crate::uinput;
 use crate::validate::validate_logs;
 
 const DEFAULT_RECORD_INPUT_CONTROLLER: &str = "input-dynamics-cli";
+const EVIDENCE_CAPTURE_SCHEMA: &str = "input_dynamics_record_evidence_capture.v1";
 const VIDEO_SCHEMA: &str = "input_dynamics_video_capture.v1";
 const VIDEO_STARTUP_CHECK_DELAY: Duration = Duration::from_millis(250);
 
@@ -785,18 +786,27 @@ fn record_evidence(
 ) -> CliResult<Value> {
     if !config.with_evidence {
         return Ok(json!({
+            "schema": EVIDENCE_CAPTURE_SCHEMA,
             "enabled": false,
             "requested": false,
             "phase": phase,
         }));
     }
     let phase_dir = paths.evidence.join(phase);
+    let before = capture_device_clock_probe(app, &format!("before_evidence_{phase}"))?;
     let bundle = observe::all(app, &phase_dir, record_accessibility_detail(config))?;
+    let after = capture_device_clock_probe(app, &format!("after_evidence_{phase}"))?;
+    validate_probe_order(&before, &after)?;
     Ok(json!({
+        "schema": EVIDENCE_CAPTURE_SCHEMA,
         "enabled": true,
         "requested": true,
         "phase": phase,
         "policy": "start_end",
+        "clock_domain": "device_elapsed_realtime_ns",
+        "clock_alignment_status": "bracketed",
+        "before": before,
+        "after": after,
         "bundle": bundle,
     }))
 }

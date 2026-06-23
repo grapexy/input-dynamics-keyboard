@@ -16,11 +16,11 @@ pub(crate) const DEVICE_CLOCK_PROBE_SCHEMA: &str = "input_dynamics_device_clock_
 static MONOTONIC_REFERENCE: OnceLock<Instant> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ProbeFields {
-    uptime_ms: i64,
-    uptime_ns: i64,
-    elapsed_realtime_ns: i64,
-    wall_ms: i64,
+pub(crate) struct ProbeFields {
+    pub(crate) uptime_ms: i64,
+    pub(crate) uptime_ns: i64,
+    pub(crate) elapsed_realtime_ns: i64,
+    pub(crate) wall_ms: i64,
 }
 
 pub(crate) fn capture_device_clock_probe(app: &App, phase: &str) -> CliResult<Value> {
@@ -115,6 +115,65 @@ pub(crate) fn validate_probe_order(previous: &Value, next: &Value) -> CliResult<
         )));
     }
     Ok(())
+}
+
+pub(crate) fn validate_probe_marker(marker: &Value, label: &str) -> CliResult<ProbeFields> {
+    let schema = required_string(marker, "schema")?;
+    if schema != DEVICE_CLOCK_PROBE_SCHEMA {
+        return Err(CliError::new(format!(
+            "{label} marker has unsupported schema: {schema}"
+        )));
+    }
+    require_string_value(marker, "probe_source", "ime_status_broadcast")?;
+    require_string_value(
+        marker,
+        "clock_domain",
+        ClockDomain::DeviceElapsedRealtimeNs.as_str(),
+    )?;
+    require_string_value(
+        marker,
+        "clock_alignment_status",
+        AlignmentStatus::NotEstimated.as_str(),
+    )?;
+    require_string_value(marker, "host_monotonic_reference", "cli_process_start")?;
+    validate_probe_bracket(
+        marker,
+        BracketExpectation {
+            key: "host_bracket",
+            clock_domain: ClockDomain::HostProcessMonotonicNs,
+            timestamp_source: TimestampSource::HostProcess,
+            timestamp_precision: TimestampPrecision::Nanoseconds,
+            before_key: "before_ns",
+            after_key: "after_ns",
+        },
+    )?;
+    validate_probe_bracket(
+        marker,
+        BracketExpectation {
+            key: "host_wall_bracket",
+            clock_domain: ClockDomain::HostWallMs,
+            timestamp_source: TimestampSource::HostProcess,
+            timestamp_precision: TimestampPrecision::Milliseconds,
+            before_key: "before_ms",
+            after_key: "after_ms",
+        },
+    )?;
+    let fields = marker_probe_fields(marker, label)?;
+    let marker_request_id = required_string(marker, "request_id")?;
+    let probe_request_id = marker
+        .get("device_clock_probe")
+        .ok_or_else(|| CliError::new(format!("{label} marker is missing device_clock_probe")))
+        .and_then(|probe| required_string(probe, "request_id"))?;
+    if marker_request_id != probe_request_id {
+        return Err(CliError::new(format!(
+            "{label} marker request_id mismatch: marker={marker_request_id} probe={probe_request_id}"
+        )));
+    }
+    require_i64_value(marker, "t_uptime_ms", fields.uptime_ms)?;
+    require_i64_value(marker, "t_uptime_ns", fields.uptime_ns)?;
+    require_i64_value(marker, "t_elapsed_realtime_ns", fields.elapsed_realtime_ns)?;
+    require_i64_value(marker, "device_wall_ms", fields.wall_ms)?;
+    Ok(fields)
 }
 
 pub(crate) fn host_wall_millis() -> CliResult<u64> {
@@ -213,6 +272,43 @@ fn validate_device_clock_probe(probe: &Value) -> CliResult<ProbeFields> {
         elapsed_realtime_ns,
         wall_ms,
     })
+}
+
+#[derive(Clone, Copy)]
+struct BracketExpectation {
+    key: &'static str,
+    clock_domain: ClockDomain,
+    timestamp_source: TimestampSource,
+    timestamp_precision: TimestampPrecision,
+    before_key: &'static str,
+    after_key: &'static str,
+}
+
+fn validate_probe_bracket(value: &Value, expected: BracketExpectation) -> CliResult<()> {
+    let key = expected.key;
+    let bracket = value
+        .get(key)
+        .ok_or_else(|| CliError::new(format!("probe marker is missing {key}")))?;
+    require_string_value(bracket, "clock_domain", expected.clock_domain.as_str())?;
+    require_string_value(
+        bracket,
+        "timestamp_source",
+        expected.timestamp_source.as_str(),
+    )?;
+    require_string_value(
+        bracket,
+        "timestamp_precision",
+        expected.timestamp_precision.as_str(),
+    )?;
+    let before = required_i64(bracket, expected.before_key)?;
+    let after = required_i64(bracket, expected.after_key)?;
+    if after < before {
+        return Err(CliError::new(format!(
+            "{} moved backwards: {}={before} {}={after}",
+            expected.key, expected.before_key, expected.after_key
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -331,6 +427,17 @@ fn require_true_bool_value(value: &Value, key: &str) -> CliResult<()> {
         Ok(())
     } else {
         Err(CliError::new(format!("{key} mismatch: expected=true")))
+    }
+}
+
+fn require_i64_value(value: &Value, key: &str, expected: i64) -> CliResult<()> {
+    let actual = required_i64(value, key)?;
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(CliError::new(format!(
+            "{key} mismatch: expected={expected} actual={actual}"
+        )))
     }
 }
 
