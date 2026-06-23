@@ -1055,7 +1055,7 @@ fn write_controller_request(
     serde_json::to_writer(&mut *stream, request).map_err(|error| {
         if json_io_timed_out(&error) {
             log_client_event(event_log, "request_write_timeout", request, json!({}));
-            request_timeout_error(paths, request, "write")
+            request_timeout_error(paths, request, "write", REQUEST_TIMEOUT)
         } else {
             CliError::from(error)
         }
@@ -1071,7 +1071,7 @@ fn write_controller_request(
                     "error": error.to_string(),
                 }),
             );
-            request_timeout_error(paths, request, "write")
+            request_timeout_error(paths, request, "write", REQUEST_TIMEOUT)
         } else {
             CliError::from(error)
         }
@@ -1087,7 +1087,7 @@ fn write_controller_request(
                     "error": error.to_string(),
                 }),
             );
-            request_timeout_error(paths, request, "write")
+            request_timeout_error(paths, request, "write", REQUEST_TIMEOUT)
         } else {
             CliError::from(error)
         }
@@ -1103,7 +1103,18 @@ fn read_controller_response_text(
     request: &ControllerRequest,
     event_log: Option<&ControllerEventLog>,
 ) -> CliResult<String> {
+    read_controller_response_text_with_timeout(stream, paths, request, event_log, REQUEST_TIMEOUT)
+}
+
+fn read_controller_response_text_with_timeout(
+    stream: &mut UnixStream,
+    paths: &RuntimePaths,
+    request: &ControllerRequest,
+    event_log: Option<&ControllerEventLog>,
+    timeout: Duration,
+) -> CliResult<String> {
     log_client_event(event_log, "response_read_start", request, json!({}));
+    stream.set_read_timeout(Some(timeout))?;
     let mut response_text = String::new();
     stream.read_to_string(&mut response_text).map_err(|error| {
         if io_timed_out(&error) {
@@ -1114,11 +1125,11 @@ fn read_controller_response_text(
                 json!({
                     "error_kind": io_error_kind_name(error.kind()),
                     "error": error.to_string(),
-                    "timeout_ms": millis_u64(REQUEST_TIMEOUT),
+                    "timeout_ms": millis_u64(timeout),
                     "state": read_state_json(&paths.state),
                 }),
             );
-            request_timeout_error(paths, request, "read")
+            request_timeout_error(paths, request, "read", timeout)
         } else {
             log_client_event(
                 event_log,
@@ -1171,12 +1182,13 @@ fn request_timeout_error(
     paths: &RuntimePaths,
     request: &ControllerRequest,
     phase: &str,
+    timeout: Duration,
 ) -> CliError {
     let state = read_state_json(&paths.state);
     CliError::new(format!(
         "timed out during {phase} for controller {} request after {} ms; socket={}; state={}; {}",
         request.name(),
-        millis_u64(REQUEST_TIMEOUT),
+        millis_u64(timeout),
         path_string_lossy(&paths.socket),
         path_string_lossy(&paths.state),
         timeout_state_summary(&state),
@@ -2481,16 +2493,21 @@ fn session_lock_ready(session_lock: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use std::ffi::OsStr;
-    use std::path::PathBuf;
+    use std::fs;
+    use std::os::unix::net::UnixStream;
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant};
 
     use proptest::strategy::Strategy;
 
     use crate::controller::{
-        ControllerRequest, RuntimePaths, controller_response_summary,
-        io_kind_response_write_abandoned, parse_dumpsys_input, parse_i64_list, run_id_fragment,
-        sanitize_path_component, timeout_state_summary, virtual_event_path_from_status,
+        ControllerEventLog, ControllerRequest, RuntimePaths, controller_response_summary,
+        io_kind_response_write_abandoned, parse_dumpsys_input, parse_i64_list,
+        read_controller_response_text_with_timeout, run_id_fragment, sanitize_path_component,
+        timeout_state_summary, virtual_event_path_from_status, write_and_log_controller_response,
     };
-    use crate::uinput::{PathSpec, TouchPoint};
+    use crate::profile::InterKeyDelaySampling;
+    use crate::uinput::{PathSpec, TapSpec, TouchPoint};
 
     const SAMPLE_DUMPSYS_INPUT: &str = r"
 Event Hub State:
@@ -2574,6 +2591,92 @@ Input Reader State (Nums of device: 4):
             !io_kind_response_write_abandoned(std::io::ErrorKind::PermissionDenied),
             "unrelated IO errors should remain controller failures"
         );
+    }
+
+    #[test]
+    fn response_timeout_then_abandoned_write_is_logged_without_error() {
+        let result = response_timeout_then_abandoned_write_regression();
+        assert!(
+            result.is_ok(),
+            "response timeout and abandoned write regression should pass: {result:?}"
+        );
+    }
+
+    fn response_timeout_then_abandoned_write_regression() -> crate::error::CliResult<()> {
+        let base = test_runtime_dir("controller-timeout-abandoned");
+        fs::create_dir_all(&base)?;
+        let paths =
+            RuntimePaths::from_base_dir(base.clone(), "org.inputdynamics.ime.debug", "test-device");
+        fs::write(
+            &paths.state,
+            serde_json::json!({
+                "current_command": {
+                    "sequence": 1_u64,
+                    "command": "tap",
+                    "status": "in_progress"
+                },
+                "last_command": serde_json::Value::Null,
+                "last_error": serde_json::Value::Null
+            })
+            .to_string(),
+        )?;
+        let events = base.join("controller.events.jsonl");
+        let client_log = test_event_log(events.clone(), "client");
+        let controller_log = test_event_log(events.clone(), "controller");
+        let request = ControllerRequest::Tap {
+            fallback: TapSpec::new(12, 34),
+            key_context: None,
+            inter_key_delay_sampling: InterKeyDelaySampling::Skip,
+        };
+        let (mut client_stream, mut controller_stream) = UnixStream::pair()?;
+
+        let timeout_result = read_controller_response_text_with_timeout(
+            &mut client_stream,
+            &paths,
+            &request,
+            Some(&client_log),
+            Duration::from_millis(1),
+        );
+        if timeout_result.is_ok() {
+            return Err(crate::error::CliError::new(
+                "client response read should time out while controller has not responded",
+            ));
+        }
+        drop(client_stream);
+
+        write_and_log_controller_response(
+            &mut controller_stream,
+            &request,
+            &serde_json::json!({
+                "ok": true,
+                "active": true,
+                "input_backend": "uinput"
+            }),
+            &controller_log,
+        )?;
+
+        let records = read_test_event_records(&events)?;
+        if !records.iter().any(|record| {
+            record.get("event").and_then(serde_json::Value::as_str) == Some("response_read_timeout")
+                && record.get("source").and_then(serde_json::Value::as_str) == Some("client")
+                && record.get("timeout_ms").and_then(serde_json::Value::as_u64) == Some(1)
+        }) {
+            return Err(crate::error::CliError::new(
+                "event journal should include the client response timeout",
+            ));
+        }
+        if !records.iter().any(|record| {
+            record.get("event").and_then(serde_json::Value::as_str) == Some("response_write_error")
+                && record.get("source").and_then(serde_json::Value::as_str) == Some("controller")
+                && record.get("abandoned").and_then(serde_json::Value::as_bool) == Some(true)
+        }) {
+            return Err(crate::error::CliError::new(
+                "event journal should include nonfatal abandoned response delivery",
+            ));
+        }
+
+        fs::remove_dir_all(&base)?;
+        Ok(())
     }
 
     #[test]
@@ -2816,5 +2919,35 @@ Input Reader State (Nums of device: 4):
 
     fn any_char_strategy() -> impl Strategy<Value = char> {
         proptest::char::range('\u{0}', '\u{7f}')
+    }
+
+    fn test_runtime_dir(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "input-dynamics-{name}-{}-{}",
+            std::process::id(),
+            super::wall_time_ms()
+        ))
+    }
+
+    fn test_event_log(path: PathBuf, source: &'static str) -> ControllerEventLog {
+        ControllerEventLog {
+            path,
+            package_name: String::from("org.inputdynamics.ime.debug"),
+            device_serial: String::from("test-device"),
+            run_id: String::from("run-controller-timeout-abandoned-test"),
+            controller_invocation_id: String::from("invocation-controller-timeout-abandoned-test"),
+            source,
+            pid: std::process::id(),
+            started: Instant::now(),
+        }
+    }
+
+    fn read_test_event_records(path: &Path) -> crate::error::CliResult<Vec<serde_json::Value>> {
+        let text = fs::read_to_string(path)?;
+        let mut records = Vec::new();
+        for line in text.lines() {
+            records.push(serde_json::from_str(line)?);
+        }
+        Ok(records)
     }
 }
