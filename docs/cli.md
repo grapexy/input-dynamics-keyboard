@@ -39,7 +39,10 @@ cargo run --quiet -p input-dynamics -- --serial "$SERIAL" session status
 ```
 
 Stateful session runtime files are keyed by package and ADB serial, so two
-devices do not share controller sockets, state files, or ownership locks.
+devices do not share controller sockets, state files, or ownership locks. The
+mutable control files remain stable for current-session lookup, while each
+controller start also creates a preserved diagnostics invocation under
+`<runtime>/<package>.<serial>.runs/`.
 
 ## Common Workflow
 
@@ -87,6 +90,15 @@ cargo run --quiet -p input-dynamics -- session start \
 The IME JSONL `session_start` record and controller state include
 `input_profile_source`, `input_profile_id`, `input_profile_schema`,
 `input_profile_hash`, and `input_profile_seed`.
+
+Controller diagnostics are automatic. `session start`, `type`, `tap`, `press`,
+and `session stop` write a unified structured event journal at
+`controller.events.jsonl` inside the current invocation directory. The journal
+contains client and controller request lifecycle events, including request
+writes, response reads/timeouts, uinput writes, state writes, response delivery,
+and controller exit. Stdout/stderr and final controller state are stored in the
+same invocation directory. No separate snapshot command is required before a
+new session.
 
 For agent observation, use `observe`. These commands do not start logging and
 do not inject input:
@@ -224,11 +236,14 @@ scraping human-oriented text.
   event path, Event Hub device metadata, Input Reader device metadata when
   Android exposes them, and compact controller command diagnostics:
   `current_command`, `last_command`, `last_error`, and `command_sequence`.
+  `input.runtime.current_invocation` points to the active/latest diagnostics
+  directory and event journal.
 - `session stop`: stops the local input controller, verifies normal runtime
   cleanup, verifies that the mirrored virtual touchscreen event path has
   disappeared when it was detected, then stops IME logging. If a previous
   controller process was interrupted, `session stop` also removes stale runtime
-  files and reports cleanup from the saved state.
+  files and reports cleanup from the saved state. Final controller state and
+  final session lock are preserved in the diagnostics invocation directory.
 - `layout`: returns status including `keyboard_layout` when the IME is visible.
   Layout output includes keyboard-view bounds, display size/rotation, and
   screen-space key centers for coordinate calibration.

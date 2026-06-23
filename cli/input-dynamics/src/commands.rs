@@ -668,6 +668,9 @@ fn run_controller_command(app: &App, command: ControllerCommand) -> CliResult<Va
             state,
             uinput_stdout,
             uinput_stderr,
+            events,
+            final_state,
+            controller_invocation_id,
             run_id,
             input_profile_runtime_json,
         } => {
@@ -680,6 +683,9 @@ fn run_controller_command(app: &App, command: ControllerCommand) -> CliResult<Va
                 state,
                 uinput_stdout,
                 uinput_stderr,
+                events,
+                final_state,
+                controller_invocation_id,
                 run_id,
                 input_profile,
             };

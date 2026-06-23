@@ -485,6 +485,15 @@ pub(crate) enum ControllerCommand {
         /// ADB uinput stderr log path.
         #[arg(long)]
         uinput_stderr: PathBuf,
+        /// Unified controller event journal path.
+        #[arg(long)]
+        events: PathBuf,
+        /// Final controller state snapshot path.
+        #[arg(long)]
+        final_state: PathBuf,
+        /// Controller invocation id for diagnostics.
+        #[arg(long)]
+        controller_invocation_id: String,
         /// External run id for runtime provenance.
         #[arg(long)]
         run_id: String,

@@ -41,7 +41,9 @@ LOG_DIR=input_dynamics_logs
 If more than one Android device is connected, choose the target from
 `adb devices` and pass `--serial "$SERIAL"` to every `idk` command. The CLI
 fails rather than guessing when multiple devices are visible. Session runtime
-state is keyed by package and ADB serial.
+state is keyed by package and ADB serial. Each controller start also creates a
+preserved diagnostics invocation directory under the runtime root, exposed in
+`session status` as `input.runtime.current_invocation`.
 
 GitHub Release APKs are signed debug-variant APKs, so the default package is
 `org.inputdynamics.ime.debug`. Locally built non-debug APKs use the same
@@ -160,6 +162,10 @@ path. It removes stale runtime files, stops IME logging, and reports whether
 the saved virtual touchscreen event path is gone. For controller timing or
 socket failures, inspect `idk session status`; `input.state` exposes
 `current_command`, `last_command`, `last_error`, and `command_sequence`.
+Also inspect `input.runtime.current_invocation.invocation.events`; it is a
+unified `controller.events.jsonl` journal with client and controller request
+events, response timeouts/write failures, uinput writes, state writes, and
+controller exit. Do not rely on manual `/tmp` snapshots for normal forensics.
 
 4. For bounded capture, use `record` with an external run id:
 

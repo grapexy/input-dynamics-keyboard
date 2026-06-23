@@ -32,6 +32,11 @@ const CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 const CLEANUP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_TAIL_MS: u64 = 100;
+const DIAGNOSTIC_RETENTION_COUNT: usize = 8;
+const RUN_ID_FRAGMENT_MAX_CHARS: usize = 64;
+const EVENT_SCHEMA: &str = "input_dynamics_controller_event.v1";
+const CURRENT_SCHEMA: &str = "input_dynamics_controller_current.v1";
+const MANIFEST_SCHEMA: &str = "input_dynamics_controller_invocation.v1";
 
 #[derive(Debug)]
 pub(crate) struct RunConfig {
@@ -39,6 +44,9 @@ pub(crate) struct RunConfig {
     pub(crate) state: PathBuf,
     pub(crate) uinput_stdout: PathBuf,
     pub(crate) uinput_stderr: PathBuf,
+    pub(crate) events: PathBuf,
+    pub(crate) final_state: PathBuf,
+    pub(crate) controller_invocation_id: String,
     pub(crate) run_id: String,
     pub(crate) input_profile: Option<RuntimeProfile>,
 }
@@ -53,14 +61,82 @@ pub(crate) struct ControllerTapSpec {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RuntimePaths {
     dir: PathBuf,
+    package_name: String,
     device_serial: String,
     socket: PathBuf,
     state: PathBuf,
     session_lock: PathBuf,
+    current: PathBuf,
+    runs_dir: PathBuf,
     controller_stdout: PathBuf,
     controller_stderr: PathBuf,
     uinput_stdout: PathBuf,
     uinput_stderr: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ControllerInvocation {
+    id: String,
+    dir: PathBuf,
+    manifest: PathBuf,
+    events: PathBuf,
+    controller_stdout: PathBuf,
+    controller_stderr: PathBuf,
+    uinput_stdout: PathBuf,
+    uinput_stderr: PathBuf,
+    final_state: PathBuf,
+    final_session_lock: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+struct ControllerEventLog {
+    path: PathBuf,
+    package_name: String,
+    device_serial: String,
+    run_id: String,
+    controller_invocation_id: String,
+    source: &'static str,
+    pid: u32,
+    started: Instant,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum ResponseWriteOutcome {
+    Delivered,
+    Abandoned { error_kind: String, error: String },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InvocationActive {
+    Active,
+    Inactive,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct InvocationMetadata<'a> {
+    package_name: &'a str,
+    device_serial: &'a str,
+    run_id: &'a str,
+    input_profile: Option<&'a RuntimeProfile>,
+    controller_pid: Option<u32>,
+    active: InvocationActive,
+}
+
+struct ControllerRequestContext<'a> {
+    uinput_process: &'a mut StdinProcess,
+    profile: &'a uinput::TouchscreenProfile,
+    generator: Option<&'a mut ProfileGenerator>,
+    runtime_state: &'a mut ControllerRuntimeState,
+    event_log: &'a ControllerEventLog,
+}
+
+impl InvocationActive {
+    const fn as_bool(self) -> bool {
+        match self {
+            Self::Active => true,
+            Self::Inactive => false,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -212,7 +288,10 @@ pub(crate) fn acquire_session_start(app: &App, run_id: &str) -> CliResult<Sessio
 }
 
 pub(crate) fn clear_session_lock(app: &App) -> CliResult<()> {
-    remove_file_if_exists(&RuntimePaths::for_app(app)?.session_lock)
+    let paths = RuntimePaths::for_app(app)?;
+    preserve_session_lock(&paths);
+    mark_current_inactive(&paths);
+    remove_file_if_exists(&paths.session_lock)
 }
 
 impl ControllerTapSpec {
@@ -236,6 +315,7 @@ pub(crate) fn start(
 ) -> CliResult<Value> {
     let paths = RuntimePaths::for_app(app)?;
     fs::create_dir_all(&paths.dir)?;
+    fs::create_dir_all(&paths.runs_dir)?;
     remove_stale_runtime(&paths)?;
 
     let existing_status = status(app)?;
@@ -253,15 +333,53 @@ pub(crate) fn start(
         }));
     }
 
+    prune_old_invocations(&paths)?;
+    let invocation = ControllerInvocation::new(&paths, run_id);
+    fs::create_dir_all(&invocation.dir)?;
+    let metadata = InvocationMetadata {
+        package_name: app.package(),
+        device_serial: paths.device_serial.as_str(),
+        run_id,
+        input_profile,
+        controller_pid: None,
+        active: InvocationActive::Active,
+    };
+    write_invocation_manifest(&paths, &invocation, metadata)?;
+    write_current_invocation(&paths, &invocation, metadata)?;
+    let start_event_log =
+        ControllerEventLog::client_from_invocation(app, &paths, &invocation, run_id);
+    start_event_log.append(
+        "controller_spawn_start",
+        json!({
+            "controller_stdout": path_string_lossy(&invocation.controller_stdout),
+            "controller_stderr": path_string_lossy(&invocation.controller_stderr),
+            "uinput_stdout": path_string_lossy(&invocation.uinput_stdout),
+            "uinput_stderr": path_string_lossy(&invocation.uinput_stderr),
+        }),
+    );
+
     let executable = env::current_exe()?;
     let executable_text = path_string(&executable)?;
-    let args = controller_args(app, &paths, run_id, input_profile)?;
+    let args = controller_args(app, &paths, &invocation, run_id, input_profile)?;
     let child = spawn_process_to_files(
         &executable_text,
         &args,
-        &paths.controller_stdout,
-        &paths.controller_stderr,
+        &invocation.controller_stdout,
+        &invocation.controller_stderr,
     )?;
+    let child_pid = child.id();
+    let spawned_metadata = InvocationMetadata {
+        controller_pid: Some(child_pid),
+        ..metadata
+    };
+    write_invocation_manifest(&paths, &invocation, spawned_metadata)?;
+    write_current_invocation(&paths, &invocation, spawned_metadata)?;
+    start_event_log.append(
+        "controller_spawn_done",
+        json!({
+            "controller_pid": child_pid,
+        }),
+    );
     drop(child);
 
     wait_until_active(app, &paths, run_id)
@@ -369,10 +487,57 @@ pub(crate) fn path(app: &App, spec: PathSpec) -> CliResult<Value> {
 }
 
 pub(crate) fn run(app: &App, config: &RunConfig) -> CliResult<Value> {
+    let event_log = ControllerEventLog::controller(app, config)?;
+    event_log.append(
+        "controller_start",
+        json!({
+            "socket": path_string_lossy(&config.socket),
+            "state": path_string_lossy(&config.state),
+            "events": path_string_lossy(&config.events),
+            "final_state": path_string_lossy(&config.final_state),
+            "uinput_stdout": path_string_lossy(&config.uinput_stdout),
+            "uinput_stderr": path_string_lossy(&config.uinput_stderr),
+            "input_profile": config
+                .input_profile
+                .as_ref()
+                .map(RuntimeProfile::summary_json),
+        }),
+    );
+    let outcome = run_inner(app, config, &event_log);
+    match outcome.as_ref() {
+        Ok(value) => event_log.append(
+            "controller_exit",
+            json!({
+                "ok": value.get("ok").cloned().unwrap_or(Value::Null),
+                "stopped": value.get("stopped").cloned().unwrap_or(Value::Null),
+            }),
+        ),
+        Err(error) => event_log.append(
+            "controller_exit",
+            json!({
+                "ok": false,
+                "error": error.to_string(),
+            }),
+        ),
+    }
+    outcome
+}
+
+fn run_inner(app: &App, config: &RunConfig, event_log: &ControllerEventLog) -> CliResult<Value> {
     remove_file_if_exists(&config.socket)?;
     let listener = UnixListener::bind(&config.socket)?;
     let before_profiles = uinput::discover_touchscreen_profiles(app)?;
     let profile = uinput::select_primary_touchscreen_profile(&before_profiles)?;
+    event_log.append(
+        "uinput_start",
+        json!({
+            "command": uinput::input_device_command(),
+            "stdout": path_string_lossy(&config.uinput_stdout),
+            "stderr": path_string_lossy(&config.uinput_stderr),
+            "physical_touchscreen": uinput::profile_summary(&profile),
+            "physical_touchscreen_profile_hash": uinput::profile_hash(&profile).ok(),
+        }),
+    );
     let mut uinput_process = start_uinput_process(app, config)?;
     write_uinput_line(&mut uinput_process, &uinput::register_line(&profile)?)?;
     write_uinput_line(
@@ -383,27 +548,43 @@ pub(crate) fn run(app: &App, config: &RunConfig) -> CliResult<Value> {
     ensure_uinput_alive(&mut uinput_process)?;
 
     let virtual_touchscreen = virtual_touchscreen_report(app, &profile, &before_profiles);
+    event_log.append(
+        "uinput_registered",
+        json!({
+            "virtual_touchscreen": &virtual_touchscreen,
+        }),
+    );
     let state = controller_state(app, config, &profile, &virtual_touchscreen)?;
     let mut runtime_state = ControllerRuntimeState::new(config.state.clone(), state);
     runtime_state.write()?;
+    event_log.append(
+        "state_write_done",
+        json!({
+            "state": "controller_ready",
+            "state_path": path_string_lossy(&config.state),
+        }),
+    );
 
     let mut stopped = false;
     let mut generator = config.input_profile.clone().map(ProfileGenerator::new);
     for stream_result in listener.incoming() {
         let stream = stream_result?;
-        if handle_stream(
-            stream,
-            &mut uinput_process,
-            &profile,
-            generator.as_mut(),
-            &mut runtime_state,
-        )? {
+        event_log.append("request_accept", json!({}));
+        let mut request_context = ControllerRequestContext {
+            uinput_process: &mut uinput_process,
+            profile: &profile,
+            generator: generator.as_mut(),
+            runtime_state: &mut runtime_state,
+            event_log,
+        };
+        if handle_stream(stream, &mut request_context)? {
             stopped = true;
             break;
         }
     }
 
     shutdown_uinput(uinput_process)?;
+    preserve_final_state(config, &runtime_state.value, event_log);
     remove_file_if_exists(&config.socket)?;
     remove_file_if_exists(&config.state)?;
 
@@ -418,6 +599,7 @@ pub(crate) fn run(app: &App, config: &RunConfig) -> CliResult<Value> {
 fn controller_args(
     app: &App,
     paths: &RuntimePaths,
+    invocation: &ControllerInvocation,
     run_id: &str,
     input_profile: Option<&RuntimeProfile>,
 ) -> CliResult<Vec<String>> {
@@ -435,9 +617,15 @@ fn controller_args(
         String::from("--state"),
         path_string(&paths.state)?,
         String::from("--uinput-stdout"),
-        path_string(&paths.uinput_stdout)?,
+        path_string(&invocation.uinput_stdout)?,
         String::from("--uinput-stderr"),
-        path_string(&paths.uinput_stderr)?,
+        path_string(&invocation.uinput_stderr)?,
+        String::from("--events"),
+        path_string(&invocation.events)?,
+        String::from("--final-state"),
+        path_string(&invocation.final_state)?,
+        String::from("--controller-invocation-id"),
+        invocation.id.clone(),
         String::from("--run-id"),
         String::from(run_id),
     ];
@@ -511,117 +699,362 @@ fn ensure_ready_for_input(app: &App, paths: &RuntimePaths) -> CliResult<()> {
 
 fn handle_stream(
     mut stream: UnixStream,
-    uinput_process: &mut StdinProcess,
-    profile: &uinput::TouchscreenProfile,
-    generator: Option<&mut ProfileGenerator>,
-    runtime_state: &mut ControllerRuntimeState,
+    context: &mut ControllerRequestContext<'_>,
 ) -> CliResult<bool> {
+    let request = read_controller_request(&mut stream, context.event_log)?;
+    let command_mark = start_tracked_request(context, &request)?;
+    let response = execute_tracked_request(context, &request, command_mark.as_ref())?;
+    write_and_log_controller_response(&mut stream, &request, &response, context.event_log)?;
+    context.event_log.append(
+        "request_done",
+        json!({
+            "command": request.name(),
+            "stop": matches!(request, ControllerRequest::Stop),
+        }),
+    );
+    Ok(matches!(request, ControllerRequest::Stop))
+}
+
+fn read_controller_request(
+    stream: &mut UnixStream,
+    event_log: &ControllerEventLog,
+) -> CliResult<ControllerRequest> {
     let mut request_text = String::new();
+    event_log.append("request_read_start", json!({}));
     stream.read_to_string(&mut request_text)?;
+    event_log.append(
+        "request_read_done",
+        json!({
+            "request_bytes": request_text.len(),
+        }),
+    );
     let request: ControllerRequest = serde_json::from_str(request_text.trim())?;
-    let command_mark = runtime_state.start_request(&request)?;
-    let response = match handle_request(&request, uinput_process, profile, generator) {
+    event_log.append(
+        "request_parsed",
+        json!({
+            "command": request.name(),
+            "request": request.summary_json(),
+        }),
+    );
+    Ok(request)
+}
+
+fn start_tracked_request(
+    context: &mut ControllerRequestContext<'_>,
+    request: &ControllerRequest,
+) -> CliResult<Option<ControllerCommandMark>> {
+    let command_mark = context.runtime_state.start_request(request)?;
+    if let Some(mark) = command_mark.as_ref() {
+        context.event_log.append(
+            "request_started",
+            json!({
+                "command_sequence": mark.sequence,
+                "command": mark.command_name,
+            }),
+        );
+        context.event_log.append(
+            "state_write_done",
+            json!({
+                "state": "request_started",
+                "command_sequence": mark.sequence,
+                "command": mark.command_name,
+            }),
+        );
+    }
+    Ok(command_mark)
+}
+
+fn execute_tracked_request(
+    context: &mut ControllerRequestContext<'_>,
+    request: &ControllerRequest,
+    command_mark: Option<&ControllerCommandMark>,
+) -> CliResult<Value> {
+    match handle_request(request, context) {
         Ok(response) => {
-            if let Some(mark) = command_mark.as_ref() {
-                runtime_state.finish_success(mark, &request, &response)?;
-            }
-            response
+            finish_tracked_success(context, request, command_mark, &response)?;
+            Ok(response)
         }
         Err(error) => {
-            if let Some(mark) = command_mark.as_ref() {
-                runtime_state.finish_failure(mark, &request, &error)?;
-            }
-            return Err(error);
+            finish_tracked_failure(context, request, command_mark, &error)?;
+            Err(error)
         }
-    };
-    serde_json::to_writer(&mut stream, &response)?;
-    stream.write_all(b"\n")?;
-    stream.flush()?;
-    Ok(matches!(request, ControllerRequest::Stop))
+    }
+}
+
+fn finish_tracked_success(
+    context: &mut ControllerRequestContext<'_>,
+    request: &ControllerRequest,
+    command_mark: Option<&ControllerCommandMark>,
+    response: &Value,
+) -> CliResult<()> {
+    if let Some(mark) = command_mark {
+        context
+            .runtime_state
+            .finish_success(mark, request, response)?;
+        context.event_log.append(
+            "state_write_done",
+            json!({
+                "state": "request_finished",
+                "command_sequence": mark.sequence,
+                "command": mark.command_name,
+                "ok": response.get("ok").cloned().unwrap_or(Value::Null),
+            }),
+        );
+    }
+    Ok(())
+}
+
+fn finish_tracked_failure(
+    context: &mut ControllerRequestContext<'_>,
+    request: &ControllerRequest,
+    command_mark: Option<&ControllerCommandMark>,
+    error: &CliError,
+) -> CliResult<()> {
+    if let Some(mark) = command_mark {
+        context.runtime_state.finish_failure(mark, request, error)?;
+        context.event_log.append(
+            "state_write_done",
+            json!({
+                "state": "request_failed",
+                "command_sequence": mark.sequence,
+                "command": mark.command_name,
+                "error": error.to_string(),
+            }),
+        );
+    }
+    Ok(())
+}
+
+fn write_and_log_controller_response(
+    stream: &mut UnixStream,
+    request: &ControllerRequest,
+    response: &Value,
+    event_log: &ControllerEventLog,
+) -> CliResult<()> {
+    event_log.append(
+        "response_write_start",
+        json!({
+            "command": request.name(),
+        }),
+    );
+    match write_controller_response(stream, response)? {
+        ResponseWriteOutcome::Delivered => event_log.append(
+            "response_write_done",
+            json!({
+                "command": request.name(),
+            }),
+        ),
+        ResponseWriteOutcome::Abandoned { error_kind, error } => event_log.append(
+            "response_write_error",
+            json!({
+                "command": request.name(),
+                "abandoned": true,
+                "error_kind": error_kind,
+                "error": error,
+            }),
+        ),
+    }
+    Ok(())
+}
+
+fn write_controller_response(
+    stream: &mut UnixStream,
+    response: &Value,
+) -> CliResult<ResponseWriteOutcome> {
+    let mut response_text = serde_json::to_vec(response)?;
+    response_text.push(b'\n');
+    stream.set_nonblocking(true)?;
+    match stream.write_all(&response_text) {
+        Ok(()) => Ok(ResponseWriteOutcome::Delivered),
+        Err(error) if io_response_write_abandoned(&error) => Ok(ResponseWriteOutcome::Abandoned {
+            error_kind: io_error_kind_name(error.kind()),
+            error: error.to_string(),
+        }),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn handle_request(
     request: &ControllerRequest,
-    uinput_process: &mut StdinProcess,
-    profile: &uinput::TouchscreenProfile,
-    generator: Option<&mut ProfileGenerator>,
+    context: &mut ControllerRequestContext<'_>,
 ) -> CliResult<Value> {
-    ensure_uinput_alive(uinput_process)?;
+    ensure_uinput_alive(context.uinput_process)?;
     match *request {
         ControllerRequest::Status => Ok(json!({
             "ok": true,
             "active": true,
             "input_backend": "uinput",
             "input_device_command": uinput::input_device_command(),
-            "input_profile": generator.as_ref().map(|active| active.summary_json()),
+            "input_profile": context
+                .generator
+                .as_ref()
+                .map(|active| active.summary_json()),
         })),
         ControllerRequest::Tap {
             fallback,
             key_context,
             inter_key_delay_sampling,
-        } => {
-            let sampled = if let Some(active_generator) = generator {
-                active_generator.sample_tap(fallback, key_context, inter_key_delay_sampling)?
-            } else {
-                profile::SampledTap {
-                    spec: fallback,
-                    sample: None,
-                    inter_key_delay_ms: None,
-                }
-            };
-            for line in uinput::tap_lines(profile, sampled.spec)? {
-                write_uinput_line(uinput_process, &line)?;
-            }
-            Ok(json!({
-                "ok": true,
-                "active": true,
-                "input_backend": "uinput",
-                "tap": {
-                    "x": sampled.spec.x,
-                    "y": sampled.spec.y,
-                    "hold_ms": sampled.spec.hold_ms,
-                    "pressure": sampled.spec.pressure,
-                    "touch_major_px": sampled.spec.touch_major_px,
-                    "touch_minor_px": sampled.spec.touch_minor_px,
-                    "orientation": sampled.spec.orientation,
-                },
-                "input_profile_sample": sampled.sample.map(profile::ProfileTapSample::json),
-                "inter_key_delay_ms": sampled.inter_key_delay_ms,
-            }))
-        }
-        ControllerRequest::Path { ref spec } => {
-            for line in uinput::path_lines(profile, spec)? {
-                write_uinput_line(uinput_process, &line)?;
-            }
-            Ok(json!({
-                "ok": true,
-                "active": true,
-                "input_backend": "uinput",
-                "path": {
-                    "points": spec.points,
-                    "point_count": spec.points.len(),
-                    "duration_ms": spec.duration_ms,
-                },
-            }))
-        }
-        ControllerRequest::Stop => {
-            write_uinput_line(uinput_process, &uinput::delay_line(STOP_TAIL_MS)?)?;
-            Ok(json!({
-                "ok": true,
-                "active": false,
-                "input_backend": "uinput",
-                "stopping": true,
-            }))
-        }
+        } => handle_tap_request(context, fallback, key_context, inter_key_delay_sampling),
+        ControllerRequest::Path { ref spec } => handle_path_request(context, spec),
+        ControllerRequest::Stop => handle_stop_request(context),
     }
 }
 
+fn handle_tap_request(
+    context: &mut ControllerRequestContext<'_>,
+    fallback: TapSpec,
+    key_context: Option<KeyProfileContext>,
+    inter_key_delay_sampling: InterKeyDelaySampling,
+) -> CliResult<Value> {
+    let sampled = if let Some(active_generator) = context.generator.as_mut() {
+        active_generator.sample_tap(fallback, key_context, inter_key_delay_sampling)?
+    } else {
+        profile::SampledTap {
+            spec: fallback,
+            sample: None,
+            inter_key_delay_ms: None,
+        }
+    };
+    let line_count = write_uinput_lines(
+        context.uinput_process,
+        uinput::tap_lines(context.profile, sampled.spec)?,
+    )?;
+    context.event_log.append(
+        "uinput_write_done",
+        json!({
+            "command": "tap",
+            "line_count": line_count,
+        }),
+    );
+    Ok(json!({
+        "ok": true,
+        "active": true,
+        "input_backend": "uinput",
+        "tap": {
+            "x": sampled.spec.x,
+            "y": sampled.spec.y,
+            "hold_ms": sampled.spec.hold_ms,
+            "pressure": sampled.spec.pressure,
+            "touch_major_px": sampled.spec.touch_major_px,
+            "touch_minor_px": sampled.spec.touch_minor_px,
+            "orientation": sampled.spec.orientation,
+        },
+        "input_profile_sample": sampled.sample.map(profile::ProfileTapSample::json),
+        "inter_key_delay_ms": sampled.inter_key_delay_ms,
+    }))
+}
+
+fn handle_path_request(
+    context: &mut ControllerRequestContext<'_>,
+    spec: &PathSpec,
+) -> CliResult<Value> {
+    let line_count = write_uinput_lines(
+        context.uinput_process,
+        uinput::path_lines(context.profile, spec)?,
+    )?;
+    context.event_log.append(
+        "uinput_write_done",
+        json!({
+            "command": "path",
+            "line_count": line_count,
+            "point_count": spec.points.len(),
+        }),
+    );
+    Ok(json!({
+        "ok": true,
+        "active": true,
+        "input_backend": "uinput",
+        "path": {
+            "points": spec.points,
+            "point_count": spec.points.len(),
+            "duration_ms": spec.duration_ms,
+        },
+    }))
+}
+
+fn handle_stop_request(context: &mut ControllerRequestContext<'_>) -> CliResult<Value> {
+    write_uinput_line(context.uinput_process, &uinput::delay_line(STOP_TAIL_MS)?)?;
+    context.event_log.append(
+        "uinput_write_done",
+        json!({
+            "command": "stop",
+            "line_count": 1_u64,
+        }),
+    );
+    context
+        .event_log
+        .append("controller_stop_requested", json!({}));
+    Ok(json!({
+        "ok": true,
+        "active": false,
+        "input_backend": "uinput",
+        "stopping": true,
+    }))
+}
+
+fn write_uinput_lines<I>(process: &mut StdinProcess, lines: I) -> CliResult<u64>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut line_count = 0_u64;
+    for line in lines {
+        write_uinput_line(process, &line)?;
+        line_count = line_count.saturating_add(1);
+    }
+    Ok(line_count)
+}
+
 fn send_request(paths: &RuntimePaths, request: &ControllerRequest) -> CliResult<Value> {
-    let mut stream = UnixStream::connect(&paths.socket)?;
+    let event_log = ControllerEventLog::client(paths);
+    let mut stream = connect_controller_request(paths, request, event_log.as_ref())?;
+    write_controller_request(&mut stream, paths, request, event_log.as_ref())?;
+    let response_text =
+        read_controller_response_text(&mut stream, paths, request, event_log.as_ref())?;
+    parse_controller_response(&response_text, request, event_log.as_ref())
+}
+
+fn connect_controller_request(
+    paths: &RuntimePaths,
+    request: &ControllerRequest,
+    event_log: Option<&ControllerEventLog>,
+) -> CliResult<UnixStream> {
+    log_client_event(
+        event_log,
+        "request_connect",
+        request,
+        json!({
+            "socket": path_string_lossy(&paths.socket),
+        }),
+    );
+    let stream = match UnixStream::connect(&paths.socket) {
+        Ok(stream) => stream,
+        Err(error) => {
+            log_client_event(
+                event_log,
+                "request_connect_error",
+                request,
+                json!({
+                    "error_kind": io_error_kind_name(error.kind()),
+                    "error": error.to_string(),
+                }),
+            );
+            return Err(error.into());
+        }
+    };
+    Ok(stream)
+}
+
+fn write_controller_request(
+    stream: &mut UnixStream,
+    paths: &RuntimePaths,
+    request: &ControllerRequest,
+    event_log: Option<&ControllerEventLog>,
+) -> CliResult<()> {
     stream.set_read_timeout(Some(REQUEST_TIMEOUT))?;
     stream.set_write_timeout(Some(REQUEST_TIMEOUT))?;
-    serde_json::to_writer(&mut stream, request).map_err(|error| {
+    serde_json::to_writer(&mut *stream, request).map_err(|error| {
         if json_io_timed_out(&error) {
+            log_client_event(event_log, "request_write_timeout", request, json!({}));
             request_timeout_error(paths, request, "write")
         } else {
             CliError::from(error)
@@ -629,6 +1062,15 @@ fn send_request(paths: &RuntimePaths, request: &ControllerRequest) -> CliResult<
     })?;
     stream.write_all(b"\n").map_err(|error| {
         if io_timed_out(&error) {
+            log_client_event(
+                event_log,
+                "request_write_timeout",
+                request,
+                json!({
+                    "error_kind": io_error_kind_name(error.kind()),
+                    "error": error.to_string(),
+                }),
+            );
             request_timeout_error(paths, request, "write")
         } else {
             CliError::from(error)
@@ -636,21 +1078,93 @@ fn send_request(paths: &RuntimePaths, request: &ControllerRequest) -> CliResult<
     })?;
     stream.flush().map_err(|error| {
         if io_timed_out(&error) {
+            log_client_event(
+                event_log,
+                "request_write_timeout",
+                request,
+                json!({
+                    "error_kind": io_error_kind_name(error.kind()),
+                    "error": error.to_string(),
+                }),
+            );
             request_timeout_error(paths, request, "write")
         } else {
             CliError::from(error)
         }
     })?;
+    log_client_event(event_log, "request_write_done", request, json!({}));
     stream.shutdown(Shutdown::Write)?;
+    Ok(())
+}
+
+fn read_controller_response_text(
+    stream: &mut UnixStream,
+    paths: &RuntimePaths,
+    request: &ControllerRequest,
+    event_log: Option<&ControllerEventLog>,
+) -> CliResult<String> {
+    log_client_event(event_log, "response_read_start", request, json!({}));
     let mut response_text = String::new();
     stream.read_to_string(&mut response_text).map_err(|error| {
         if io_timed_out(&error) {
+            log_client_event(
+                event_log,
+                "response_read_timeout",
+                request,
+                json!({
+                    "error_kind": io_error_kind_name(error.kind()),
+                    "error": error.to_string(),
+                    "timeout_ms": millis_u64(REQUEST_TIMEOUT),
+                    "state": read_state_json(&paths.state),
+                }),
+            );
             request_timeout_error(paths, request, "read")
         } else {
+            log_client_event(
+                event_log,
+                "response_read_error",
+                request,
+                json!({
+                    "error_kind": io_error_kind_name(error.kind()),
+                    "error": error.to_string(),
+                }),
+            );
             CliError::from(error)
         }
     })?;
-    Ok(serde_json::from_str(response_text.trim())?)
+    Ok(response_text)
+}
+
+fn parse_controller_response(
+    response_text: &str,
+    request: &ControllerRequest,
+    event_log: Option<&ControllerEventLog>,
+) -> CliResult<Value> {
+    log_client_event(
+        event_log,
+        "response_read_done",
+        request,
+        json!({
+            "response_bytes": response_text.len(),
+        }),
+    );
+    match serde_json::from_str(response_text.trim()) {
+        Ok(response) => {
+            log_client_event(event_log, "response_parse_done", request, json!({}));
+            Ok(response)
+        }
+        Err(error) => {
+            log_client_event(
+                event_log,
+                "response_parse_error",
+                request,
+                json!({
+                    "error": error.to_string(),
+                }),
+            );
+            Err(error.into())
+        }
+    }
 }
 
 fn request_timeout_error(
@@ -726,6 +1240,25 @@ fn io_timed_out(error: &std::io::Error) -> bool {
     matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
 }
 
+fn io_response_write_abandoned(error: &std::io::Error) -> bool {
+    io_kind_response_write_abandoned(error.kind())
+}
+
+const fn io_kind_response_write_abandoned(kind: ErrorKind) -> bool {
+    matches!(
+        kind,
+        ErrorKind::BrokenPipe
+            | ErrorKind::ConnectionReset
+            | ErrorKind::NotConnected
+            | ErrorKind::TimedOut
+            | ErrorKind::WouldBlock
+    )
+}
+
+fn io_error_kind_name(kind: ErrorKind) -> String {
+    format!("{kind:?}")
+}
+
 fn start_uinput_process(app: &App, config: &RunConfig) -> CliResult<StdinProcess> {
     let args = vec![
         String::from("shell"),
@@ -780,9 +1313,12 @@ fn controller_state(
         "pid": process::id(),
         "package_name": app.package(),
         "device_serial": app.selected_device_serial()?,
-        "run_id": config.run_id,
+        "run_id": config.run_id.as_str(),
+        "controller_invocation_id": config.controller_invocation_id.as_str(),
         "socket_path": path_string_lossy(&config.socket),
         "state_path": path_string_lossy(&config.state),
+        "events_path": path_string_lossy(&config.events),
+        "final_state_path": path_string_lossy(&config.final_state),
         "started_wall_ms": wall_time_ms(),
         "input_backend": "uinput",
         "input_device_command": uinput::input_device_command(),
@@ -1409,6 +1945,7 @@ fn remove_stale_runtime(paths: &RuntimePaths) -> CliResult<()> {
         remove_file_if_exists(&paths.socket)?;
     }
     if paths.state.exists() && !paths.socket.exists() {
+        preserve_stale_state(paths);
         remove_file_if_exists(&paths.state)?;
     }
     Ok(())
@@ -1425,15 +1962,138 @@ fn remove_file_if_exists(path: &Path) -> CliResult<()> {
 fn paths_json(paths: &RuntimePaths) -> Value {
     json!({
         "dir": path_string_lossy(&paths.dir),
+        "package_name": paths.package_name.as_str(),
         "device_serial": paths.device_serial.as_str(),
         "socket": path_string_lossy(&paths.socket),
         "state": path_string_lossy(&paths.state),
         "session_lock": path_string_lossy(&paths.session_lock),
+        "current": path_string_lossy(&paths.current),
+        "runs_dir": path_string_lossy(&paths.runs_dir),
         "controller_stdout": path_string_lossy(&paths.controller_stdout),
         "controller_stderr": path_string_lossy(&paths.controller_stderr),
         "uinput_stdout": path_string_lossy(&paths.uinput_stdout),
         "uinput_stderr": path_string_lossy(&paths.uinput_stderr),
+        "current_invocation": read_json_file_or_null(&paths.current),
     })
+}
+
+fn log_client_event(
+    event_log: Option<&ControllerEventLog>,
+    event: &str,
+    request: &ControllerRequest,
+    fields: Value,
+) {
+    if let Some(log) = event_log {
+        let mut event_fields = json!({
+            "command": request.name(),
+            "request": request.summary_json(),
+        });
+        merge_event_fields(&mut event_fields, fields);
+        log.append(event, event_fields);
+    }
+}
+
+impl ControllerInvocation {
+    fn new(paths: &RuntimePaths, run_id: &str) -> Self {
+        let id = controller_invocation_id(run_id);
+        let dir = paths.runs_dir.join(&id);
+        Self {
+            id,
+            manifest: dir.join("manifest.json"),
+            events: dir.join("controller.events.jsonl"),
+            controller_stdout: dir.join("controller.stdout.log"),
+            controller_stderr: dir.join("controller.stderr.log"),
+            uinput_stdout: dir.join("uinput.stdout.log"),
+            uinput_stderr: dir.join("uinput.stderr.log"),
+            final_state: dir.join("final.state.json"),
+            final_session_lock: dir.join("final.session.lock.json"),
+            dir,
+        }
+    }
+}
+
+impl ControllerEventLog {
+    fn client_from_invocation(
+        app: &App,
+        paths: &RuntimePaths,
+        invocation: &ControllerInvocation,
+        run_id: &str,
+    ) -> Self {
+        Self {
+            path: invocation.events.clone(),
+            package_name: String::from(app.package()),
+            device_serial: paths.device_serial.clone(),
+            run_id: String::from(run_id),
+            controller_invocation_id: invocation.id.clone(),
+            source: "client",
+            pid: process::id(),
+            started: Instant::now(),
+        }
+    }
+
+    fn client(paths: &RuntimePaths) -> Option<Self> {
+        let current = read_json_file(&paths.current)?;
+        let invocation = current.get("invocation")?;
+        let event_path = invocation.get("events")?.as_str()?;
+        let run_id = invocation.get("run_id")?.as_str()?;
+        let controller_invocation_id = invocation.get("controller_invocation_id")?.as_str()?;
+        Some(Self {
+            path: PathBuf::from(event_path),
+            package_name: paths.package_name.clone(),
+            device_serial: paths.device_serial.clone(),
+            run_id: String::from(run_id),
+            controller_invocation_id: String::from(controller_invocation_id),
+            source: "client",
+            pid: process::id(),
+            started: Instant::now(),
+        })
+    }
+
+    fn controller(app: &App, config: &RunConfig) -> CliResult<Self> {
+        Ok(Self {
+            path: config.events.clone(),
+            package_name: String::from(app.package()),
+            device_serial: app.selected_device_serial()?,
+            run_id: config.run_id.clone(),
+            controller_invocation_id: config.controller_invocation_id.clone(),
+            source: "controller",
+            pid: process::id(),
+            started: Instant::now(),
+        })
+    }
+
+    fn append(&self, event: &str, fields: Value) {
+        match self.append_result(event, fields) {
+            Ok(()) | Err(_) => {}
+        }
+    }
+
+    fn append_result(&self, event: &str, fields: Value) -> CliResult<()> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut record = json!({
+            "schema": EVENT_SCHEMA,
+            "source": self.source,
+            "event": event,
+            "pid": self.pid,
+            "package_name": self.package_name.as_str(),
+            "device_serial": self.device_serial.as_str(),
+            "run_id": self.run_id.as_str(),
+            "controller_invocation_id": self.controller_invocation_id.as_str(),
+            "t_wall_ms": wall_time_ms(),
+            "t_monotonic_ms": millis_u64(self.started.elapsed()),
+        });
+        merge_event_fields(&mut record, fields);
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        serde_json::to_writer(&mut file, &record)?;
+        file.write_all(b"\n")?;
+        file.flush()?;
+        Ok(())
+    }
 }
 
 impl RuntimePaths {
@@ -1453,10 +2113,13 @@ impl RuntimePaths {
             sanitize_path_component(device_serial)
         );
         Self {
+            package_name: String::from(package),
             device_serial: String::from(device_serial),
             socket: runtime_file(&base_dir, &prefix, "sock"),
             state: runtime_file(&base_dir, &prefix, "state.json"),
             session_lock: runtime_file(&base_dir, &prefix, "session.lock.json"),
+            current: runtime_file(&base_dir, &prefix, "current.json"),
+            runs_dir: base_dir.join(format!("{prefix}.runs")),
             controller_stdout: runtime_file(&base_dir, &prefix, "controller.stdout.log"),
             controller_stderr: runtime_file(&base_dir, &prefix, "controller.stderr.log"),
             uinput_stdout: runtime_file(&base_dir, &prefix, "uinput.stdout.log"),
@@ -1464,6 +2127,214 @@ impl RuntimePaths {
             dir: base_dir,
         }
     }
+}
+
+fn write_invocation_manifest(
+    paths: &RuntimePaths,
+    invocation: &ControllerInvocation,
+    metadata: InvocationMetadata<'_>,
+) -> CliResult<()> {
+    write_json_file(
+        &invocation.manifest,
+        &json!({
+            "schema": MANIFEST_SCHEMA,
+            "package_name": metadata.package_name,
+            "device_serial": metadata.device_serial,
+            "run_id": metadata.run_id,
+            "controller_invocation_id": invocation.id.as_str(),
+            "parent_pid": process::id(),
+            "controller_pid": metadata.controller_pid,
+            "created_wall_ms": wall_time_ms(),
+            "input_profile": metadata.input_profile.map(RuntimeProfile::summary_json),
+            "control": {
+                "socket": path_string_lossy(&paths.socket),
+                "state": path_string_lossy(&paths.state),
+                "session_lock": path_string_lossy(&paths.session_lock),
+                "current": path_string_lossy(&paths.current),
+            },
+            "diagnostics": invocation_json(invocation),
+        }),
+    )
+}
+
+fn write_current_invocation(
+    paths: &RuntimePaths,
+    invocation: &ControllerInvocation,
+    metadata: InvocationMetadata<'_>,
+) -> CliResult<()> {
+    write_json_file(
+        &paths.current,
+        &json!({
+            "schema": CURRENT_SCHEMA,
+            "active": metadata.active.as_bool(),
+            "package_name": metadata.package_name,
+            "device_serial": metadata.device_serial,
+            "run_id": metadata.run_id,
+            "controller_invocation_id": invocation.id.as_str(),
+            "controller_pid": metadata.controller_pid,
+            "updated_wall_ms": wall_time_ms(),
+            "control": {
+                "socket": path_string_lossy(&paths.socket),
+                "state": path_string_lossy(&paths.state),
+                "session_lock": path_string_lossy(&paths.session_lock),
+            },
+            "invocation": invocation_json(invocation),
+        }),
+    )
+}
+
+fn invocation_json(invocation: &ControllerInvocation) -> Value {
+    json!({
+        "controller_invocation_id": invocation.id.as_str(),
+        "dir": path_string_lossy(&invocation.dir),
+        "manifest": path_string_lossy(&invocation.manifest),
+        "events": path_string_lossy(&invocation.events),
+        "controller_stdout": path_string_lossy(&invocation.controller_stdout),
+        "controller_stderr": path_string_lossy(&invocation.controller_stderr),
+        "uinput_stdout": path_string_lossy(&invocation.uinput_stdout),
+        "uinput_stderr": path_string_lossy(&invocation.uinput_stderr),
+        "final_state": path_string_lossy(&invocation.final_state),
+        "final_session_lock": path_string_lossy(&invocation.final_session_lock),
+    })
+}
+
+fn merge_event_fields(record: &mut Value, fields: Value) {
+    let Some(record_object) = record.as_object_mut() else {
+        return;
+    };
+    match fields {
+        Value::Object(fields_object) => {
+            for (key, value) in fields_object {
+                record_object.insert(key, value);
+            }
+        }
+        other @ (Value::Null
+        | Value::Bool(_)
+        | Value::Number(_)
+        | Value::String(_)
+        | Value::Array(_)) => {
+            record_object.insert(String::from("fields"), other);
+        }
+    }
+}
+
+fn controller_invocation_id(run_id: &str) -> String {
+    format!(
+        "{}-pid{}-{}",
+        wall_time_ms(),
+        process::id(),
+        run_id_fragment(run_id)
+    )
+}
+
+fn run_id_fragment(run_id: &str) -> String {
+    sanitize_path_component(run_id)
+        .chars()
+        .take(RUN_ID_FRAGMENT_MAX_CHARS)
+        .collect()
+}
+
+fn prune_old_invocations(paths: &RuntimePaths) -> CliResult<()> {
+    let entries = match fs::read_dir(&paths.runs_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut directories = Vec::new();
+    for entry_result in entries {
+        let entry = entry_result?;
+        if entry.file_type()?.is_dir() {
+            directories.push(entry.path());
+        }
+    }
+    directories.sort();
+    directories.reverse();
+    for directory in directories.into_iter().skip(DIAGNOSTIC_RETENTION_COUNT) {
+        fs::remove_dir_all(directory)?;
+    }
+    Ok(())
+}
+
+fn preserve_final_state(config: &RunConfig, state: &Value, event_log: &ControllerEventLog) {
+    match write_json_file(&config.final_state, state) {
+        Ok(()) => event_log.append(
+            "final_state_write_done",
+            json!({
+                "final_state": path_string_lossy(&config.final_state),
+            }),
+        ),
+        Err(error) => event_log.append(
+            "final_state_write_error",
+            json!({
+                "final_state": path_string_lossy(&config.final_state),
+                "error": error.to_string(),
+            }),
+        ),
+    }
+}
+
+fn preserve_stale_state(paths: &RuntimePaths) {
+    let state = read_state_json(&paths.state);
+    if state.is_null() {
+        return;
+    }
+    let current = read_json_file(&paths.current);
+    let final_state = current
+        .as_ref()
+        .and_then(|value| value.pointer("/invocation/final_state"))
+        .and_then(Value::as_str);
+    if let Some(path) = final_state {
+        match write_json_file(&PathBuf::from(path), &state) {
+            Ok(()) | Err(_) => {}
+        }
+    }
+}
+
+fn preserve_session_lock(paths: &RuntimePaths) {
+    let lock = read_json_file(&paths.session_lock);
+    let Some(lock_value) = lock else {
+        return;
+    };
+    if lock_value.is_null() {
+        return;
+    }
+    let current = read_json_file(&paths.current);
+    let final_lock = current
+        .as_ref()
+        .and_then(|value| value.pointer("/invocation/final_session_lock"))
+        .and_then(Value::as_str);
+    if let Some(path) = final_lock {
+        match write_json_file(&PathBuf::from(path), &lock_value) {
+            Ok(()) | Err(_) => {}
+        }
+    }
+}
+
+fn mark_current_inactive(paths: &RuntimePaths) {
+    let Some(mut current) = read_json_file(&paths.current) else {
+        return;
+    };
+    let Some(object) = current.as_object_mut() else {
+        return;
+    };
+    object.insert(
+        String::from("active"),
+        json!(InvocationActive::Inactive.as_bool()),
+    );
+    object.insert(String::from("updated_wall_ms"), json!(wall_time_ms()));
+    match write_json_file(&paths.current, &current) {
+        Ok(()) | Err(_) => {}
+    }
+}
+
+fn read_json_file(path: &Path) -> Option<Value> {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str(text.trim()).ok())
+}
+
+fn read_json_file_or_null(path: &Path) -> Value {
+    read_json_file(path).unwrap_or(Value::Null)
 }
 
 fn runtime_file(base_dir: &Path, prefix: &str, suffix: &str) -> PathBuf {
@@ -1615,9 +2486,9 @@ mod tests {
     use proptest::strategy::Strategy;
 
     use crate::controller::{
-        ControllerRequest, RuntimePaths, controller_response_summary, parse_dumpsys_input,
-        parse_i64_list, sanitize_path_component, timeout_state_summary,
-        virtual_event_path_from_status,
+        ControllerRequest, RuntimePaths, controller_response_summary,
+        io_kind_response_write_abandoned, parse_dumpsys_input, parse_i64_list, run_id_fragment,
+        sanitize_path_component, timeout_state_summary, virtual_event_path_from_status,
     };
     use crate::uinput::{PathSpec, TouchPoint};
 
@@ -1668,6 +2539,40 @@ Input Reader State (Nums of device: 4):
                 .and_then(OsStr::to_str)
                 .is_some_and(|name| name.contains("org.inputdynamics.ime_debug.device_123.sock")),
             "socket path should include sanitized package name and device serial"
+        );
+        assert!(
+            paths
+                .current
+                .file_name()
+                .and_then(OsStr::to_str)
+                .is_some_and(
+                    |name| name.contains("org.inputdynamics.ime_debug.device_123.current.json")
+                ),
+            "current path should include sanitized package name and device serial"
+        );
+        assert!(
+            paths
+                .runs_dir
+                .file_name()
+                .and_then(OsStr::to_str)
+                .is_some_and(|name| name.contains("org.inputdynamics.ime_debug.device_123.runs")),
+            "runs dir should include sanitized package name and device serial"
+        );
+    }
+
+    #[test]
+    fn response_write_abandoned_errors_are_nonfatal_transport_outcomes() {
+        assert!(
+            io_kind_response_write_abandoned(std::io::ErrorKind::BrokenPipe),
+            "broken pipe means the client abandoned response delivery"
+        );
+        assert!(
+            io_kind_response_write_abandoned(std::io::ErrorKind::ConnectionReset),
+            "connection reset means the client abandoned response delivery"
+        );
+        assert!(
+            !io_kind_response_write_abandoned(std::io::ErrorKind::PermissionDenied),
+            "unrelated IO errors should remain controller failures"
         );
     }
 
@@ -1878,6 +2783,28 @@ Input Reader State (Nums of device: 4):
                     .all(|character| character.is_ascii_alphanumeric()
                         || matches!(character, '.' | '-' | '_')),
                 "sanitized path component should contain only safe ASCII filename characters"
+            );
+        }
+
+        #[test]
+        fn run_id_fragment_is_safe_and_bounded(input in path_component_input()) {
+            let fragment = run_id_fragment(&input);
+            let char_count = fragment.chars().count();
+
+            proptest::prop_assert!(
+                !fragment.is_empty(),
+                "run id fragment should never be empty"
+            );
+            proptest::prop_assert!(
+                char_count <= super::RUN_ID_FRAGMENT_MAX_CHARS,
+                "run id fragment should be bounded"
+            );
+            proptest::prop_assert!(
+                fragment
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric()
+                        || matches!(character, '.' | '-' | '_')),
+                "run id fragment should contain only safe ASCII filename characters"
             );
         }
     }
