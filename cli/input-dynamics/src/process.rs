@@ -51,6 +51,10 @@ impl ProcessOutput {
         &self.stdout
     }
 
+    pub(crate) fn stderr(&self) -> &str {
+        &self.stderr
+    }
+
     pub(crate) fn json(&self) -> Value {
         json!({
             "status_code": self.status_code,

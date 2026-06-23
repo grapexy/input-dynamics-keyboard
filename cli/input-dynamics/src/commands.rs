@@ -8,9 +8,9 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use input_dynamics_analysis::derivation::{
     DeriveDismissalsConfig, DerivePressesConfig, DeriveRunSummaryConfig, DeriveTimelineConfig,
-    derive_dismissals as run_derive_dismissals,
+    DeriveVideoMapConfig, FfprobeInvocation, derive_dismissals as run_derive_dismissals,
     derive_press_summaries as run_derive_press_summaries, derive_run_summary,
-    derive_timeline as run_derive_timeline,
+    derive_timeline as run_derive_timeline, derive_video_map as run_derive_video_map,
 };
 use input_dynamics_analysis::getevent::{GETEVENT_SCHEMA, NormalizeStats, normalize_file};
 use serde_json::{Value, json};
@@ -281,7 +281,128 @@ fn derive(command: DeriveCommand) -> CliResult<Value> {
             output_dir,
         })
         .map_err(CliError::from),
+        DeriveCommand::VideoMap {
+            recording_dir,
+            output_dir,
+            ffprobe,
+        } => derive_video_map_command(&recording_dir, output_dir, &ffprobe),
     }
+}
+
+fn derive_video_map_command(
+    recording_dir: &Path,
+    output_dir: Option<PathBuf>,
+    ffprobe: &str,
+) -> CliResult<Value> {
+    let video_path = recording_dir.join("video").join("screen.mp4");
+    preflight_video_map_sources(recording_dir, &video_path)?;
+    let version_args = ffprobe_version_args();
+    let version_output = run_process(ffprobe, &version_args, FailureMode::RequireSuccess)
+        .map_err(|error| ffprobe_error(ffprobe, &version_args, &error))?;
+    let probe_args = ffprobe_frame_args(&video_path)?;
+    let probe_output = run_process(ffprobe, &probe_args, FailureMode::AllowFailure)
+        .map_err(|error| ffprobe_error(ffprobe, &probe_args, &error))?;
+    if probe_output.status_code != Some(0_i32) {
+        return Err(CliError::with_details(
+            format!(
+                "ffprobe failed for {}\nstatus: {:?}\nstderr: {}",
+                video_path.display(),
+                probe_output.status_code,
+                probe_output.stderr().trim()
+            ),
+            json!({
+                "error_kind": "ffprobe_probe_failed",
+                "program": ffprobe,
+                "args": probe_args,
+                "status_code": probe_output.status_code,
+                "stderr": probe_output.stderr().trim(),
+                "video_path": path_string(&video_path)?,
+                "suggested_action": "inspect_video_artifacts",
+            }),
+        ));
+    }
+    run_derive_video_map(&DeriveVideoMapConfig {
+        recording_dir: recording_dir.to_path_buf(),
+        output_dir,
+        ffprobe_json: probe_output.stdout().to_owned(),
+        ffprobe: FfprobeInvocation {
+            executable_path: ffprobe.to_owned(),
+            version_first_line: first_line(version_output.stdout()),
+            args: probe_args,
+            status_code: probe_output.status_code,
+            stderr: probe_output.stderr().trim().to_owned(),
+        },
+    })
+    .map_err(CliError::from)
+}
+
+fn preflight_video_map_sources(recording_dir: &Path, video_path: &Path) -> CliResult<()> {
+    require_local_file(&recording_dir.join("manifest.json"), "manifest")?;
+    require_local_file(video_path, "video file")?;
+    require_local_file(
+        &recording_dir.join("video").join("timing.json"),
+        "video timing metadata",
+    )?;
+    Ok(())
+}
+
+fn require_local_file(path: &Path, description: &str) -> CliResult<()> {
+    if path.is_file() {
+        Ok(())
+    } else {
+        Err(CliError::with_details(
+            format!(
+                "video_map_missing_source: missing {description}: {}",
+                path.display()
+            ),
+            json!({
+                "error_kind": "video_map_missing_source",
+                "source_description": description,
+                "path": path_string(path).unwrap_or_else(|_error| path.display().to_string()),
+                "suggested_action": "inspect_recording",
+            }),
+        ))
+    }
+}
+
+fn ffprobe_version_args() -> Vec<String> {
+    vec!["-version".to_owned()]
+}
+
+fn ffprobe_frame_args(video_path: &Path) -> CliResult<Vec<String>> {
+    Ok(vec![
+        "-v".to_owned(),
+        "error".to_owned(),
+        "-select_streams".to_owned(),
+        "v:0".to_owned(),
+        "-show_streams".to_owned(),
+        "-show_frames".to_owned(),
+        "-show_entries".to_owned(),
+        "stream=index,codec_type,codec_name,width,height,duration,nb_frames,avg_frame_rate,r_frame_rate,time_base:frame=media_type,key_frame,pts,pts_time,best_effort_timestamp,best_effort_timestamp_time,duration,duration_time,pkt_size,width,height,pict_type".to_owned(),
+        "-of".to_owned(),
+        "json".to_owned(),
+        path_string(video_path)?,
+    ])
+}
+
+fn ffprobe_error(ffprobe: &str, args: &[String], error: &CliError) -> CliError {
+    CliError::with_details(
+        format!(
+            "failed to run {} {}; install FFmpeg or enter the Nix development shell: {error}",
+            ffprobe,
+            args.join(" ")
+        ),
+        json!({
+            "error_kind": "ffprobe_unavailable_or_version_failed",
+            "program": ffprobe,
+            "args": args,
+            "suggested_action": "install_ffmpeg_or_enter_nix_shell",
+        }),
+    )
+}
+
+fn first_line(text: &str) -> String {
+    text.lines().next().unwrap_or("").trim().to_owned()
 }
 
 fn getevent(command: GeteventCommand) -> CliResult<Value> {
@@ -1910,17 +2031,24 @@ fn ime_is_registered(ime_list_stdout: &str, ime_component: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use proptest::strategy::Strategy;
+    use serde_json::Value;
     use serde_json::json;
 
     use crate::args::PressKey;
     use crate::commands::{
-        EditableNode, ScreenBounds, TypeKeyTarget, ime_is_registered, is_debug_apk,
-        keyboard_layout_visible, keyboard_visible_target_node, latest_release_tag_from_json,
-        planned_type_step, press_key_code, type_key_target,
+        EditableNode, ScreenBounds, TypeKeyTarget, derive_video_map_command, ime_is_registered,
+        is_debug_apk, keyboard_layout_visible, keyboard_visible_target_node,
+        latest_release_tag_from_json, planned_type_step, press_key_code, type_key_target,
     };
+
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0_u64);
 
     #[test]
     fn ime_registration_requires_exact_component_line() {
@@ -1981,6 +2109,60 @@ mod tests {
             Some(TypeKeyTarget::Code(press_key_code(PressKey::Space))),
             "space should use the semantic space key code"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn derive_video_map_uses_injected_ffprobe_and_records_provenance() {
+        let root = unique_temp_dir("commands-video-map");
+        let setup_result = create_video_map_command_fixture(&root);
+        assert!(setup_result.is_ok(), "fixture setup should succeed");
+        let Ok(ffprobe_path) = create_fake_ffprobe(&root) else {
+            let _cleanup = fs::remove_dir_all(&root);
+            return;
+        };
+
+        let result = derive_video_map_command(&root, None, &ffprobe_path.display().to_string());
+
+        assert!(
+            result.is_ok(),
+            "fake ffprobe command should derive video map"
+        );
+        let args_log = fs::read_to_string(root.join("ffprobe-args.log"));
+        assert!(args_log.is_ok(), "fake ffprobe args log should be readable");
+        let Ok(args_text) = args_log else {
+            let _cleanup = fs::remove_dir_all(&root);
+            return;
+        };
+        assert!(
+            args_text.contains("-version"),
+            "command should probe ffprobe version"
+        );
+        assert!(
+            args_text.contains("-show_frames"),
+            "command should request frame metadata"
+        );
+        let index_result = read_json(&root.join("derived").join("video_map").join("index.json"));
+        assert!(index_result.is_ok(), "video map index should be readable");
+        let Ok(index) = index_result else {
+            let _cleanup = fs::remove_dir_all(&root);
+            return;
+        };
+        assert_eq!(
+            index
+                .pointer("/ffprobe/version_first_line")
+                .and_then(Value::as_str),
+            Some("ffprobe version fake"),
+            "index should preserve version provenance"
+        );
+        assert!(
+            index
+                .pointer("/ffprobe/args")
+                .and_then(Value::as_array)
+                .is_some_and(|args| args.iter().any(|arg| arg.as_str() == Some("-show_frames"))),
+            "index should preserve frame-probe argv"
+        );
+        let _cleanup = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -2161,7 +2343,94 @@ mod tests {
         }
     }
 
-    fn sample_layout_result() -> serde_json::Value {
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let counter = TEMP_COUNTER.fetch_add(1_u64, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "input-dynamics-{label}-{}-{counter}",
+            std::process::id()
+        ))
+    }
+
+    fn create_video_map_command_fixture(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        fs::create_dir_all(root.join("video"))?;
+        fs::write(
+            root.join("manifest.json"),
+            r#"{"schema":"input_dynamics_record_manifest.v1","external_run_id":"run-test"}"#,
+        )?;
+        fs::write(root.join("video").join("screen.mp4"), b"synthetic-video")?;
+        fs::write(
+            root.join("video").join("timing.json"),
+            r#"{"schema":"input_dynamics_video_capture.v1"}"#,
+        )?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn create_fake_ffprobe(root: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let script = root.join("fake-ffprobe");
+        let log = root.join("ffprobe-args.log");
+        fs::write(
+            &script,
+            format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+if [ "$1" = "-version" ]; then
+  echo "ffprobe version fake"
+  exit 0
+fi
+cat <<'JSON'
+{}
+JSON
+"#,
+                log.display(),
+                fake_ffprobe_json()
+            ),
+        )?;
+        let mut permissions = fs::metadata(&script)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions)?;
+        Ok(script)
+    }
+
+    fn fake_ffprobe_json() -> &'static str {
+        r#"{
+            "streams": [
+                {
+                    "index": 0,
+                    "codec_type": "video",
+                    "codec_name": "h264",
+                    "width": 100,
+                    "height": 200,
+                    "duration": "0.033333",
+                    "nb_frames": "1",
+                    "avg_frame_rate": "30/1",
+                    "r_frame_rate": "30/1",
+                    "time_base": "1/90000"
+                }
+            ],
+            "frames": [
+                {
+                    "media_type": "video",
+                    "key_frame": 1,
+                    "pts": 0,
+                    "pts_time": "0.000000",
+                    "duration": 3000,
+                    "duration_time": "0.033333",
+                    "pkt_size": "123",
+                    "width": 100,
+                    "height": 200,
+                    "pict_type": "I"
+                }
+            ]
+        }"#
+    }
+
+    fn read_json(path: &Path) -> Result<Value, Box<dyn std::error::Error>> {
+        let text = fs::read_to_string(path)?;
+        Ok(serde_json::from_str(&text)?)
+    }
+
+    fn sample_layout_result() -> Value {
         json!({
             "keyboard_layout": {
                 "available": true,
@@ -2190,7 +2459,7 @@ mod tests {
         })
     }
 
-    fn hidden_layout_result() -> serde_json::Value {
+    fn hidden_layout_result() -> Value {
         json!({
             "keyboard_layout": {
                 "available": false,

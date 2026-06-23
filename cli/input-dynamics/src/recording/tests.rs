@@ -362,6 +362,130 @@ fn inspect_accepts_declared_canonical_video_artifacts() {
         Some(false),
         "current video marker shape should not be legacy"
     );
+    assert_eq!(
+        result
+            .pointer("/flags/has_video_frame_index")
+            .and_then(Value::as_bool),
+        Some(false),
+        "fresh video alone should not imply a frame index"
+    );
+    assert_eq!(
+        result
+            .pointer("/flags/needs_video_frame_index")
+            .and_then(Value::as_bool),
+        Some(true),
+        "fresh video without a frame index should request video-map derivation"
+    );
+    assert!(
+        action_command(&result, "derive_video_map").is_some(),
+        "inspect should suggest the canonical video-map derivation command"
+    );
+    let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
+}
+
+#[test]
+fn inspect_accepts_fresh_video_frame_index() {
+    let root = unique_temp_dir("recording-inspect-video-map-fresh");
+    let Some(()) = assert_ok(create_fixture(&root, FixtureShape::DerivedOnly), "fixture") else {
+        return;
+    };
+    let Some(video) = assert_ok(create_current_video_fixture(&root), "create video fixture") else {
+        return;
+    };
+    let Some(()) = assert_ok(write_manifest(&root, Some(video)), "write manifest") else {
+        return;
+    };
+    let Some(()) = assert_ok(create_video_map_fixture(&root), "create video map fixture") else {
+        return;
+    };
+
+    let Some(result) = assert_ok(inspect_recording(&root), "inspect recording") else {
+        return;
+    };
+
+    assert_eq!(
+        result
+            .pointer("/flags/has_video_frame_index")
+            .and_then(Value::as_bool),
+        Some(true),
+        "fresh video frame index should be ready"
+    );
+    assert_eq!(
+        result
+            .pointer("/flags/needs_video_frame_index")
+            .and_then(Value::as_bool),
+        Some(false),
+        "fresh video frame index should not request refresh"
+    );
+    assert_eq!(
+        result
+            .pointer("/video_map/event_mapping/status")
+            .and_then(Value::as_str),
+        Some("not_estimated"),
+        "frame-index artifact should not imply event mapping"
+    );
+    assert!(
+        action_command(&result, "derive_video_map").is_none(),
+        "fresh frame index should not produce a video-map next action"
+    );
+    let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
+}
+
+#[test]
+fn inspect_detects_video_frame_index_staleness() {
+    let root = unique_temp_dir("recording-inspect-video-map-stale");
+    let Some(()) = assert_ok(create_fixture(&root, FixtureShape::DerivedOnly), "fixture") else {
+        return;
+    };
+    let Some(video) = assert_ok(create_current_video_fixture(&root), "create video fixture") else {
+        return;
+    };
+    let Some(()) = assert_ok(write_manifest(&root, Some(video)), "write manifest") else {
+        return;
+    };
+    let Some(()) = assert_ok(create_video_map_fixture(&root), "create video map fixture") else {
+        return;
+    };
+    let frames_path = root.join("derived").join("video_map").join("frames.jsonl");
+    let Some(()) = assert_ok(
+        write_jsonl(
+            &frames_path,
+            &[
+                json!({"schema": "input_dynamics_video_frame.v1", "frame_sequence": 1_u64}),
+                json!({"schema": "input_dynamics_video_frame.v1", "frame_sequence": 2_u64}),
+            ],
+        ),
+        "mutate video frame index",
+    ) else {
+        return;
+    };
+
+    let Some(result) = assert_ok(inspect_recording(&root), "inspect recording") else {
+        return;
+    };
+
+    assert_eq!(
+        result
+            .pointer("/flags/has_video_frame_index")
+            .and_then(Value::as_bool),
+        Some(false),
+        "stale frame index should not be ready"
+    );
+    assert_eq!(
+        result
+            .pointer("/flags/needs_video_frame_index")
+            .and_then(Value::as_bool),
+        Some(true),
+        "stale frame index should request refresh"
+    );
+    let stale_count = result
+        .pointer("/video_map/stale_reasons")
+        .and_then(Value::as_array)
+        .map_or(0_usize, Vec::len);
+    assert!(
+        stale_count > 0,
+        "stale reasons should explain why the frame index needs refresh"
+    );
     let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
 }
 
@@ -1162,6 +1286,94 @@ fn create_timeline_fixture(root: &Path) -> TestResult<()> {
         &[json!({"schema": "input_dynamics_timeline_event.v1"})],
     )?;
     Ok(())
+}
+
+fn create_video_map_fixture(root: &Path) -> TestResult<()> {
+    let video_map_dir = root.join("derived").join("video_map");
+    fs::create_dir_all(&video_map_dir)?;
+    let frames_path = video_map_dir.join("frames.jsonl");
+    write_jsonl(
+        &frames_path,
+        &[json!({
+            "schema": "input_dynamics_video_frame.v1",
+            "event": "video_frame",
+            "artifact_stage": "frame_index",
+            "frame_id": "frame:00000001",
+            "frame_sequence": 1_u64,
+            "clock_domain": "media_pts_ns",
+            "media_time": {
+                "clock_domain": "media_pts_ns",
+                "timestamp_source": "media_probe",
+                "timestamp_precision": "nanoseconds",
+                "timestamp_field": "pts_time",
+                "pts_ns": 0_i64,
+                "pts_time_seconds": "0.000000",
+                "pts_tick": 0_i64
+            },
+            "duration_ns": 33_333_333_i64,
+            "pts_interval_ns": null,
+            "is_key_frame": true,
+            "width": 1080_i64,
+            "height": 2400_i64,
+            "encoded_size_bytes": 123_i64,
+        })],
+    )?;
+    write_json(
+        &video_map_dir.join("index.json"),
+        &json!({
+            "schema": "input_dynamics_video_map_index.v1",
+            "artifact_stage": "frame_index",
+            "sources": video_map_sources_json(root)?,
+            "outputs": video_map_outputs_json(&frames_path)?,
+            "frame_count": 1_u64,
+            "probe_status": "ok",
+            "alignment_status": "not_estimated",
+            "event_mapping": {
+                "status": "not_estimated",
+                "mapped_event_count": null,
+                "unmapped_event_count": null
+            }
+        }),
+    )?;
+    Ok(())
+}
+
+fn video_map_sources_json(root: &Path) -> TestResult<Value> {
+    Ok(json!([
+        {
+            "kind": "manifest",
+            "path": "manifest.json",
+            "exists": true,
+            "required": true,
+            "fingerprint": file_fingerprint(&root.join("manifest.json"))?
+        },
+        {
+            "kind": "video_screen",
+            "path": "video/screen.mp4",
+            "exists": true,
+            "required": true,
+            "fingerprint": file_fingerprint(&root.join("video").join("screen.mp4"))?
+        },
+        {
+            "kind": "video_timing",
+            "path": "video/timing.json",
+            "exists": true,
+            "required": true,
+            "fingerprint": file_fingerprint(&root.join("video").join("timing.json"))?
+        }
+    ]))
+}
+
+fn video_map_outputs_json(frames_path: &Path) -> TestResult<Value> {
+    Ok(json!({
+        "video_map_frames": {
+            "path": "derived/video_map/frames.jsonl",
+            "schema": "input_dynamics_video_frame.v1",
+            "record_count": 1_u64,
+            "sensitive": true,
+            "fingerprint": file_fingerprint(frames_path)?
+        }
+    }))
 }
 
 fn ime_records() -> Vec<Value> {

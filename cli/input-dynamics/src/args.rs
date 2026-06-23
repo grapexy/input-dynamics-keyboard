@@ -356,6 +356,18 @@ pub(crate) enum DeriveCommand {
         #[arg(long)]
         output_dir: Option<PathBuf>,
     },
+    /// Derive an encoded video frame index.
+    VideoMap {
+        /// Recording directory created by `input-dynamics record`.
+        #[arg(long)]
+        recording_dir: PathBuf,
+        /// Video-map output directory. Defaults to `derived/video_map`.
+        #[arg(long)]
+        output_dir: Option<PathBuf>,
+        /// ffprobe executable to run.
+        #[arg(long, default_value = "ffprobe")]
+        ffprobe: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]

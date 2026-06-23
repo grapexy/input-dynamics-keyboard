@@ -62,6 +62,7 @@
               pkgs.cargo
               pkgs.cargo-deny
               pkgs.clippy
+              pkgs.ffmpeg
               pkgs.rust-analyzer
               pkgs.rustc
               pkgs.rustfmt

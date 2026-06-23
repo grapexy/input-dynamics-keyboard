@@ -74,6 +74,17 @@ struct VideoInspection {
     exists: bool,
 }
 
+#[derive(Default)]
+struct VideoMapInspection {
+    stale_reasons: Vec<String>,
+    stage: Value,
+    frame_count: Value,
+    probe_status: Value,
+    event_mapping: Value,
+    exists: bool,
+    frame_index_exists: bool,
+}
+
 struct ClockInspection {
     value: Value,
     canonical_clock_ready: bool,
@@ -88,6 +99,7 @@ struct FlagInputs<'a> {
     validation: &'a ValidationInspection,
     run_summary: &'a RunSummaryInspection,
     timeline: &'a TimelineInspection,
+    video_map: &'a VideoMapInspection,
     video: &'a VideoInspection,
     clock: &'a ClockInspection,
     artifacts: &'a Value,
@@ -112,6 +124,7 @@ pub(crate) fn inspect_recording(dir: &Path) -> CliResult<Value> {
     let timeline = inspect_timeline(dir)?;
     let artifacts = artifact_map(dir, &artifact_specs(dir, session.selected.as_deref()))?;
     let video = inspect_video(dir, manifest_ref, &artifacts)?;
+    let video_map = inspect_video_map(dir)?;
     let clock = inspect_clock(dir, manifest_ref, &timeline, &video)?;
     let note_flags = note_flags(dir)?;
     let flag_inputs = FlagInputs {
@@ -120,6 +133,7 @@ pub(crate) fn inspect_recording(dir: &Path) -> CliResult<Value> {
         validation: &validation,
         run_summary: &run_summary,
         timeline: &timeline,
+        video_map: &video_map,
         video: &video,
         clock: &clock,
         artifacts: &artifacts,
@@ -137,6 +151,7 @@ pub(crate) fn inspect_recording(dir: &Path) -> CliResult<Value> {
         validation: &validation,
         run_summary: &run_summary,
         timeline: &timeline,
+        video_map: &video_map,
         video: &video,
         clock: &clock,
         note_flags,
@@ -155,6 +170,7 @@ struct InspectionJson<'a> {
     validation: &'a ValidationInspection,
     run_summary: &'a RunSummaryInspection,
     timeline: &'a TimelineInspection,
+    video_map: &'a VideoMapInspection,
     video: &'a VideoInspection,
     clock: &'a ClockInspection,
     note_flags: Value,
@@ -194,6 +210,15 @@ fn inspection_json(input: &InspectionJson<'_>) -> Value {
             "exists": input.timeline.exists,
             "artifact_diagnostics": input.timeline.artifact_diagnostics.clone(),
             "stale_reasons": input.timeline.stale_reasons,
+        },
+        "video_map": {
+            "exists": input.video_map.exists,
+            "frame_index_exists": input.video_map.frame_index_exists,
+            "stage": input.video_map.stage.clone(),
+            "frame_count": input.video_map.frame_count.clone(),
+            "probe_status": input.video_map.probe_status.clone(),
+            "event_mapping": input.video_map.event_mapping.clone(),
+            "stale_reasons": input.video_map.stale_reasons,
         },
         "video": {
             "enabled": input.video.enabled,
@@ -396,6 +421,148 @@ fn inspect_video(
         required,
         exists,
     })
+}
+
+fn inspect_video_map(dir: &Path) -> CliResult<VideoMapInspection> {
+    let index_path = dir.join("derived").join("video_map").join("index.json");
+    let frames_path = dir.join("derived").join("video_map").join("frames.jsonl");
+    let index_exists = index_path.exists();
+    let frames_exists = frames_path.exists();
+    if !index_exists && !frames_exists {
+        return Ok(VideoMapInspection {
+            exists: false,
+            frame_index_exists: false,
+            stale_reasons: vec![String::from("video frame index is missing")],
+            ..VideoMapInspection::default()
+        });
+    }
+    let mut stale_reasons = Vec::new();
+    if !index_exists {
+        stale_reasons.push(String::from("video map index is missing"));
+    }
+    if !frames_exists {
+        stale_reasons.push(String::from("video map frames JSONL is missing"));
+    }
+    let Some(index) = read_optional_json(&index_path)? else {
+        stale_reasons.push(String::from("video map index is unreadable"));
+        return Ok(VideoMapInspection {
+            stale_reasons,
+            exists: index_exists && frames_exists,
+            frame_index_exists: false,
+            ..VideoMapInspection::default()
+        });
+    };
+    if index.get("schema").and_then(Value::as_str) != Some("input_dynamics_video_map_index.v1") {
+        stale_reasons.push(String::from("video map index schema is unsupported"));
+    }
+    if index.get("artifact_stage").and_then(Value::as_str) != Some("frame_index") {
+        stale_reasons.push(String::from(
+            "video map index artifact stage is not frame_index",
+        ));
+    }
+    if let Some(sources) = index.get("sources").and_then(Value::as_array) {
+        for source in sources {
+            stale_reasons.extend(video_map_source_stale_reasons(dir, source)?);
+        }
+    } else {
+        stale_reasons.push(String::from("video map index has no sources array"));
+    }
+    stale_reasons.extend(video_map_output_stale_reasons(dir, &index, &frames_path)?);
+    let frame_index_exists = index_exists && frames_exists && stale_reasons.is_empty();
+    Ok(VideoMapInspection {
+        stage: index.get("artifact_stage").cloned().unwrap_or(Value::Null),
+        frame_count: index.get("frame_count").cloned().unwrap_or(Value::Null),
+        probe_status: index.get("probe_status").cloned().unwrap_or(Value::Null),
+        event_mapping: index.get("event_mapping").cloned().unwrap_or(Value::Null),
+        stale_reasons,
+        exists: index_exists && frames_exists,
+        frame_index_exists,
+    })
+}
+
+fn video_map_output_stale_reasons(
+    dir: &Path,
+    index: &Value,
+    frames_path: &Path,
+) -> CliResult<Vec<String>> {
+    let mut reasons = Vec::new();
+    let Some(output) = index.pointer("/outputs/video_map_frames") else {
+        reasons.push(String::from(
+            "video map index has no frames output metadata",
+        ));
+        return Ok(reasons);
+    };
+    if output.get("schema").and_then(Value::as_str) != Some("input_dynamics_video_frame.v1") {
+        reasons.push(String::from(
+            "video map frames output schema is unsupported",
+        ));
+    }
+    let Some(path_text_value) = output.get("path").and_then(Value::as_str) else {
+        reasons.push(String::from("video map frames output has no path"));
+        return Ok(reasons);
+    };
+    let recorded_output_path = source_path(dir, path_text_value);
+    if recorded_output_path != frames_path {
+        reasons.push(String::from("video map frames output path changed"));
+    }
+    let Some(recorded_count) = output.get("record_count").and_then(Value::as_u64) else {
+        reasons.push(String::from("video map frames output has no record count"));
+        return Ok(reasons);
+    };
+    let Some(recorded_sha) = output
+        .pointer("/fingerprint/sha256")
+        .and_then(Value::as_str)
+    else {
+        reasons.push(String::from("video map frames output has no fingerprint"));
+        return Ok(reasons);
+    };
+    if !frames_path.exists() {
+        return Ok(reasons);
+    }
+    let current = file_fingerprint(frames_path)?;
+    let current_sha = current.get("sha256").and_then(Value::as_str);
+    if Some(recorded_sha) != current_sha {
+        reasons.push(String::from("video map frames fingerprint changed"));
+    }
+    let current_count = count_nonempty_lines(frames_path)?;
+    if recorded_count != current_count {
+        reasons.push(String::from("video map frames record count changed"));
+    }
+    Ok(reasons)
+}
+
+fn video_map_source_stale_reasons(dir: &Path, source: &Value) -> CliResult<Vec<String>> {
+    let mut reasons = Vec::new();
+    let kind = source
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown_source");
+    let Some(path_text_value) = source.get("path").and_then(Value::as_str) else {
+        reasons.push(format!("{kind} has no source path"));
+        return Ok(reasons);
+    };
+    let path = source_path(dir, path_text_value);
+    if !path.exists() {
+        reasons.push(format!("{kind} source is missing: {path_text_value}"));
+        return Ok(reasons);
+    }
+    let Some(recorded_sha) = source
+        .pointer("/fingerprint/sha256")
+        .and_then(Value::as_str)
+    else {
+        reasons.push(format!(
+            "{kind} source has no fingerprint: {path_text_value}"
+        ));
+        return Ok(reasons);
+    };
+    let current = file_fingerprint(&path)?;
+    let current_sha = current.get("sha256").and_then(Value::as_str);
+    if Some(recorded_sha) != current_sha {
+        reasons.push(format!(
+            "{kind} source fingerprint changed: {path_text_value}"
+        ));
+    }
+    Ok(reasons)
 }
 
 fn inspect_clock(
@@ -1151,7 +1318,7 @@ fn adb_artifact_specs(dir: &Path) -> [ArtifactSpec; 3] {
     ]
 }
 
-fn derived_artifact_specs(dir: &Path) -> [ArtifactSpec; 6] {
+fn derived_artifact_specs(dir: &Path) -> [ArtifactSpec; 8] {
     [
         artifact(
             "press_summaries",
@@ -1186,6 +1353,18 @@ fn derived_artifact_specs(dir: &Path) -> [ArtifactSpec; 6] {
         artifact(
             "timeline_events",
             dir.join("derived").join("timeline").join("events.jsonl"),
+            ArtifactRequirement::Optional,
+            ArtifactSensitivity::Sensitive,
+        ),
+        artifact(
+            "video_map_index",
+            dir.join("derived").join("video_map").join("index.json"),
+            ArtifactRequirement::Optional,
+            ArtifactSensitivity::Sensitive,
+        ),
+        artifact(
+            "video_map_frames",
+            dir.join("derived").join("video_map").join("frames.jsonl"),
             ArtifactRequirement::Optional,
             ArtifactSensitivity::Sensitive,
         ),
@@ -1342,6 +1521,10 @@ fn flags_json(inputs: &FlagInputs<'_>) -> Value {
     let has_dismissals = artifact_exists(inputs.artifacts, "dismissal_inferences");
     let has_video = inputs.video.exists && inputs.video.stale_reasons.is_empty();
     let needs_video = inputs.video.required && !has_video;
+    let video_frame_index_ready =
+        has_video && inputs.clock.canonical_clock_ready && !inputs.clock.needs_canonical_recording;
+    let has_video_frame_index = video_frame_index_ready && inputs.video_map.frame_index_exists;
+    let needs_video_frame_index = video_frame_index_ready && !inputs.video_map.frame_index_exists;
     let has_evidence = artifact_exists(inputs.artifacts, "evidence_start_index")
         || artifact_exists(inputs.artifacts, "evidence_end_index");
     let needs_derivation = !has_touch_gestures || !has_dismissals;
@@ -1382,6 +1565,9 @@ fn flags_json(inputs: &FlagInputs<'_>) -> Value {
         "needs_run_summary": needs_run_summary,
         "needs_derivation": needs_derivation,
         "needs_timeline": needs_timeline,
+        "has_video_frame_index": has_video_frame_index,
+        "needs_video_frame_index": needs_video_frame_index,
+        "has_video_map": false,
         "has_sensitive_evidence": has_evidence || has_video,
         "incomplete_or_superseded": incomplete_or_superseded,
         "needs_cleanup": needs_cleanup(inputs.manifest),
@@ -1485,6 +1671,16 @@ fn add_derivation_next_actions(
             "reason": "derive or refresh the cross-source recording timeline",
         }));
     }
+    if bool_at(flags, "/needs_video_frame_index") {
+        actions.push(json!({
+            "kind": "derive_video_map",
+            "command": format!(
+                "input-dynamics derive video-map --recording-dir {}",
+                shellish(dir)?
+            ),
+            "reason": "derive or refresh the encoded video frame index",
+        }));
+    }
     Ok(())
 }
 
@@ -1493,6 +1689,7 @@ fn warnings(inputs: &FlagInputs<'_>) -> Vec<String> {
     warnings.extend(inputs.validation.stale_reasons.iter().cloned());
     warnings.extend(inputs.run_summary.stale_reasons.iter().cloned());
     warnings.extend(inputs.timeline.stale_reasons.iter().cloned());
+    warnings.extend(inputs.video_map.stale_reasons.iter().cloned());
     warnings.extend(inputs.video.stale_reasons.iter().cloned());
     warnings.extend(inputs.clock.warnings.iter().cloned());
     warnings

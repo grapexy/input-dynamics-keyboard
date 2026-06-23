@@ -3,7 +3,7 @@
 use std::io::{self, Write};
 use std::process::ExitCode;
 
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::error::{CliError, CliResult};
 
@@ -24,10 +24,7 @@ pub(crate) fn write_success(value: &Value, exit_code: ExitCode) -> ExitCode {
 }
 
 pub(crate) fn write_failure(error: &CliError) -> ExitCode {
-    let payload = json!({
-        "ok": false,
-        "error": error.to_string(),
-    });
+    let payload = error.to_json();
     let mut stderr = io::stderr().lock();
     match write_json(&mut stderr, &payload) {
         Ok(()) => ExitCode::from(1),

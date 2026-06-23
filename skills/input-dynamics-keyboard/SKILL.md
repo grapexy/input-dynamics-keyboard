@@ -27,6 +27,8 @@ instrumentation surface. Keep workflows app-neutral, offline, and ADB-driven.
 - `record` captures screen video by default. Treat `video/screen.mp4` and
   `video/timing.json` as sensitive local run artifacts. Use `--no-video` only
   for explicit diagnostics or CI, not for normal bounded capture.
+- Treat `derived/video_map/index.json` and
+  `derived/video_map/frames.jsonl` as sensitive local run artifacts.
 - Use the CLI's AOSP uinput-backed touch path for scripted key presses,
   absolute taps, and gestures. Do not use `adb shell input tap` for normal
   agent-driven input.
@@ -257,7 +259,9 @@ Use `flags.valid_for_analysis`, `flags.needs_validation`,
 `flags.has_video`, `flags.needs_video`, `flags.canonical_clock_ready`,
 `flags.has_legacy_timing`, `flags.needs_canonical_recording`,
 `flags.needs_press_summaries`, `flags.needs_run_summary`,
-`flags.needs_derivation`, and `flags.needs_timeline` to decide the next step.
+`flags.needs_derivation`, `flags.needs_timeline`,
+`flags.has_video_frame_index`, and `flags.needs_video_frame_index` to decide
+the next step.
 Required missing or stale video makes `valid_for_analysis` false. The `clock`
 object classifies saved video/evidence anchors as `bracketed`,
 `legacy_wall_clock_bracketed`, `missing_source`, `stale_inputs`,
@@ -266,7 +270,7 @@ non-empty, prefer those CLI commands over ad hoc file inspection. Each
 `next_actions` item has `kind`, `command`, and `reason`; branch on `kind`.
 Current action kinds are `validate`, `record_with_video`,
 `record_with_canonical_clocks`, `derive_presses`, `derive_summary`,
-`derive_dismissals`, and `derive_timeline`.
+`derive_dismissals`, `derive_timeline`, and `derive_video_map`.
 
 Read `validation.current.clock_validation` from the same inspect output when
 diagnosing timestamp metadata. Stable keys are
@@ -370,6 +374,20 @@ domains and source references when reasoning from it. Use
 `mixed_clock_domain_without_alignment_count`,
 `normalized_claim_without_domain_count`, and `unit_mismatch_count`.
 
+To build encoded video frame metadata:
+
+```bash
+idk derive video-map --recording-dir "runs/$RUN_ID"
+```
+
+This requires `ffprobe` from FFmpeg and writes
+`derived/video_map/index.json` plus `derived/video_map/frames.jsonl`.
+Rows use schema `input_dynamics_video_frame.v1` and the `media_pts_ns` clock
+domain. This is only a frame index; event-to-frame mapping remains
+`not_estimated`, and agents must not treat it as synchronized event evidence.
+Keep both outputs with the same care as raw JSONL, screen video, screenshots,
+accessibility dumps, and timeline artifacts.
+
 After deriving, inspect again if freshness matters:
 
 ```bash
@@ -377,8 +395,8 @@ idk recording inspect --dir "runs/$RUN_ID"
 ```
 
 The inspection output fingerprints source artifacts and reports stale video,
-summaries, timelines, and clock-anchor readiness, but it does not rewrite
-validation or derived files.
+summaries, timelines, video frame indexes, and clock-anchor readiness, but it
+does not rewrite validation or derived files.
 
 Do not treat `valid_for_analysis: true` as enough for clock-dependent claims.
 For video/evidence anchors, cross-source timeline claims, or ordering claims

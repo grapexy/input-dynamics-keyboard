@@ -7,6 +7,7 @@ mod press;
 mod summary;
 mod timeline;
 mod touch;
+mod video_map;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -22,6 +23,7 @@ pub use crate::derivation::press::{DerivePressesConfig, derive_press_summaries};
 pub use crate::derivation::summary::{DeriveRunSummaryConfig, derive_run_summary};
 pub use crate::derivation::timeline::{DeriveTimelineConfig, derive_timeline};
 use crate::derivation::touch::derive_touch_gestures;
+pub use crate::derivation::video_map::{DeriveVideoMapConfig, FfprobeInvocation, derive_video_map};
 
 /// Schema written to derived touch gesture JSONL records.
 pub const TOUCH_GESTURE_SCHEMA: &str = "input_dynamics_touch_gesture.v1";
@@ -43,6 +45,12 @@ pub const TIMELINE_INDEX_SCHEMA: &str = "input_dynamics_timeline_index.v1";
 
 /// Schema written to run summary JSON files.
 pub const RUN_SUMMARY_SCHEMA: &str = "input_dynamics_run_summary.v1";
+
+/// Schema written to video-map index JSON files.
+pub const VIDEO_MAP_INDEX_SCHEMA: &str = "input_dynamics_video_map_index.v1";
+
+/// Schema written to video-frame JSONL records.
+pub const VIDEO_FRAME_SCHEMA: &str = "input_dynamics_video_frame.v1";
 
 /// Schema for derivation policy JSON files.
 pub const DERIVATION_POLICY_SCHEMA: &str = "input_dynamics_derivation_policy.v1";

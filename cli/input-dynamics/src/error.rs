@@ -4,9 +4,12 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::io;
 
+use serde_json::{Map, Value, json};
+
 #[derive(Debug)]
 pub(crate) struct CliError {
     message: String,
+    details: Option<Value>,
 }
 
 impl CliError {
@@ -16,7 +19,28 @@ impl CliError {
     {
         Self {
             message: message.into(),
+            details: None,
         }
+    }
+
+    pub(crate) fn with_details<T>(message: T, details: Value) -> Self
+    where
+        T: Into<String>,
+    {
+        Self {
+            message: message.into(),
+            details: Some(details),
+        }
+    }
+
+    pub(crate) fn to_json(&self) -> Value {
+        let mut payload = Map::new();
+        payload.insert(String::from("ok"), json!(false));
+        payload.insert(String::from("error"), json!(self.message));
+        if let Some(details) = self.details.as_ref() {
+            payload.insert(String::from("details"), details.clone());
+        }
+        Value::Object(payload)
     }
 }
 

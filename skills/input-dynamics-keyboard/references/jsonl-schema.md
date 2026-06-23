@@ -84,6 +84,15 @@ Use this reference when validating logs or changing event fields.
 - Timeline `events.jsonl` is a source index. Row order is deterministic
   inspection order unless the row has a valid normalized-time claim; check
   `ordering.canonical_cross_source_order` before using row order as chronology.
+- Video frame index rows use schema `input_dynamics_video_frame.v1` under
+  `derived/video_map/frames.jsonl`. They describe encoded frames in the
+  `media_pts_ns` clock domain and include integer `media_time.pts_ns`,
+  source PTS tick/time-base provenance, optional `duration_ns`,
+  `pts_interval_ns`, keyframe flag, frame dimensions, encoded packet size when
+  available, and source-video fingerprint metadata. They are sensitive local
+  recording artifacts and media-clock facts only. Do not compare them to IME,
+  getevent, timeline, evidence, or wall-clock times unless a later derived
+  artifact supplies an explicit transform and alignment status.
 - `target_package` identifies the active editor package reported to the IME.
 - `field_episode_id` groups field-scoped records that appear to belong to one
   visible editing episode. It is a logger heuristic, not app-provided truth.
