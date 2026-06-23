@@ -63,12 +63,21 @@ struct RunSummaryInspection {
     exists: bool,
 }
 
+#[derive(Default)]
+struct VideoInspection {
+    stale_reasons: Vec<String>,
+    enabled: bool,
+    required: bool,
+    exists: bool,
+}
+
 struct FlagInputs<'a> {
     manifest: Option<&'a Value>,
     session: &'a SessionSelection,
     validation: &'a ValidationInspection,
     run_summary: &'a RunSummaryInspection,
     timeline: &'a TimelineInspection,
+    video: &'a VideoInspection,
     artifacts: &'a Value,
     note_flags: &'a Value,
 }
@@ -90,6 +99,7 @@ pub(crate) fn inspect_recording(dir: &Path) -> CliResult<Value> {
     let run_summary = inspect_run_summary(dir)?;
     let timeline = inspect_timeline(dir)?;
     let artifacts = artifact_map(dir, &artifact_specs(dir, session.selected.as_deref()))?;
+    let video = inspect_video(dir, manifest_ref, &artifacts)?;
     let note_flags = note_flags(dir)?;
     let flag_inputs = FlagInputs {
         manifest: manifest_ref,
@@ -97,12 +107,13 @@ pub(crate) fn inspect_recording(dir: &Path) -> CliResult<Value> {
         validation: &validation,
         run_summary: &run_summary,
         timeline: &timeline,
+        video: &video,
         artifacts: &artifacts,
         note_flags: &note_flags,
     };
     let flags = flags_json(&flag_inputs);
     let next_actions = next_actions(dir, external_run_id.as_deref(), &flags)?;
-    let warnings = warnings(&session, &validation, &run_summary, &timeline);
+    let warnings = warnings(&session, &validation, &run_summary, &timeline, &video);
 
     Ok(json!({
         "ok": true,
@@ -133,6 +144,12 @@ pub(crate) fn inspect_recording(dir: &Path) -> CliResult<Value> {
         "timeline": {
             "exists": timeline.exists,
             "stale_reasons": timeline.stale_reasons,
+        },
+        "video": {
+            "enabled": video.enabled,
+            "required": video.required,
+            "exists": video.exists,
+            "stale_reasons": video.stale_reasons,
         },
         "note_flags": note_flags,
         "flags": flags,
@@ -273,6 +290,56 @@ fn inspect_timeline(dir: &Path) -> CliResult<TimelineInspection> {
     })
 }
 
+fn inspect_video(
+    dir: &Path,
+    manifest: Option<&Value>,
+    artifacts: &Value,
+) -> CliResult<VideoInspection> {
+    let enabled = bool_at_manifest(manifest, "/video/enabled");
+    let required = bool_at_manifest(manifest, "/video/required");
+    let screen_exists = artifact_exists(artifacts, "video_screen");
+    let timing_exists = artifact_exists(artifacts, "video_timing");
+    let exists = screen_exists && timing_exists;
+    let mut stale_reasons = Vec::new();
+    if required && !screen_exists {
+        stale_reasons.push(String::from("required video file is missing"));
+    }
+    if required && !timing_exists {
+        stale_reasons.push(String::from("required video timing metadata is missing"));
+    }
+    if timing_exists {
+        let timing_path = dir.join("video").join("timing.json");
+        let Some(timing) = read_optional_json(&timing_path)? else {
+            stale_reasons.push(String::from("video timing metadata is unreadable"));
+            return Ok(VideoInspection {
+                stale_reasons,
+                enabled,
+                required,
+                exists,
+            });
+        };
+        if timing.get("schema").and_then(Value::as_str) != Some("input_dynamics_video_capture.v1") {
+            stale_reasons.push(String::from("video timing metadata schema is unsupported"));
+        }
+    }
+    if screen_exists {
+        let current = file_fingerprint(&dir.join("video").join("screen.mp4"))?;
+        let recorded_sha = manifest
+            .and_then(|value| value.pointer("/video/file/sha256"))
+            .and_then(Value::as_str);
+        let current_sha = current.get("sha256").and_then(Value::as_str);
+        if recorded_sha.is_some() && recorded_sha != current_sha {
+            stale_reasons.push(String::from("video file fingerprint changed"));
+        }
+    }
+    Ok(VideoInspection {
+        stale_reasons,
+        enabled,
+        required,
+        exists,
+    })
+}
+
 fn timeline_source_stale_reasons(dir: &Path, source: &Value) -> CliResult<Vec<String>> {
     let mut reasons = Vec::new();
     let kind = source
@@ -316,6 +383,7 @@ fn artifact_specs(dir: &Path, session_jsonl: Option<&Path>) -> Vec<ArtifactSpec>
     let mut specs = Vec::new();
     specs.extend(core_artifact_specs(dir));
     specs.extend(adb_artifact_specs(dir));
+    specs.extend(video_artifact_specs(dir));
     specs.extend(derived_artifact_specs(dir));
     specs.extend(evidence_artifact_specs(dir));
     if let Some(path) = session_jsonl {
@@ -327,6 +395,41 @@ fn artifact_specs(dir: &Path, session_jsonl: Option<&Path>) -> Vec<ArtifactSpec>
         ));
     }
     specs
+}
+
+fn video_artifact_specs(dir: &Path) -> [ArtifactSpec; 5] {
+    [
+        artifact(
+            "video_screen",
+            dir.join("video").join("screen.mp4"),
+            ArtifactRequirement::Optional,
+            ArtifactSensitivity::Sensitive,
+        ),
+        artifact(
+            "video_timing",
+            dir.join("video").join("timing.json"),
+            ArtifactRequirement::Optional,
+            ArtifactSensitivity::Sensitive,
+        ),
+        artifact(
+            "video_stdout",
+            dir.join("video").join("screenrecord.stdout.log"),
+            ArtifactRequirement::Optional,
+            ArtifactSensitivity::Normal,
+        ),
+        artifact(
+            "video_stderr",
+            dir.join("video").join("screenrecord.stderr.log"),
+            ArtifactRequirement::Optional,
+            ArtifactSensitivity::Normal,
+        ),
+        artifact(
+            "video_pull_log",
+            dir.join("video").join("adb-pull-video.log"),
+            ArtifactRequirement::Optional,
+            ArtifactSensitivity::Normal,
+        ),
+    ]
 }
 
 fn core_artifact_specs(dir: &Path) -> [ArtifactSpec; 3] {
@@ -564,6 +667,8 @@ fn flags_json(inputs: &FlagInputs<'_>) -> Value {
     let has_press_summaries = artifact_exists(inputs.artifacts, "press_summaries");
     let has_touch_gestures = artifact_exists(inputs.artifacts, "touch_gestures");
     let has_dismissals = artifact_exists(inputs.artifacts, "dismissal_inferences");
+    let has_video = inputs.video.exists && inputs.video.stale_reasons.is_empty();
+    let needs_video = inputs.video.required && !has_video;
     let has_evidence = artifact_exists(inputs.artifacts, "evidence_start_index")
         || artifact_exists(inputs.artifacts, "evidence_end_index");
     let needs_derivation = !has_touch_gestures || !has_dismissals;
@@ -585,14 +690,17 @@ fn flags_json(inputs: &FlagInputs<'_>) -> Value {
         "valid_for_analysis": inputs.manifest.is_some()
             && inputs.session.selected.is_some()
             && has_getevent_jsonl
-            && inputs.validation.current_ok,
+            && inputs.validation.current_ok
+            && !needs_video,
         "needs_validation": !inputs.validation.stored_present
             || !inputs.validation.stale_reasons.is_empty(),
+        "needs_video": needs_video,
+        "has_video": has_video,
         "needs_press_summaries": !has_press_summaries,
         "needs_run_summary": needs_run_summary,
         "needs_derivation": needs_derivation,
         "needs_timeline": needs_timeline,
-        "has_sensitive_evidence": has_evidence,
+        "has_sensitive_evidence": has_evidence || has_video,
         "incomplete_or_superseded": incomplete_or_superseded,
         "needs_cleanup": needs_cleanup(inputs.manifest),
     })
@@ -610,6 +718,13 @@ fn next_actions(dir: &Path, external_run_id: Option<&str>, flags: &Value) -> Cli
             "kind": "validate",
             "command": command,
             "reason": "refresh validation from current IME JSONL files",
+        }));
+    }
+    if bool_at(flags, "/needs_video") {
+        actions.push(json!({
+            "kind": "record_with_video",
+            "command": "input-dynamics record --run-id <new-run-id> --out <new-run-dir>",
+            "reason": "this recording requires video, but video artifacts are missing or stale; rerun with the default video-backed recorder",
         }));
     }
     if bool_at(flags, "/needs_press_summaries") {
@@ -660,11 +775,13 @@ fn warnings(
     validation: &ValidationInspection,
     run_summary: &RunSummaryInspection,
     timeline: &TimelineInspection,
+    video: &VideoInspection,
 ) -> Vec<String> {
     let mut warnings = session.warnings.clone();
     warnings.extend(validation.stale_reasons.iter().cloned());
     warnings.extend(run_summary.stale_reasons.iter().cloned());
     warnings.extend(timeline.stale_reasons.iter().cloned());
+    warnings.extend(video.stale_reasons.iter().cloned());
     warnings
 }
 
@@ -837,6 +954,13 @@ fn value_at(manifest: Option<&Value>, pointer: &str) -> Value {
 fn bool_at(value: &Value, pointer: &str) -> bool {
     value
         .pointer(pointer)
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn bool_at_manifest(manifest: Option<&Value>, pointer: &str) -> bool {
+    manifest
+        .and_then(|value| value.pointer(pointer))
         .and_then(Value::as_bool)
         .unwrap_or(false)
 }

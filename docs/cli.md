@@ -116,9 +116,9 @@ screenshots may contain visible screen content, so store them with the same care
 as run artifacts.
 
 For a complete bounded experiment capture, use `record`. It starts IME logging,
-captures a concurrent ADB touchscreen event stream with `getevent`, normalizes
-that stream to JSONL, stops the session, pulls IME logs, writes
-`manifest.json`, and writes `validation.json`:
+captures a concurrent ADB touchscreen event stream with `getevent`, records
+screen video, normalizes the event stream to JSONL, stops the session, pulls
+IME logs, writes `manifest.json`, and writes `validation.json`:
 
 ```bash
 RUN_ID=run-YYYYMMDD-HHMMSS-human-android
@@ -133,6 +133,11 @@ cargo run --quiet -p input-dynamics -- record --run-id "$RUN_ID" --out "runs/$RU
 When `--duration-ms` is omitted, press Enter in the terminal to stop capture
 cleanly. For scripted smoke tests, pass `--duration-ms <ms>`.
 
+Video is enabled by default and is part of the canonical recording path. It is
+stored under `video/` and treated as sensitive local recording data. Use
+`--no-video` only for diagnostics or CI environments where device screen
+recording is intentionally unavailable.
+
 To preserve screen context at the beginning and end of a run, add
 `--with-evidence`:
 
@@ -144,7 +149,8 @@ cargo run --quiet -p input-dynamics -- record \
 ```
 
 This captures `observe all` bundles under `evidence/start/` and
-`evidence/end/`. Use `--full-accessibility-evidence` only when a protocol needs
+`evidence/end/`. This is separate from the continuous video captured by
+default. Use `--full-accessibility-evidence` only when a protocol needs
 uncompressed accessibility hierarchy dumps.
 
 For bounded agent-driven input, add `--with-input-controller`. This starts the
@@ -307,12 +313,14 @@ scraping human-oriented text.
   `adb shell getevent -lt` output into neutral JSONL records with schema
   `input_dynamics_getevent.v1`.
 - `record --run-id <id> --out <dir>`: records a complete run with IME JSONL,
-  ADB `getevent` raw and normalized touch streams, manifest, pull, and
-  validation output. Use `--duration-ms <ms>` for timed runs; otherwise press
-  Enter to stop. Add `--with-input-controller` for bounded agent-driven runs
-  that need persistent uinput controller metadata in the manifest. Add
-  `--with-evidence` to capture start/end observation bundles containing
-  accessibility XML, screenshot PNG, status, layout, state, and index JSON.
+  ADB `getevent` raw and normalized touch streams, default screen video,
+  manifest, pull, and validation output. Use `--duration-ms <ms>` for timed
+  runs; otherwise press Enter to stop. Add `--with-input-controller` for
+  bounded agent-driven runs that need persistent uinput controller metadata in
+  the manifest. Add `--with-evidence` to capture start/end observation bundles
+  containing accessibility XML, screenshot PNG, status, layout, state, and
+  index JSON. Use `--no-video` only as an explicit diagnostic or CI escape
+  hatch.
 - `derive presses --recording-dir <dir>`: derives per-press summaries from IME
   JSONL records. The output includes key timing, hold/flight timing, landing
   geometry, pointer movement, and pressure/contact ranges. It does not infer
@@ -360,6 +368,12 @@ of falling back to a second touch implementation.
     getevent.raw.log
     getevent.jsonl
     getevent.stderr.log
+  video/
+    screen.mp4
+    timing.json
+    screenrecord.stdout.log
+    screenrecord.stderr.log
+    adb-pull-video.log
   derived/
     run_summary.json
   evidence/        # only when --with-evidence is used
@@ -383,6 +397,13 @@ of falling back to a second touch implementation.
 physical touchscreen profile and keyboard layout snapshots. Analysis commands
 use this recorded frame instead of accepting screen geometry on the command
 line.
+
+By default, `manifest.json` includes `video.enabled: true`,
+`video.required: true`, `video.local_path`, `video.timing_path`,
+`video.remote_path`, start/stop timing brackets, the raw screenrecord command,
+cleanup status, and the pulled `screen.mp4` file fingerprint. The companion
+`video/timing.json` repeats the video metadata next to the media file for
+artifact-local inspection.
 
 When `record` is run with `--with-evidence`, `manifest.json` includes
 `evidence.enabled: true`, `evidence.policy: start_end`, and the start/end
@@ -419,11 +440,14 @@ input-dynamics recording inspect --dir "runs/$RUN_ID"
 ```
 
 This command is read-only. It reports the selected IME session JSONL file,
-record counts, artifact fingerprints, stored-versus-current validation state,
-timeline source staleness, and boolean flags such as `valid_for_analysis`,
+record counts, artifact fingerprints, video presence and staleness,
+stored-versus-current validation state, timeline source staleness, and boolean
+flags such as `valid_for_analysis`, `has_video`, `needs_video`,
 `needs_validation`, `needs_press_summaries`, `needs_run_summary`,
-`needs_derivation`, and `needs_timeline`. `next_actions` contains local CLI
-commands an agent can run to refresh missing or stale artifacts.
+`needs_derivation`, and `needs_timeline`. Required missing or stale video makes
+`valid_for_analysis` false and adds a canonical `record_with_video` action.
+`next_actions` contains local CLI commands an agent can run to refresh missing
+or stale artifacts.
 
 After recording with the current CLI:
 
@@ -482,11 +506,12 @@ derived/
 ```
 
 `derived/timeline/events.jsonl` contains semantic IME events, derived touch
-gestures, dismissal inferences, and optional evidence bundle markers. It does
-not copy low-level raw `getevent` rows by default and does not embed screenshot
-or accessibility payloads. Each row keeps source references and an explicit
-clock domain. `derived/timeline/index.json` records selected sources, counts,
-fingerprints, output paths, warnings, and the clock-alignment status.
+gestures, dismissal inferences, video start/stop markers when timing metadata
+is present, and optional evidence bundle markers. It does not copy low-level
+raw `getevent` rows by default and does not embed screenshot, accessibility, or
+video payloads. Each row keeps source references and an explicit clock domain.
+`derived/timeline/index.json` records selected sources, counts, fingerprints,
+output paths, warnings, and the clock-alignment status.
 
 To use a local classifier-threshold policy:
 

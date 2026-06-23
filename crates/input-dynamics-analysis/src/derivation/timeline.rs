@@ -21,8 +21,9 @@ const CLOCK_ALIGNMENT_STATUS: &str = "not_estimated";
 const IME_SOURCE_RANK: u8 = 10;
 const TOUCH_GESTURE_SOURCE_RANK: u8 = 20;
 const DISMISSAL_SOURCE_RANK: u8 = 30;
-const EVIDENCE_START_SOURCE_RANK: u8 = 40;
-const EVIDENCE_END_SOURCE_RANK: u8 = 50;
+const VIDEO_SOURCE_RANK: u8 = 40;
+const EVIDENCE_START_SOURCE_RANK: u8 = 50;
+const EVIDENCE_END_SOURCE_RANK: u8 = 60;
 
 /// Configuration for deriving a cross-source recording timeline.
 #[derive(Clone, Debug)]
@@ -44,6 +45,7 @@ struct TimelinePaths {
     ime_jsonl: PathBuf,
     touch_gestures_jsonl: PathBuf,
     dismissals_jsonl: PathBuf,
+    video_timing_json: PathBuf,
     evidence_start_index: PathBuf,
     evidence_end_index: PathBuf,
     output_dir: PathBuf,
@@ -70,6 +72,7 @@ enum SourceKind {
     ImeJsonl,
     TouchGestures,
     Dismissals,
+    VideoTiming,
     EvidenceStart,
     EvidenceEnd,
 }
@@ -105,6 +108,7 @@ struct TimelineIndexInputs<'a> {
     ime_records: &'a [LineRecord],
     touch_records: Option<&'a OptionalRecords>,
     dismissal_records: Option<&'a OptionalRecords>,
+    video_timing: Option<&'a Value>,
     evidence_records: &'a [EvidenceRecord],
     warnings: &'a [String],
     event_count: usize,
@@ -135,6 +139,7 @@ impl TimelinePaths {
             ime_jsonl,
             touch_gestures_jsonl,
             dismissals_jsonl,
+            video_timing_json: config.recording_dir.join("video").join("timing.json"),
             evidence_start_index: config
                 .recording_dir
                 .join("evidence")
@@ -175,6 +180,7 @@ pub fn derive_timeline(config: &DeriveTimelineConfig) -> DeriveResult<Value> {
     let ime_records = read_jsonl_with_line_indexes(&paths.ime_jsonl)?;
     let touch_records = read_optional_jsonl(&paths.touch_gestures_jsonl)?;
     let dismissal_records = read_optional_jsonl(&paths.dismissals_jsonl)?;
+    let video_timing = read_optional_json(&paths.video_timing_json)?;
     let evidence_records = read_evidence_records(&paths)?;
     let mut warnings = Vec::new();
     collect_missing_warning(
@@ -208,23 +214,14 @@ pub fn derive_timeline(config: &DeriveTimelineConfig) -> DeriveResult<Value> {
         SourceKind::Dismissals,
         dismissal_records.as_ref(),
     )?;
+    append_video_records(
+        &mut timeline,
+        &config.recording_dir,
+        &paths.video_timing_json,
+        video_timing.as_ref(),
+    );
     append_evidence_records(&mut timeline, &config.recording_dir, &evidence_records)?;
-    timeline.sort_by(|left, right| left.order.cmp(&right.order));
-
-    let timeline_values = timeline
-        .into_iter()
-        .enumerate()
-        .map(|(index, mut record)| {
-            let event_index = u64::try_from(index)
-                .map_err(|error| {
-                    DeriveError::new(format!("timeline event index overflow: {error}"))
-                })?
-                .checked_add(1)
-                .ok_or_else(|| DeriveError::new("timeline event index overflow"))?;
-            insert_timeline_id(&mut record.value, event_index);
-            Ok(record.value)
-        })
-        .collect::<DeriveResult<Vec<_>>>()?;
+    let timeline_values = finalize_timeline_values(timeline)?;
 
     fs::create_dir_all(&paths.output_dir)?;
     write_jsonl(&paths.events_output, &timeline_values)?;
@@ -235,6 +232,7 @@ pub fn derive_timeline(config: &DeriveTimelineConfig) -> DeriveResult<Value> {
         ime_records: &ime_records,
         touch_records: touch_records.as_ref(),
         dismissal_records: dismissal_records.as_ref(),
+        video_timing: video_timing.as_ref(),
         evidence_records: &evidence_records,
         warnings: &warnings,
         event_count: timeline_values.len(),
@@ -251,6 +249,24 @@ pub fn derive_timeline(config: &DeriveTimelineConfig) -> DeriveResult<Value> {
         "event_count": timeline_values.len(),
         "warnings": warnings,
     }))
+}
+
+fn finalize_timeline_values(mut timeline: Vec<TimelineRecord>) -> DeriveResult<Vec<Value>> {
+    timeline.sort_by(|left, right| left.order.cmp(&right.order));
+    timeline
+        .into_iter()
+        .enumerate()
+        .map(|(index, mut record)| {
+            let event_index = u64::try_from(index)
+                .map_err(|error| {
+                    DeriveError::new(format!("timeline event index overflow: {error}"))
+                })?
+                .checked_add(1)
+                .ok_or_else(|| DeriveError::new("timeline event index overflow"))?;
+            insert_timeline_id(&mut record.value, event_index);
+            Ok(record.value)
+        })
+        .collect()
 }
 
 fn append_ime_records(
@@ -321,7 +337,10 @@ fn append_optional_jsonl_records(
                 record.line_index,
                 &record.value,
             ),
-            SourceKind::ImeJsonl | SourceKind::EvidenceStart | SourceKind::EvidenceEnd => {
+            SourceKind::ImeJsonl
+            | SourceKind::VideoTiming
+            | SourceKind::EvidenceStart
+            | SourceKind::EvidenceEnd => {
                 return Err(DeriveError::new("unsupported optional JSONL source kind"));
             }
         };
@@ -389,6 +408,49 @@ fn dismissal_timeline_record(
     })
 }
 
+fn append_video_records(
+    timeline: &mut Vec<TimelineRecord>,
+    recording_dir: &Path,
+    path: &Path,
+    timing: Option<&Value>,
+) {
+    let Some(timing_record) = timing else {
+        return;
+    };
+    for phase in ["start", "stop"] {
+        let Some(phase_record) = timing_record.get(phase) else {
+            continue;
+        };
+        let value = json!({
+            "schema": TIMELINE_EVENT_SCHEMA,
+            "record_kind": "video_marker",
+            "event": format!("video_{phase}"),
+            "source_layer": "video",
+            "source": "video_timing",
+            "source_ref": {
+                "path": relative_path_text(recording_dir, path),
+                "phase": phase,
+            },
+            "clock_domain": "host_wall_ms_bracketed_device_epoch_ms",
+            "ordering": ordering_json(ORDER_METHOD, CLOCK_ALIGNMENT_STATUS),
+            "phase": phase,
+            "remote_path": timing_record.get("remote_path").cloned().unwrap_or(Value::Null),
+            "local_path": timing_record.get("local_path").cloned().unwrap_or(Value::Null),
+            "marker": phase_record,
+            "file": timing_record.get("file").cloned().unwrap_or(Value::Null),
+        });
+        timeline.push(TimelineRecord {
+            order: TimelineOrder {
+                group: video_order_group(phase),
+                time_ms: video_order_time_ms(phase_record),
+                source_rank: VIDEO_SOURCE_RANK,
+                source_line_index: None,
+            },
+            value,
+        });
+    }
+}
+
 fn append_evidence_records(
     timeline: &mut Vec<TimelineRecord>,
     recording_dir: &Path,
@@ -422,7 +484,7 @@ fn append_evidence_records(
         timeline.push(TimelineRecord {
             order: TimelineOrder {
                 group: evidence_order_group(kind)?,
-                time_ms: None,
+                time_ms: record.get("captured_wall_ms").and_then(Value::as_i64),
                 source_rank: source_rank(kind),
                 source_line_index: None,
             },
@@ -433,30 +495,38 @@ fn append_evidence_records(
 }
 
 fn timeline_index(inputs: &TimelineIndexInputs<'_>) -> DeriveResult<Value> {
-    let mut sources = Vec::new();
-    sources.push(source_index(
-        SourceKind::ImeJsonl,
-        &inputs.config.recording_dir,
-        &inputs.paths.ime_jsonl,
-        Some(inputs.ime_records.len()),
-        SourceRequirement::Required,
-    )?);
-    sources.push(source_index(
-        SourceKind::TouchGestures,
-        &inputs.config.recording_dir,
-        &inputs.paths.touch_gestures_jsonl,
-        inputs.touch_records.map(|records| records.records.len()),
-        SourceRequirement::Optional,
-    )?);
-    sources.push(source_index(
-        SourceKind::Dismissals,
-        &inputs.config.recording_dir,
-        &inputs.paths.dismissals_jsonl,
-        inputs
-            .dismissal_records
-            .map(|records| records.records.len()),
-        SourceRequirement::Optional,
-    )?);
+    let mut sources = vec![
+        source_index(
+            SourceKind::ImeJsonl,
+            &inputs.config.recording_dir,
+            &inputs.paths.ime_jsonl,
+            Some(inputs.ime_records.len()),
+            SourceRequirement::Required,
+        )?,
+        source_index(
+            SourceKind::TouchGestures,
+            &inputs.config.recording_dir,
+            &inputs.paths.touch_gestures_jsonl,
+            inputs.touch_records.map(|records| records.records.len()),
+            SourceRequirement::Optional,
+        )?,
+        source_index(
+            SourceKind::Dismissals,
+            &inputs.config.recording_dir,
+            &inputs.paths.dismissals_jsonl,
+            inputs
+                .dismissal_records
+                .map(|records| records.records.len()),
+            SourceRequirement::Optional,
+        )?,
+        source_index(
+            SourceKind::VideoTiming,
+            &inputs.config.recording_dir,
+            &inputs.paths.video_timing_json,
+            inputs.video_timing.map(|_record| 2_usize),
+            SourceRequirement::Optional,
+        )?,
+    ];
     for evidence_record in inputs.evidence_records {
         let path = evidence_index_path(&inputs.config.recording_dir, evidence_record.kind)?;
         sources.push(source_index(
@@ -615,7 +685,7 @@ fn order_time_ms(kind: SourceKind, record: &Value) -> Option<i64> {
             .pointer("/start/t_getevent_ms")
             .and_then(Value::as_i64),
         SourceKind::Dismissals => dismissal_order_ms(record),
-        SourceKind::EvidenceStart | SourceKind::EvidenceEnd => None,
+        SourceKind::VideoTiming | SourceKind::EvidenceStart | SourceKind::EvidenceEnd => None,
     }
 }
 
@@ -632,9 +702,10 @@ fn evidence_order_group(kind: SourceKind) -> DeriveResult<u8> {
     match kind {
         SourceKind::EvidenceStart => Ok(0),
         SourceKind::EvidenceEnd => Ok(2),
-        SourceKind::ImeJsonl | SourceKind::TouchGestures | SourceKind::Dismissals => {
-            Err(DeriveError::new("unsupported evidence order group"))
-        }
+        SourceKind::ImeJsonl
+        | SourceKind::TouchGestures
+        | SourceKind::Dismissals
+        | SourceKind::VideoTiming => Err(DeriveError::new("unsupported evidence order group")),
     }
 }
 
@@ -643,6 +714,7 @@ const fn source_rank(kind: SourceKind) -> u8 {
         SourceKind::ImeJsonl => IME_SOURCE_RANK,
         SourceKind::TouchGestures => TOUCH_GESTURE_SOURCE_RANK,
         SourceKind::Dismissals => DISMISSAL_SOURCE_RANK,
+        SourceKind::VideoTiming => VIDEO_SOURCE_RANK,
         SourceKind::EvidenceStart => EVIDENCE_START_SOURCE_RANK,
         SourceKind::EvidenceEnd => EVIDENCE_END_SOURCE_RANK,
     }
@@ -653,6 +725,7 @@ const fn source_kind_name(kind: SourceKind) -> &'static str {
         SourceKind::ImeJsonl => "ime_jsonl",
         SourceKind::TouchGestures => "derived_touch_gestures",
         SourceKind::Dismissals => "derived_dismissal_inferences",
+        SourceKind::VideoTiming => "video_timing",
         SourceKind::EvidenceStart => "evidence_start",
         SourceKind::EvidenceEnd => "evidence_end",
     }
@@ -662,9 +735,10 @@ fn evidence_phase(kind: SourceKind) -> DeriveResult<&'static str> {
     match kind {
         SourceKind::EvidenceStart => Ok("start"),
         SourceKind::EvidenceEnd => Ok("end"),
-        SourceKind::ImeJsonl | SourceKind::TouchGestures | SourceKind::Dismissals => {
-            Err(DeriveError::new("unsupported evidence phase"))
-        }
+        SourceKind::ImeJsonl
+        | SourceKind::TouchGestures
+        | SourceKind::Dismissals
+        | SourceKind::VideoTiming => Err(DeriveError::new("unsupported evidence phase")),
     }
 }
 
@@ -678,10 +752,21 @@ fn evidence_index_path(recording_dir: &Path, kind: SourceKind) -> DeriveResult<P
             .join("evidence")
             .join("end")
             .join("index.json")),
-        SourceKind::ImeJsonl | SourceKind::TouchGestures | SourceKind::Dismissals => {
-            Err(DeriveError::new("unsupported evidence index path"))
-        }
+        SourceKind::ImeJsonl
+        | SourceKind::TouchGestures
+        | SourceKind::Dismissals
+        | SourceKind::VideoTiming => Err(DeriveError::new("unsupported evidence index path")),
     }
+}
+
+fn video_order_group(phase: &str) -> u8 {
+    if phase == "start" { 0 } else { 2 }
+}
+
+fn video_order_time_ms(record: &Value) -> Option<i64> {
+    record
+        .get("host_wall_ms_before_device_timestamp")
+        .and_then(Value::as_i64)
 }
 
 fn optional_time_order(left: Option<i64>, right: Option<i64>) -> Ordering {
@@ -952,6 +1037,68 @@ mod tests {
         let _cleanup = assert_ok(fs::remove_dir_all(&root), "remove fixture");
     }
 
+    #[test]
+    fn derives_timeline_with_video_markers() {
+        let root = unique_temp_dir("timeline-video");
+        let Some(()) = assert_ok(create_complete_fixture(&root), "create fixture") else {
+            return;
+        };
+        let Some(()) = assert_ok(create_video_fixture(&root), "create video fixture") else {
+            return;
+        };
+
+        let derive_result = derive_timeline(&DeriveTimelineConfig {
+            recording_dir: root.clone(),
+            ime_jsonl: None,
+            touch_gestures_jsonl: None,
+            dismissals_jsonl: None,
+            output_dir: None,
+        });
+        let Some(_summary) = assert_ok(derive_result, "derive timeline") else {
+            return;
+        };
+
+        let timeline_dir = root.join("derived").join("timeline");
+        let Some(output) = assert_ok(
+            read_jsonl(&timeline_dir.join("events.jsonl")),
+            "read timeline events",
+        ) else {
+            return;
+        };
+        let video_phases = output
+            .iter()
+            .filter(|record| {
+                record.get("record_kind").and_then(Value::as_str) == Some("video_marker")
+            })
+            .filter_map(|record| record.get("phase").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            video_phases,
+            vec!["start", "stop"],
+            "video start and stop markers should be present in timeline order"
+        );
+        let Some(index) = assert_ok(read_json(&timeline_dir.join("index.json")), "read index")
+        else {
+            return;
+        };
+        let video_source_count = index
+            .get("sources")
+            .and_then(Value::as_array)
+            .and_then(|sources| {
+                sources.iter().find(|source| {
+                    source.get("kind").and_then(Value::as_str) == Some("video_timing")
+                })
+            })
+            .and_then(|source| source.get("record_count"))
+            .and_then(Value::as_u64);
+        assert_eq!(
+            video_source_count,
+            Some(2_u64),
+            "timeline index should count video timing start and stop markers"
+        );
+        let _cleanup = assert_ok(fs::remove_dir_all(&root), "remove fixture");
+    }
+
     fn create_complete_fixture(root: &Path) -> TestResult<()> {
         let ime_dir = root.join("ime");
         let derived_dir = root.join("derived");
@@ -986,6 +1133,34 @@ mod tests {
             &evidence_fixture("end/screenshot.png", 1_500_i64),
         )?;
         Ok(())
+    }
+
+    fn create_video_fixture(root: &Path) -> TestResult<()> {
+        let video_dir = root.join("video");
+        fs::create_dir_all(&video_dir)?;
+        write_json(
+            &video_dir.join("timing.json"),
+            &json!({
+                "schema": "input_dynamics_video_capture.v1",
+                "enabled": true,
+                "required": true,
+                "remote_path": "/sdcard/Download/input-dynamics-run-test.mp4",
+                "local_path": "video/screen.mp4",
+                "start": {
+                    "phase": "start",
+                    "host_wall_ms_before_device_timestamp": 800_i64,
+                    "device_epoch_ms": 801_i64,
+                    "host_wall_ms_after_device_timestamp": 802_i64,
+                },
+                "stop": {
+                    "phase": "stop",
+                    "host_wall_ms_before_device_timestamp": 1_700_i64,
+                    "device_epoch_ms": 1_701_i64,
+                    "host_wall_ms_after_device_timestamp": 1_702_i64,
+                },
+                "ok": true,
+            }),
+        )
     }
 
     fn ime_fixture() -> Vec<Value> {

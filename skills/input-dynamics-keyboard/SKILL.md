@@ -1,6 +1,6 @@
 ---
 name: input-dynamics-keyboard
-description: Run and validate local Android Input Dynamics Keyboard sessions over ADB. Use when Codex needs to download or build the Android IME APK, install it on a device, enable or select it, record a bounded input dynamics run with an external run_id, inspect status, keyboard layout, accessibility, or screenshot evidence, avoid screenshot-dependent keyboard automation, pull JSONL logs, or validate the password-field suppression boundary.
+description: Run and validate local Android Input Dynamics Keyboard sessions over ADB. Use when Codex needs to download or build the Android IME APK, install it on a device, enable or select it, record a bounded input dynamics run with screen video and an external run_id, inspect status, keyboard layout, accessibility, or screenshot evidence, avoid screenshot-dependent keyboard automation, pull JSONL logs, or validate the password-field suppression boundary.
 ---
 
 # Input Dynamics Keyboard
@@ -24,6 +24,9 @@ instrumentation surface. Keep workflows app-neutral, offline, and ADB-driven.
 - Use `observe` commands for optional screen-context evidence. Accessibility
   dumps and screenshots may contain visible screen content; store them with the
   same care as local run artifacts.
+- `record` captures screen video by default. Treat `video/screen.mp4` and
+  `video/timing.json` as sensitive local run artifacts. Use `--no-video` only
+  for explicit diagnostics or CI, not for normal bounded capture.
 - Use the CLI's AOSP uinput-backed touch path for scripted key presses,
   absolute taps, and gestures. Do not use `adb shell input tap` for normal
   agent-driven input.
@@ -177,11 +180,14 @@ idk record --run-id "$RUN_ID" --out "runs/$RUN_ID"
 When `--duration-ms` is omitted, press Enter in the terminal to stop capture
 cleanly. Agents should use `--duration-ms <ms>` for scripted smoke tests.
 
-The command writes `manifest.json`, `validation.json`, `ime/`, `adb/`, and
-`derived/` under the output directory. The `adb/getevent.raw.log` stream is
-device-level touchscreen data and should be analyzed separately from IME-owned
-JSONL privacy guarantees. Current manifests include `coordinate_frame`, derived
-from recorded touchscreen profile and layout snapshots.
+The command writes `manifest.json`, `validation.json`, `ime/`, `adb/`,
+`video/`, and `derived/` under the output directory. The
+`adb/getevent.raw.log` stream is device-level touchscreen data and should be
+analyzed separately from IME-owned JSONL privacy guarantees. The
+`video/screen.mp4` artifact is device-level visual context and is sensitive
+local run data. Current manifests include `coordinate_frame`, derived from
+recorded touchscreen profile and layout snapshots, plus `video.enabled`,
+`video.required`, timing brackets, and the pulled video fingerprint.
 
 When a run needs screen context, add `--with-evidence`. This writes start/end
 observation bundles under `evidence/start/` and `evidence/end/`, each with
@@ -195,7 +201,8 @@ idk record \
   --with-evidence
 ```
 
-Use `--full-accessibility-evidence` only when a protocol requires uncompressed
+These bundles are separate from the continuous video captured by default. Use
+`--full-accessibility-evidence` only when a protocol requires uncompressed
 accessibility hierarchy dumps. Treat evidence artifacts as sensitive local run
 data.
 
@@ -227,6 +234,9 @@ The resulting manifest should include
 `input_controller_runtime.summary.last_error`, and
 `input_controller_runtime.summary.cleanup`. If `--with-evidence` was used, it
 should also include `evidence.enabled: true` and `evidence.policy: start_end`.
+Unless `--no-video` was explicitly used, it should include `video.enabled:
+true`, `video.required: true`, `video.local_path`, and a non-null
+`video.file.sha256`.
 
 To derive touch gestures and dismissal inferences from a completed run:
 
@@ -278,12 +288,13 @@ idk recording inspect --dir "runs/$RUN_ID"
 ```
 
 Use `flags.valid_for_analysis`, `flags.needs_validation`,
-`flags.needs_press_summaries`, `flags.needs_run_summary`,
-`flags.needs_derivation`, and `flags.needs_timeline` to decide the next step.
-If `next_actions` is non-empty, prefer those CLI commands over ad hoc file
-inspection. The inspection output fingerprints source artifacts and reports
-stale summaries and timelines, but it does not rewrite validation or derived
-files.
+`flags.has_video`, `flags.needs_video`, `flags.needs_press_summaries`,
+`flags.needs_run_summary`, `flags.needs_derivation`, and
+`flags.needs_timeline` to decide the next step. Required missing or stale video
+makes `valid_for_analysis` false. If `next_actions` is non-empty, prefer those
+CLI commands over ad hoc file inspection. The inspection output fingerprints
+source artifacts and reports stale video, summaries, and timelines, but it does
+not rewrite validation or derived files.
 
 5. Use lower-level status and layout commands when debugging:
 

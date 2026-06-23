@@ -31,7 +31,7 @@ use crate::profile::{
     self, InterKeyDelaySampling, KeyProfileContext, ProfileProvenance, RuntimeProfile,
 };
 use crate::ratio::{RatioPpm, SignedRatioPpm};
-use crate::record::{RecordConfig, record_run};
+use crate::record::{RecordConfig, VideoMode, record_run};
 use crate::recording::inspect_recording;
 use crate::uinput::{self, PathSpec, TapSpec, TouchPoint};
 use crate::validate::validate_logs;
@@ -196,6 +196,7 @@ fn run_record_command(app: &App, command: &Commands) -> CliResult<Value> {
         with_input_controller,
         with_evidence,
         full_accessibility_evidence,
+        no_video,
         ref input_actor,
         ref input_controller,
         ref input_cadence_policy,
@@ -210,6 +211,11 @@ fn run_record_command(app: &App, command: &Commands) -> CliResult<Value> {
         with_input_controller,
         with_evidence,
         full_accessibility_evidence,
+        video_mode: if no_video {
+            VideoMode::Disabled
+        } else {
+            VideoMode::Enabled
+        },
         input_actor: input_actor.clone(),
         input_controller: input_controller.clone(),
         input_cadence_policy: input_cadence_policy.clone(),

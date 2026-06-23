@@ -145,7 +145,7 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         command: RecordingCommand,
     },
-    /// Record a bounded research run with IME logs and ADB touch events.
+    /// Record a bounded research run with IME logs, ADB touch events, and screen video.
     Record {
         /// External run id to write into each session record.
         #[arg(long)]
@@ -165,6 +165,9 @@ pub(crate) enum Commands {
         /// Use full accessibility hierarchy dumps for --with-evidence.
         #[arg(long, requires = "with_evidence")]
         full_accessibility_evidence: bool,
+        /// Disable default screen video capture for diagnostics or CI.
+        #[arg(long)]
+        no_video: bool,
         /// Session-level input actor provenance.
         #[arg(long, default_value = "human")]
         input_actor: String,

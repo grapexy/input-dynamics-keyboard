@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::fmt::Debug;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -200,6 +201,112 @@ fn inspect_accepts_optional_missing_timeline_sources() {
     let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
 }
 
+#[test]
+fn inspect_requires_declared_video_artifacts() {
+    let root = unique_temp_dir("recording-inspect-required-video-missing");
+    let Some(()) = assert_ok(create_fixture(&root, FixtureShape::DerivedOnly), "fixture") else {
+        return;
+    };
+    let Some(()) = assert_ok(
+        write_manifest(&root, Some(required_video_manifest())),
+        "write manifest",
+    ) else {
+        return;
+    };
+
+    let Some(result) = assert_ok(inspect_recording(&root), "inspect recording") else {
+        return;
+    };
+
+    assert_eq!(
+        result
+            .pointer("/flags/valid_for_analysis")
+            .and_then(Value::as_bool),
+        Some(false),
+        "recording should not be analysis-ready when required video is missing"
+    );
+    assert_eq!(
+        result
+            .pointer("/flags/needs_video")
+            .and_then(Value::as_bool),
+        Some(true),
+        "required missing video should request a fresh video-backed recording"
+    );
+    assert_eq!(
+        result.pointer("/video/required").and_then(Value::as_bool),
+        Some(true),
+        "inspection should surface the video requirement"
+    );
+    let stale_count = result
+        .pointer("/video/stale_reasons")
+        .and_then(Value::as_array)
+        .map_or(0_usize, Vec::len);
+    assert!(
+        stale_count >= 2,
+        "video stale reasons should mention both screen and timing artifacts"
+    );
+    let has_record_with_video_action = result
+        .get("next_actions")
+        .and_then(Value::as_array)
+        .is_some_and(|actions| {
+            actions.iter().any(|action| {
+                action.get("kind").and_then(Value::as_str) == Some("record_with_video")
+            })
+        });
+    assert!(
+        has_record_with_video_action,
+        "inspect should give a canonical rerun action for missing video"
+    );
+    let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
+}
+
+#[test]
+fn inspect_accepts_declared_video_artifacts() {
+    let root = unique_temp_dir("recording-inspect-required-video-present");
+    let Some(()) = assert_ok(create_fixture(&root, FixtureShape::DerivedOnly), "fixture") else {
+        return;
+    };
+    let Some(video) = assert_ok(create_video_fixture(&root), "create video fixture") else {
+        return;
+    };
+    let Some(()) = assert_ok(write_manifest(&root, Some(video)), "write manifest") else {
+        return;
+    };
+
+    let Some(result) = assert_ok(inspect_recording(&root), "inspect recording") else {
+        return;
+    };
+
+    assert_eq!(
+        result
+            .pointer("/flags/valid_for_analysis")
+            .and_then(Value::as_bool),
+        Some(true),
+        "recording should be analysis-ready with fresh required video artifacts"
+    );
+    assert_eq!(
+        result.pointer("/flags/has_video").and_then(Value::as_bool),
+        Some(true),
+        "fresh video should be reported as present"
+    );
+    assert_eq!(
+        result
+            .pointer("/flags/needs_video")
+            .and_then(Value::as_bool),
+        Some(false),
+        "fresh video should not request a rerun"
+    );
+    assert_eq!(
+        result
+            .pointer("/video/stale_reasons")
+            .and_then(Value::as_array)
+            .map_or(0_usize, Vec::len),
+        0_usize,
+        "fresh video should not produce stale reasons"
+    );
+    let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
+}
+
 #[derive(Clone, Copy)]
 enum FixtureShape {
     DerivedOnly,
@@ -210,19 +317,7 @@ fn create_fixture(root: &Path, shape: FixtureShape) -> TestResult<()> {
     fs::create_dir_all(root.join("ime"))?;
     fs::create_dir_all(root.join("adb"))?;
     fs::create_dir_all(root.join("derived"))?;
-    write_json(
-        &root.join("manifest.json"),
-        &json!({
-            "schema": "input_dynamics_record_manifest.v1",
-            "external_run_id": "run-test",
-            "package_name": "org.inputdynamics.ime.debug",
-            "input_actor": "human",
-            "input_controller": null,
-            "input_cadence_policy": "manual",
-            "host_start_wall_ms": 1_000_i64,
-            "host_stop_wall_ms": 2_000_i64,
-        }),
-    )?;
+    write_manifest(root, None)?;
     write_jsonl(&root.join("ime").join("session-test.jsonl"), &ime_records())?;
     write_jsonl(
         &root.join("adb").join("getevent.jsonl"),
@@ -260,6 +355,76 @@ fn create_fixture(root: &Path, shape: FixtureShape) -> TestResult<()> {
         create_timeline_fixture(root)?;
     }
     Ok(())
+}
+
+fn write_manifest(root: &Path, video: Option<Value>) -> TestResult<()> {
+    let mut manifest = json!({
+        "schema": "input_dynamics_record_manifest.v1",
+        "external_run_id": "run-test",
+        "package_name": "org.inputdynamics.ime.debug",
+        "input_actor": "human",
+        "input_controller": null,
+        "input_cadence_policy": "manual",
+        "host_start_wall_ms": 1_000_i64,
+        "host_stop_wall_ms": 2_000_i64,
+    });
+    if let Some(video_value) = video {
+        let Some(object) = manifest.as_object_mut() else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "manifest fixture should be a JSON object",
+            )
+            .into());
+        };
+        object.insert(String::from("video"), video_value);
+    }
+    write_json(&root.join("manifest.json"), &manifest)
+}
+
+fn required_video_manifest() -> Value {
+    json!({
+        "schema": "input_dynamics_video_capture.v1",
+        "enabled": true,
+        "required": true,
+        "remote_path": "/sdcard/Download/input-dynamics-run-test.mp4",
+        "local_path": "video/screen.mp4",
+        "timing_path": "video/timing.json",
+        "file": null,
+        "start": {
+            "phase": "start",
+            "host_wall_ms_before_device_timestamp": 1_100_i64,
+            "device_epoch_ms": 1_101_i64,
+            "host_wall_ms_after_device_timestamp": 1_102_i64,
+        },
+        "stop": {
+            "phase": "stop",
+            "host_wall_ms_before_device_timestamp": 1_900_i64,
+            "device_epoch_ms": 1_901_i64,
+            "host_wall_ms_after_device_timestamp": 1_902_i64,
+        },
+        "ok": true,
+    })
+}
+
+fn create_video_fixture(root: &Path) -> TestResult<Value> {
+    let video_dir = root.join("video");
+    fs::create_dir_all(&video_dir)?;
+    let screen_path = video_dir.join("screen.mp4");
+    fs::write(&screen_path, "not-a-real-mp4-for-inspection\n")?;
+    let mut video = required_video_manifest();
+    let Some(object) = video.as_object_mut() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "video fixture should be a JSON object",
+        )
+        .into());
+    };
+    object.insert(String::from("file"), file_fingerprint(&screen_path)?);
+    write_json(&video_dir.join("timing.json"), &video)?;
+    fs::write(video_dir.join("screenrecord.stdout.log"), "")?;
+    fs::write(video_dir.join("screenrecord.stderr.log"), "")?;
+    fs::write(video_dir.join("adb-pull-video.log"), "pulled\n")?;
+    Ok(video)
 }
 
 fn create_run_summary_fixture(root: &Path) -> TestResult<()> {

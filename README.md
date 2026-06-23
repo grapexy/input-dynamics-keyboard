@@ -32,6 +32,8 @@ Use this keyboard only in consented, local research settings.
   screenshot-based coordinate discovery.
 - CLI observation bundles for current status, keyboard layout, accessibility
   hierarchy, and screenshot evidence when screen context is needed.
+- Default `record` screen video capture for bounded local runs, stored as a
+  sensitive local artifact with timing metadata.
 - Optional `record --with-evidence` start/end observation bundles for bounded
   runs that need screen context.
 - Derived press summaries for per-key timing, landing geometry, pointer
@@ -82,8 +84,9 @@ each `input-dynamics` command. Session runtime files and locks are keyed by
 package and device serial.
 
 The `record` command starts IME logging, captures an ADB touchscreen event
-stream, writes normalized `adb/getevent.jsonl`, stops cleanly when you press
-Enter, pulls logs, writes `manifest.json`, and writes `validation.json`.
+stream, records screen video, writes normalized `adb/getevent.jsonl`, stops
+cleanly when you press Enter, pulls logs, writes `manifest.json`, and writes
+`validation.json`. Screen video is sensitive local recording data.
 
 To build and install a local debug APK instead:
 
