@@ -2518,7 +2518,7 @@ Event Hub State:
       Enabled: true
       Descriptor: 48ee483b8b70f8343840706d561e5b8d5cb64b8c
       Location: sec_touchscreen/input1
-      UniqueId: google_touchscreen
+      UniqueId: primary_touchscreen_id
       Identifier: bus=0x001c, vendor=0x0000, product=0x0000, version=0x0000, bluetoothAddress=<not set>
       VideoDevice: Video device sec_touchscreen (/dev/v4l-touch0) : height=39, width=18, fd=254, hasValidFd=true
       SysfsDevicePath: /sys/devices/platform/mock-touch

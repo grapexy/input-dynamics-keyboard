@@ -7,9 +7,46 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
-use super::{file_fingerprint, inspect_recording};
+use super::{file_fingerprint, inspect_recording, validation_stale_reasons};
 
 type TestResult<T> = Result<T, Box<dyn Error>>;
+
+#[test]
+fn validation_staleness_includes_clock_validation_schema() {
+    let stored = json!({
+        "ok": true,
+        "record_count": 3_u64,
+        "selected_record_count": 3_u64,
+        "session_start_count": 1_u64,
+        "session_stop_count": 1_u64,
+        "password_record_count": 0_u64,
+        "target_package_seen": true
+    });
+    let current = json!({
+        "ok": true,
+        "record_count": 3_u64,
+        "selected_record_count": 3_u64,
+        "session_start_count": 1_u64,
+        "session_stop_count": 1_u64,
+        "password_record_count": 0_u64,
+        "invalid_timestamp_metadata_count": 0_u64,
+        "clock_validation": {
+            "timestamp_metadata_record_count": 3_u64
+        },
+        "failure_reasons": [],
+        "diagnostic_reasons": [],
+        "target_package_seen": true
+    });
+
+    let reasons = validation_stale_reasons(&stored, &current);
+
+    assert!(
+        reasons
+            .iter()
+            .any(|reason| reason == "validation field changed: clock_validation"),
+        "stored validation without clock_validation should be stale"
+    );
+}
 
 #[test]
 fn inspect_reports_ready_recording_and_next_timeline_action() {
@@ -377,6 +414,69 @@ fn inspect_keeps_declared_legacy_video_readable_but_noncanonical() {
     assert!(
         action_command.is_some_and(|command| !command.contains("--with-evidence")),
         "video-only canonical rerun should not over-capture evidence"
+    );
+    let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
+}
+
+#[test]
+fn inspect_keeps_nested_legacy_video_readable_but_noncanonical() {
+    let root = unique_temp_dir("recording-inspect-nested-video-legacy");
+    let Some(()) = assert_ok(create_fixture(&root, FixtureShape::DerivedOnly), "fixture") else {
+        return;
+    };
+    let Some(video) = assert_ok(
+        create_nested_legacy_video_fixture(&root),
+        "create video fixture",
+    ) else {
+        return;
+    };
+    let Some(()) = assert_ok(write_manifest(&root, Some(video)), "write manifest") else {
+        return;
+    };
+
+    let Some(result) = assert_ok(inspect_recording(&root), "inspect recording") else {
+        return;
+    };
+
+    assert_eq!(
+        result
+            .pointer("/flags/valid_for_analysis")
+            .and_then(Value::as_bool),
+        Some(true),
+        "nested legacy video artifacts should remain analysis-readable"
+    );
+    assert_eq!(
+        result
+            .pointer("/flags/canonical_clock_ready")
+            .and_then(Value::as_bool),
+        Some(false),
+        "nested legacy timing must not be canonical clock-ready"
+    );
+    assert_eq!(
+        result
+            .pointer("/flags/has_legacy_timing")
+            .and_then(Value::as_bool),
+        Some(true),
+        "nested legacy timing should be explicit"
+    );
+    assert_eq!(
+        result
+            .pointer("/clock/video/status")
+            .and_then(Value::as_str),
+        Some("legacy_wall_clock_bracketed"),
+        "nested legacy video timing should be classified as legacy wall-clock bracketed"
+    );
+    assert_eq!(
+        result
+            .pointer("/clock/video/clock_domain")
+            .and_then(Value::as_str),
+        None,
+        "legacy video timing must not claim a canonical clock domain"
+    );
+    let action_command = action_command(&result, "record_with_canonical_clocks");
+    assert!(
+        action_command.is_some(),
+        "nested legacy timing should request canonical recollection"
     );
     let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
 }
@@ -750,6 +850,53 @@ fn create_legacy_video_fixture(root: &Path) -> TestResult<Value> {
         .into());
     };
     object.insert(String::from("file"), file_fingerprint(&screen_path)?);
+    write_json(&video_dir.join("timing.json"), &video)?;
+    fs::write(video_dir.join("screenrecord.stdout.log"), "")?;
+    fs::write(video_dir.join("screenrecord.stderr.log"), "")?;
+    fs::write(video_dir.join("adb-pull-video.log"), "pulled\n")?;
+    Ok(video)
+}
+
+fn create_nested_legacy_video_fixture(root: &Path) -> TestResult<Value> {
+    let video_dir = root.join("video");
+    fs::create_dir_all(&video_dir)?;
+    let screen_path = video_dir.join("screen.mp4");
+    fs::write(&screen_path, "not-a-real-mp4-for-inspection\n")?;
+    let video = json!({
+        "enabled": true,
+        "required": true,
+        "remote_path": "/sdcard/Download/input-dynamics-run-test.mp4",
+        "local_path": "video/screen.mp4",
+        "timing_path": "video/timing.json",
+        "file": file_fingerprint(&screen_path)?,
+        "start": {
+            "phase": "start",
+            "before": {
+                "host_wall_ms_before_device_timestamp": 1_100_i64,
+                "device_wall_ms": 1_101_i64,
+                "host_wall_ms_after_device_timestamp": 1_102_i64
+            },
+            "after": {
+                "host_wall_ms_before_device_timestamp": 1_103_i64,
+                "device_wall_ms": 1_104_i64,
+                "host_wall_ms_after_device_timestamp": 1_105_i64
+            }
+        },
+        "stop": {
+            "phase": "stop",
+            "before": {
+                "host_wall_ms_before_device_timestamp": 1_900_i64,
+                "device_wall_ms": 1_901_i64,
+                "host_wall_ms_after_device_timestamp": 1_902_i64
+            },
+            "after": {
+                "host_wall_ms_before_device_timestamp": 1_903_i64,
+                "device_wall_ms": 1_904_i64,
+                "host_wall_ms_after_device_timestamp": 1_905_i64
+            }
+        },
+        "ok": true,
+    });
     write_json(&video_dir.join("timing.json"), &video)?;
     fs::write(video_dir.join("screenrecord.stdout.log"), "")?;
     fs::write(video_dir.join("screenrecord.stderr.log"), "")?;

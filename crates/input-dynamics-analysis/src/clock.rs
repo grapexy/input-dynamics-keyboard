@@ -288,7 +288,7 @@ pub const fn micros_to_nanos(timestamp_us: i64) -> Option<i64> {
 mod tests {
     use std::str::FromStr;
 
-    use proptest::prelude::{Strategy, any, prop_assert_eq, proptest};
+    use proptest::prelude::{any, prop_assert_eq, proptest};
     use serde_json::json;
 
     use crate::clock::{
@@ -588,41 +588,34 @@ mod tests {
 
     proptest! {
         #[test]
-        fn non_negative_millisecond_conversion_matches_checked_mul(
-            timestamp_ms in 0_i64..9_000_000_000_i64
+        fn millisecond_conversion_matches_checked_mul_for_all_i64(
+            timestamp_ms in any::<i64>()
         ) {
+            let expected = if timestamp_ms >= 0 {
+                timestamp_ms.checked_mul(1_000_000)
+            } else {
+                None
+            };
             prop_assert_eq!(
                 millis_to_nanos(timestamp_ms),
-                timestamp_ms.checked_mul(1_000_000),
-                "millisecond conversion should use checked multiplication"
+                expected,
+                "millisecond conversion should reject negatives and use checked multiplication"
             );
         }
 
         #[test]
-        fn non_negative_microsecond_conversion_matches_checked_mul(
-            timestamp_us in 0_i64..9_000_000_000_000_i64
+        fn microsecond_conversion_matches_checked_mul_for_all_i64(
+            timestamp_us in any::<i64>()
         ) {
+            let expected = if timestamp_us >= 0 {
+                timestamp_us.checked_mul(1_000)
+            } else {
+                None
+            };
             prop_assert_eq!(
                 micros_to_nanos(timestamp_us),
-                timestamp_us.checked_mul(1_000),
-                "microsecond conversion should use checked multiplication"
-            );
-        }
-
-        #[test]
-        fn negative_timestamps_do_not_convert(timestamp in any::<i64>().prop_filter(
-            "negative values only",
-            |value| *value < 0,
-        )) {
-            prop_assert_eq!(
-                millis_to_nanos(timestamp),
-                None,
-                "negative millisecond timestamp should not convert"
-            );
-            prop_assert_eq!(
-                micros_to_nanos(timestamp),
-                None,
-                "negative microsecond timestamp should not convert"
+                expected,
+                "microsecond conversion should reject negatives and use checked multiplication"
             );
         }
 

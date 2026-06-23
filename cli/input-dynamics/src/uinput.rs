@@ -1130,7 +1130,7 @@ add device 1: /dev/input/event3
   version   0000
   name:     "sec_touchscreen"
   location: "sec_touchscreen/input1"
-  id:       "google_touchscreen"
+  id:       "primary_touchscreen_id"
   version:  1.0.1
   events:
     KEY (0001): KEY_HOMEPAGE          BTN_TOOL_FINGER       BTN_TOUCH

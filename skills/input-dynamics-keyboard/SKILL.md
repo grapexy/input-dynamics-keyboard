@@ -224,6 +224,12 @@ idk record \
   --input-actor agent_adb
 ```
 
+Do not send input after a fixed sleep. In the second CLI process, poll
+`idk session status` until `input.session_lock.state: "active"` and
+`input.ready_for_input: true`. For `type`, `press`, and keyboard-scoped
+commands, also require `ime.input_scope_ready: true`; if it is false, establish
+the input scope with the canonical UI step for the run, then poll status again.
+
 The resulting manifest should include
 `coordinate_frame`,
 `input_controller_runtime.summary.input_backend`,
@@ -256,7 +262,21 @@ Required missing or stale video makes `valid_for_analysis` false. The `clock`
 object classifies saved video/evidence anchors as `bracketed`,
 `legacy_wall_clock_bracketed`, `missing_source`, `stale_inputs`,
 `probe_failed`, `not_requested`, or `not_estimated`. If `next_actions` is
-non-empty, prefer those CLI commands over ad hoc file inspection.
+non-empty, prefer those CLI commands over ad hoc file inspection. Each
+`next_actions` item has `kind`, `command`, and `reason`; branch on `kind`.
+Current action kinds are `validate`, `record_with_video`,
+`record_with_canonical_clocks`, `derive_presses`, `derive_summary`,
+`derive_dismissals`, and `derive_timeline`.
+
+Read `validation.current.clock_validation` from the same inspect output when
+diagnosing timestamp metadata. Stable keys are
+`timestamp_metadata_record_count`, `legacy_timestamp_metadata_missing_count`,
+`missing_timestamp_role_count`, `missing_clock_domain_count`,
+`invalid_clock_domain_count`, `invalid_timestamp_source_count`,
+`invalid_timestamp_precision_count`, `timestamp_role_mismatch_count`,
+`timestamp_field_reference_error_count`, `timestamp_unit_mismatch_count`,
+`timestamp_order_violation_count`, and `mixed_clock_domain_claim_count`.
+`invalid_timestamp_metadata_count` remains only a compatibility rollup.
 
 To derive per-press summaries from an inspected run:
 
@@ -342,7 +362,13 @@ idk derive timeline --recording-dir "runs/$RUN_ID"
 This writes `derived/timeline/index.json` and
 `derived/timeline/events.jsonl`. Use the timeline as an index over source
 records and evidence artifacts, not as the raw source of truth. Preserve clock
-domains and source references when reasoning from it.
+domains and source references when reasoning from it. Use
+`timeline.artifact_diagnostics` from `recording inspect` or
+`derived/timeline/index.json`; stable keys are
+`missing_clock_domain_count`, `invalid_clock_domain_count`,
+`mixed_clock_domain_claim_count`,
+`mixed_clock_domain_without_alignment_count`,
+`normalized_claim_without_domain_count`, and `unit_mismatch_count`.
 
 After deriving, inspect again if freshness matters:
 

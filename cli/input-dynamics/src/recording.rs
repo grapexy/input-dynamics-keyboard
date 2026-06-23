@@ -56,6 +56,7 @@ struct ValidationInspection {
 #[derive(Default)]
 struct TimelineInspection {
     stale_reasons: Vec<String>,
+    artifact_diagnostics: Value,
     exists: bool,
 }
 
@@ -191,6 +192,7 @@ fn inspection_json(input: &InspectionJson<'_>) -> Value {
         },
         "timeline": {
             "exists": input.timeline.exists,
+            "artifact_diagnostics": input.timeline.artifact_diagnostics.clone(),
             "stale_reasons": input.timeline.stale_reasons,
         },
         "video": {
@@ -316,12 +318,14 @@ fn inspect_timeline(dir: &Path) -> CliResult<TimelineInspection> {
         return Ok(TimelineInspection {
             exists: false,
             stale_reasons: vec![String::from("timeline bundle is missing")],
+            artifact_diagnostics: Value::Null,
         });
     }
     let Some(index) = read_optional_json(&index_path)? else {
         return Ok(TimelineInspection {
             exists: false,
             stale_reasons: vec![String::from("timeline index is missing")],
+            artifact_diagnostics: Value::Null,
         });
     };
     let mut stale_reasons = Vec::new();
@@ -335,6 +339,10 @@ fn inspect_timeline(dir: &Path) -> CliResult<TimelineInspection> {
     Ok(TimelineInspection {
         exists: true,
         stale_reasons,
+        artifact_diagnostics: index
+            .get("artifact_diagnostics")
+            .cloned()
+            .unwrap_or(Value::Null),
     })
 }
 
@@ -366,7 +374,9 @@ fn inspect_video(
                 exists,
             });
         };
-        if timing.get("schema").and_then(Value::as_str) != Some("input_dynamics_video_capture.v1") {
+        if timing.get("schema").and_then(Value::as_str) != Some("input_dynamics_video_capture.v1")
+            && !legacy_video_timing(&timing)
+        {
             stale_reasons.push(String::from("video timing metadata schema is unsupported"));
         }
     }
@@ -430,6 +440,7 @@ fn inspect_clock(
             "exists": timeline.exists,
             "status": timeline_status,
             "clock_alignment_status": AlignmentStatus::NotEstimated.as_str(),
+            "artifact_diagnostics": timeline.artifact_diagnostics.clone(),
             "stale_reasons": timeline.stale_reasons,
         },
         "warnings": warnings,
@@ -595,6 +606,12 @@ fn video_marker_readiness(timing: &Value, details: &mut ClockDetails) -> ClockRe
             ClockReadiness::MissingSource
         }
         MarkerSetStatus::Invalid(errors) => {
+            if legacy_video_timing(timing) && !video_has_probe_marker_candidate(timing) {
+                details.legacy_reasons.push(String::from(
+                    "video timing uses nested legacy wall-clock/device timing without canonical probe wrappers",
+                ));
+                return ClockReadiness::Legacy;
+            }
             details.reasons.extend(errors);
             ClockReadiness::ProbeFailed
         }
@@ -929,6 +946,30 @@ fn legacy_video_timing(timing: &Value) -> bool {
         || timing
             .pointer("/stop/host_wall_ms_before_device_timestamp")
             .is_some()
+        || timing
+            .pointer("/start/before/host_wall_ms_before_device_timestamp")
+            .is_some()
+        || timing.pointer("/start/after/device_wall_ms").is_some()
+        || timing
+            .pointer("/stop/before/host_wall_ms_before_device_timestamp")
+            .is_some()
+        || timing.pointer("/stop/after/device_wall_ms").is_some()
+}
+
+fn video_has_probe_marker_candidate(timing: &Value) -> bool {
+    [
+        "/start/before",
+        "/start/after",
+        "/stop/before",
+        "/stop/after",
+    ]
+    .iter()
+    .filter_map(|pointer| timing.pointer(pointer))
+    .any(|marker| {
+        marker.get("schema").is_some()
+            || marker.get("device_clock_probe").is_some()
+            || marker.get("t_elapsed_realtime_ns").is_some()
+    })
 }
 
 fn index_has_legacy_wall_time(index: Option<&Value>) -> bool {
@@ -1465,6 +1506,10 @@ fn validation_stale_reasons(stored: &Value, current: &Value) -> Vec<String> {
         "session_start_count",
         "session_stop_count",
         "password_record_count",
+        "invalid_timestamp_metadata_count",
+        "clock_validation",
+        "failure_reasons",
+        "diagnostic_reasons",
         "target_package_seen",
     ];
     fields

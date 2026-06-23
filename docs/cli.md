@@ -170,6 +170,13 @@ cargo run --quiet -p input-dynamics -- record \
   --input-actor agent_adb
 ```
 
+Do not use fixed sleeps as the synchronization primitive. In the second
+process, poll `session status` until `input.session_lock.state: "active"` and
+`input.ready_for_input: true`. For text and key
+commands, also require `ime.input_scope_ready: true`; if it is false, establish
+the input scope with the canonical UI step for the run, then poll status again
+before sending input.
+
 Lower-level session commands remain available for debugging:
 
 ```bash
@@ -308,7 +315,8 @@ scraping human-oriented text.
 - `list-logs`: lists log files.
 - `clear-logs`: clears logs when no session is active.
 - `pull --out <dir>`: pulls app-specific external log storage.
-- `validate <path> --run-id <id>`: validates JSONL lifecycle and safety fields.
+- `validate <path> --run-id <id>`: validates JSONL lifecycle, safety fields,
+  timestamp metadata, and clock-validation diagnostics.
 - `getevent normalize --input <raw.log> --output <events.jsonl>`: parses
   `adb shell getevent -lt` output into neutral JSONL records with schema
   `input_dynamics_getevent.v1`.
@@ -478,6 +486,16 @@ flags such as `valid_for_analysis`, `has_video`, `needs_video`,
 `needs_validation`, `needs_press_summaries`, `needs_run_summary`,
 `needs_derivation`, and `needs_timeline`.
 
+`validation.current.clock_validation` splits timestamp metadata diagnostics into
+specific counters. Stable keys are
+`timestamp_metadata_record_count`, `legacy_timestamp_metadata_missing_count`,
+`missing_timestamp_role_count`, `missing_clock_domain_count`,
+`invalid_clock_domain_count`, `invalid_timestamp_source_count`,
+`invalid_timestamp_precision_count`, `timestamp_role_mismatch_count`,
+`timestamp_field_reference_error_count`, `timestamp_unit_mismatch_count`,
+`timestamp_order_violation_count`, and `mixed_clock_domain_claim_count`.
+`invalid_timestamp_metadata_count` remains as a compatibility rollup.
+
 The `clock` object classifies saved video and evidence anchors as
 `bracketed`, `legacy_wall_clock_bracketed`, `missing_source`, `stale_inputs`,
 `probe_failed`, `not_requested`, or `not_estimated`. Legacy wall-clock timing
@@ -485,8 +503,12 @@ remains readable, but it does not set `canonical_clock_ready`. Required missing
 or stale video makes `valid_for_analysis` false and adds a canonical
 `record_with_video` action. Missing, legacy, stale, or malformed canonical
 clock anchors add a canonical recorder action. `next_actions` contains local
-CLI commands an agent can run to refresh missing or stale artifacts. It does
-not probe the device or derive new clock alignment.
+CLI commands an agent can run to refresh missing or stale artifacts. Each item
+has `kind`, `command`, and `reason`; branch on `kind` and run `command` when
+appropriate. Current action kinds are `validate`, `record_with_video`,
+`record_with_canonical_clocks`, `derive_presses`, `derive_summary`,
+`derive_dismissals`, and `derive_timeline`. It does not probe the device or
+derive new clock alignment.
 
 Treat `valid_for_analysis` as a base artifact/readability gate. For any
 video/evidence anchor claim, cross-source timeline claim, or ordering claim that
@@ -511,6 +533,13 @@ clock metadata:
 - Timeline `ordering.canonical_cross_source_order: false` means row order is a
   deterministic inspection order unless the row carries a valid normalized-time
   claim.
+- `timeline.artifact_diagnostics` and
+  `clock.timeline.artifact_diagnostics` surface diagnostics from
+  `derived/timeline/index.json`. Stable keys are
+  `missing_clock_domain_count`, `invalid_clock_domain_count`,
+  `mixed_clock_domain_claim_count`,
+  `mixed_clock_domain_without_alignment_count`,
+  `normalized_claim_without_domain_count`, and `unit_mismatch_count`.
 
 After recording with the current CLI:
 
@@ -592,8 +621,8 @@ domain, `source_time`, `normalized_time`, and ordering metadata. Manifest-backed
 evidence brackets use `device_elapsed_realtime_ns`; index-only evidence timing
 remains readable as legacy `host_wall_ms` provenance.
 `derived/timeline/index.json` records selected sources, counts, fingerprints,
-output paths, warnings, clock-domain counts, normalized-status counts, and the
-clock-alignment status.
+output paths, warnings, clock-domain counts, normalized-status counts, artifact
+clock diagnostics, and the clock-alignment status.
 
 To use a local classifier-threshold policy:
 

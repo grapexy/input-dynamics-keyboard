@@ -488,9 +488,7 @@ fn append_video_records(
             "clock_alignment_status": AlignmentStatus::LegacyWallClockBracketed.as_str(),
             "source_time": legacy_host_wall_source_time_json(
                 "host_wall_ms_before_device_timestamp",
-                phase_record
-                    .get("host_wall_ms_before_device_timestamp")
-                    .and_then(Value::as_i64),
+                legacy_video_phase_wall_ms(phase_record),
             ),
             "normalized_time": normalized_time_json(AlignmentStatus::LegacyWallClockBracketed.as_str()),
             "ordering": ordering_json(ORDER_METHOD, AlignmentStatus::LegacyWallClockBracketed.as_str()),
@@ -506,7 +504,7 @@ fn append_video_records(
                 group: video_order_group(phase),
                 time_ms: marker_clock
                     .and_then(|clock| elapsed_realtime_ms(clock.elapsed_realtime_ns))
-                    .or_else(|| video_order_time_ms(phase_record)),
+                    .or_else(|| legacy_video_phase_wall_ms(phase_record)),
                 source_rank: VIDEO_SOURCE_RANK,
                 source_line_index: None,
             },
@@ -656,6 +654,7 @@ fn timeline_index(inputs: &TimelineIndexInputs<'_>) -> DeriveResult<Value> {
         "sources": sources,
         "clock_domain_counts": count_string_field(inputs.events, "clock_domain"),
         "normalized_status_counts": count_string_pointer(inputs.events, "/normalized_time/status"),
+        "artifact_diagnostics": artifact_clock_diagnostics(inputs.events),
         "ordering": {
             "method": ORDER_METHOD,
             "clock_alignment_status": CLOCK_ALIGNMENT_STATUS,
@@ -713,6 +712,232 @@ fn count_string_pointer(records: &[Value], pointer: &str) -> BTreeMap<String, u6
         counts.insert(value.to_owned(), current.saturating_add(1));
     }
     counts
+}
+
+#[derive(Default)]
+struct ArtifactClockDiagnostics {
+    missing_domains: u64,
+    invalid_domains: u64,
+    mixed_domain_claims: u64,
+    mixed_domain_claims_without_alignment: u64,
+    normalized_claims_without_domain: u64,
+    unit_mismatches: u64,
+}
+
+impl ArtifactClockDiagnostics {
+    const fn increment_missing_clock_domain(&mut self) {
+        self.missing_domains = self.missing_domains.saturating_add(1);
+    }
+
+    const fn increment_invalid_clock_domain(&mut self) {
+        self.invalid_domains = self.invalid_domains.saturating_add(1);
+    }
+
+    const fn increment_mixed_clock_domain_claim(&mut self) {
+        self.mixed_domain_claims = self.mixed_domain_claims.saturating_add(1);
+    }
+
+    const fn increment_mixed_clock_domain_without_alignment(&mut self) {
+        self.mixed_domain_claims_without_alignment =
+            self.mixed_domain_claims_without_alignment.saturating_add(1);
+    }
+
+    const fn increment_normalized_claim_without_domain(&mut self) {
+        self.normalized_claims_without_domain =
+            self.normalized_claims_without_domain.saturating_add(1);
+    }
+
+    const fn increment_unit_mismatch(&mut self) {
+        self.unit_mismatches = self.unit_mismatches.saturating_add(1);
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "missing_clock_domain_count": self.missing_domains,
+            "invalid_clock_domain_count": self.invalid_domains,
+            "mixed_clock_domain_claim_count": self.mixed_domain_claims,
+            "mixed_clock_domain_without_alignment_count": self.mixed_domain_claims_without_alignment,
+            "normalized_claim_without_domain_count": self.normalized_claims_without_domain,
+            "unit_mismatch_count": self.unit_mismatches,
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+enum DomainRequirement {
+    Required,
+}
+
+fn artifact_clock_diagnostics(records: &[Value]) -> Value {
+    let mut diagnostics = ArtifactClockDiagnostics::default();
+    for record in records {
+        inspect_artifact_clock_record(&mut diagnostics, record);
+    }
+    diagnostics.to_json()
+}
+
+fn inspect_artifact_clock_record(diagnostics: &mut ArtifactClockDiagnostics, record: &Value) {
+    inspect_clock_domain_field(
+        diagnostics,
+        record.get("clock_domain"),
+        DomainRequirement::Required,
+    );
+    if source_time_has_value(record.pointer("/source_time")) {
+        inspect_clock_domain_field(
+            diagnostics,
+            record.pointer("/source_time/source_clock_domain"),
+            DomainRequirement::Required,
+        );
+    }
+    inspect_normalized_clock_claim(diagnostics, record.pointer("/normalized_time"));
+    inspect_source_clock_domains(diagnostics, record);
+    inspect_time_unit_consistency(diagnostics, record.pointer("/source_time"));
+}
+
+fn inspect_clock_domain_field(
+    diagnostics: &mut ArtifactClockDiagnostics,
+    value: Option<&Value>,
+    requirement: DomainRequirement,
+) {
+    match value
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+    {
+        Some(text) if text.parse::<ClockDomain>().is_ok() => {}
+        Some(_text) => diagnostics.increment_invalid_clock_domain(),
+        None => match requirement {
+            DomainRequirement::Required => diagnostics.increment_missing_clock_domain(),
+        },
+    }
+}
+
+fn inspect_normalized_clock_claim(
+    diagnostics: &mut ArtifactClockDiagnostics,
+    normalized_time: Option<&Value>,
+) {
+    let Some(time) = normalized_time else {
+        return;
+    };
+    let status = time.get("status").and_then(Value::as_str);
+    let claim_like = matches!(status, Some("bracketed" | "estimated"))
+        || has_non_null_pointer(time, "/time_ns")
+        || has_non_null_pointer(time, "/time_interval_ns");
+    if !claim_like {
+        return;
+    }
+    let before_missing = diagnostics.missing_domains;
+    let before_invalid = diagnostics.invalid_domains;
+    inspect_clock_domain_field(
+        diagnostics,
+        time.get("clock_domain"),
+        DomainRequirement::Required,
+    );
+    if diagnostics.missing_domains > before_missing || diagnostics.invalid_domains > before_invalid
+    {
+        diagnostics.increment_normalized_claim_without_domain();
+    }
+}
+
+fn inspect_source_clock_domains(diagnostics: &mut ArtifactClockDiagnostics, record: &Value) {
+    let Some(domains) = record.get("source_clock_domains").and_then(Value::as_array) else {
+        return;
+    };
+    let mut unique_domains = Vec::new();
+    for domain in domains {
+        let Some(text) = domain.as_str().filter(|value| !value.is_empty()) else {
+            diagnostics.increment_invalid_clock_domain();
+            continue;
+        };
+        if text.parse::<ClockDomain>().is_err() {
+            diagnostics.increment_invalid_clock_domain();
+            continue;
+        }
+        if !unique_domains.iter().any(|existing| existing == text) {
+            unique_domains.push(text.to_owned());
+        }
+    }
+    if unique_domains.len() <= 1 || !record_has_cross_domain_claim(record) {
+        return;
+    }
+    diagnostics.increment_mixed_clock_domain_claim();
+    if !record_has_supported_alignment(record) {
+        diagnostics.increment_mixed_clock_domain_without_alignment();
+    }
+}
+
+fn record_has_cross_domain_claim(record: &Value) -> bool {
+    record
+        .get("time_delta_ms")
+        .is_some_and(|value| !value.is_null())
+        || record
+            .pointer("/normalized_time/status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| matches!(status, "bracketed" | "estimated"))
+        || has_non_null_pointer(record, "/normalized_time/time_ns")
+        || has_non_null_pointer(record, "/normalized_time/time_interval_ns")
+}
+
+fn record_has_supported_alignment(record: &Value) -> bool {
+    record
+        .get("clock_alignment_status")
+        .or_else(|| record.pointer("/clock_alignment/status"))
+        .or_else(|| record.pointer("/ordering/clock_alignment_status"))
+        .and_then(Value::as_str)
+        .is_some_and(|status| matches!(status, "bracketed" | "estimated"))
+}
+
+fn inspect_time_unit_consistency(
+    diagnostics: &mut ArtifactClockDiagnostics,
+    source_time: Option<&Value>,
+) {
+    let Some(time) = source_time else {
+        return;
+    };
+    if let (Some(ms), Some(ns)) = (
+        time.get("source_time_ms").and_then(Value::as_i64),
+        time.get("source_time_ns").and_then(Value::as_i64),
+    ) && millis_to_nanos(ms) != Some(ns)
+    {
+        diagnostics.increment_unit_mismatch();
+    }
+    if let (Some(us), Some(ns)) = (
+        time.get("source_time_us").and_then(Value::as_i64),
+        time.get("source_time_ns").and_then(Value::as_i64),
+    ) && micros_to_nanos(us) != Some(ns)
+    {
+        diagnostics.increment_unit_mismatch();
+    }
+    if let (Some((start_us, end_us)), Some((start_ns, end_ns))) = (
+        i64_pair(time.get("source_time_interval_us")),
+        i64_pair(time.get("source_time_interval_ns")),
+    ) && (micros_to_nanos(start_us) != Some(start_ns) || micros_to_nanos(end_us) != Some(end_ns))
+    {
+        diagnostics.increment_unit_mismatch();
+    }
+}
+
+fn source_time_has_value(source_time: Option<&Value>) -> bool {
+    source_time.is_some_and(|time| {
+        has_non_null_pointer(time, "/source_time_ms")
+            || has_non_null_pointer(time, "/source_time_ns")
+            || has_non_null_pointer(time, "/source_time_us")
+            || has_non_null_pointer(time, "/source_time_interval_us")
+            || has_non_null_pointer(time, "/source_time_interval_ns")
+    })
+}
+
+fn has_non_null_pointer(value: &Value, pointer: &str) -> bool {
+    value.pointer(pointer).is_some_and(|field| !field.is_null())
+}
+
+fn i64_pair(value: Option<&Value>) -> Option<(i64, i64)> {
+    let mut values = value?.as_array()?.iter();
+    let first = values.next()?.as_i64()?;
+    let second = values.next()?.as_i64()?;
+    if values.next().is_some() {
+        return None;
+    }
+    Some((first, second))
 }
 
 fn read_jsonl_with_line_indexes(path: &Path) -> DeriveResult<Vec<LineRecord>> {
@@ -901,10 +1126,20 @@ fn video_order_group(phase: &str) -> u8 {
     if phase == "start" { 0 } else { 2 }
 }
 
-fn video_order_time_ms(record: &Value) -> Option<i64> {
+fn legacy_video_phase_wall_ms(record: &Value) -> Option<i64> {
     record
         .get("host_wall_ms_before_device_timestamp")
         .and_then(Value::as_i64)
+        .or_else(|| {
+            record
+                .pointer("/before/host_wall_ms_before_device_timestamp")
+                .and_then(Value::as_i64)
+        })
+        .or_else(|| {
+            record
+                .pointer("/before/host_wall_ms")
+                .and_then(Value::as_i64)
+        })
 }
 
 #[derive(Clone, Copy)]
@@ -1550,6 +1785,21 @@ mod tests {
             Some("not_estimated"),
             "clock alignment should be explicit"
         );
+        assert_eq!(
+            index
+                .pointer("/artifact_diagnostics/invalid_clock_domain_count")
+                .and_then(Value::as_u64),
+            Some(0_u64),
+            "valid generated timeline rows should not have invalid clock domains"
+        );
+        assert_eq!(
+            index
+                .pointer("/artifact_diagnostics/unit_mismatch_count")
+                .and_then(Value::as_u64),
+            Some(0_u64),
+            "valid generated timeline rows should not have unit mismatches"
+        );
+        assert_mixed_domain_diagnostics(index, 1_u64, 1_u64);
     }
 
     #[test]
@@ -1679,7 +1929,54 @@ mod tests {
             Some(2_u64),
             "index should count unsupported and legacy rows separately from mapped rows"
         );
+        assert_mixed_domain_diagnostics(&index, 2_u64, 1_u64);
         let _cleanup = assert_ok(fs::remove_dir_all(&root), "remove fixture");
+    }
+
+    #[test]
+    fn artifact_diagnostics_reject_scalar_microsecond_nanosecond_mismatch() {
+        let mut diagnostics = super::ArtifactClockDiagnostics::default();
+        super::inspect_artifact_clock_record(
+            &mut diagnostics,
+            &json!({
+                "clock_domain": "kernel_getevent_us",
+                "source_time": {
+                    "source_clock_domain": "kernel_getevent_us",
+                    "source_time_us": 2_i64,
+                    "source_time_ns": 2_001_i64
+                }
+            }),
+        );
+
+        assert_eq!(
+            diagnostics
+                .to_json()
+                .pointer("/unit_mismatch_count")
+                .and_then(Value::as_u64),
+            Some(1_u64),
+            "scalar microsecond/nanosecond mismatch should be counted"
+        );
+    }
+
+    fn assert_mixed_domain_diagnostics(
+        index: &Value,
+        expected_claim_count: u64,
+        expected_without_alignment_count: u64,
+    ) {
+        assert_eq!(
+            index
+                .pointer("/artifact_diagnostics/mixed_clock_domain_claim_count")
+                .and_then(Value::as_u64),
+            Some(expected_claim_count),
+            "mixed-domain claims should be counted"
+        );
+        assert_eq!(
+            index
+                .pointer("/artifact_diagnostics/mixed_clock_domain_without_alignment_count")
+                .and_then(Value::as_u64),
+            Some(expected_without_alignment_count),
+            "unsupported mixed-domain claims should be counted separately"
+        );
     }
 
     #[test]
@@ -1798,6 +2095,67 @@ mod tests {
             video_source_count,
             Some(2_u64),
             "timeline index should count video timing start and stop markers"
+        );
+        let _cleanup = assert_ok(fs::remove_dir_all(&root), "remove fixture");
+    }
+
+    #[test]
+    fn derives_timeline_with_nested_legacy_video_markers() {
+        let root = unique_temp_dir("timeline-nested-legacy-video");
+        let Some(()) = assert_ok(create_complete_fixture(&root), "create fixture") else {
+            return;
+        };
+        let Some(()) = assert_ok(
+            create_nested_legacy_video_fixture(&root),
+            "create nested legacy video fixture",
+        ) else {
+            return;
+        };
+
+        let derive_result = derive_timeline(&DeriveTimelineConfig {
+            recording_dir: root.clone(),
+            ime_jsonl: None,
+            touch_gestures_jsonl: None,
+            dismissals_jsonl: None,
+            output_dir: None,
+        });
+        let Some(_summary) = assert_ok(derive_result, "derive timeline") else {
+            return;
+        };
+
+        let timeline_dir = root.join("derived").join("timeline");
+        let Some(output) = assert_ok(
+            read_jsonl(&timeline_dir.join("events.jsonl")),
+            "read timeline events",
+        ) else {
+            return;
+        };
+        let video_records = output
+            .iter()
+            .filter(|record| {
+                record.get("record_kind").and_then(Value::as_str) == Some("video_marker")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            video_records.len(),
+            2_usize,
+            "nested legacy video fixture should emit start and stop rows"
+        );
+        assert!(
+            video_records.iter().all(|record| {
+                record.get("clock_domain").and_then(Value::as_str) == Some("host_wall_ms")
+                    && record.get("clock_alignment_status").and_then(Value::as_str)
+                        == Some("legacy_wall_clock_bracketed")
+                    && record
+                        .pointer("/source_time/source_time_status")
+                        .and_then(Value::as_str)
+                        == Some("legacy_wall_clock")
+                    && record
+                        .pointer("/source_time/source_time_ms")
+                        .and_then(Value::as_i64)
+                        .is_some()
+            }),
+            "nested legacy video timing should preserve non-null host-wall source time"
         );
         let _cleanup = assert_ok(fs::remove_dir_all(&root), "remove fixture");
     }
@@ -2029,6 +2387,47 @@ mod tests {
                     "host_wall_ms_before_device_timestamp": 1_700_i64,
                     "device_epoch_ms": 1_701_i64,
                     "host_wall_ms_after_device_timestamp": 1_702_i64,
+                },
+                "ok": true,
+            }),
+        )
+    }
+
+    fn create_nested_legacy_video_fixture(root: &Path) -> TestResult<()> {
+        let video_dir = root.join("video");
+        fs::create_dir_all(&video_dir)?;
+        write_json(
+            &video_dir.join("timing.json"),
+            &json!({
+                "enabled": true,
+                "required": true,
+                "remote_path": "/sdcard/Download/input-dynamics-run-test.mp4",
+                "local_path": "video/screen.mp4",
+                "start": {
+                    "phase": "start",
+                    "before": {
+                        "host_wall_ms_before_device_timestamp": 800_i64,
+                        "device_wall_ms": 801_i64,
+                        "host_wall_ms_after_device_timestamp": 802_i64
+                    },
+                    "after": {
+                        "host_wall_ms_before_device_timestamp": 803_i64,
+                        "device_wall_ms": 804_i64,
+                        "host_wall_ms_after_device_timestamp": 805_i64
+                    }
+                },
+                "stop": {
+                    "phase": "stop",
+                    "before": {
+                        "host_wall_ms_before_device_timestamp": 1_700_i64,
+                        "device_wall_ms": 1_701_i64,
+                        "host_wall_ms_after_device_timestamp": 1_702_i64
+                    },
+                    "after": {
+                        "host_wall_ms_before_device_timestamp": 1_703_i64,
+                        "device_wall_ms": 1_704_i64,
+                        "host_wall_ms_after_device_timestamp": 1_705_i64
+                    }
                 },
                 "ok": true,
             }),

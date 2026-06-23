@@ -138,6 +138,7 @@ fn inference_id(context: &RunContext, index: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prop_assert_eq;
     use serde_json::json;
 
     use crate::derivation::dismissal::derive_dismissal_inferences;
@@ -217,6 +218,64 @@ mod tests {
             "missing time deltas should not receive a legacy-delta status"
         );
         assert_inference_clock_domains_explicit(inference_json.as_ref());
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn generated_hide_events_emit_unsupported_alignment_metadata(
+            t_uptime_ms in 0_i64..1_000_000_i64,
+        ) {
+            let policy_result = default_derivation_policy();
+            prop_assert_eq!(policy_result.is_ok(), true, "default policy should load");
+            let Ok(policy) = policy_result else {
+                return Ok(());
+            };
+            let ime_events = vec![ImeEvent {
+                line_index: 1,
+                event: String::from("ime_hide_window_called"),
+                t_uptime_ms,
+                target_package: None,
+            }];
+            let context = RunContext {
+                external_run_id: Some(String::from("run-test")),
+                package_name: None,
+                session_id: None,
+            };
+            let inferences = derive_dismissal_inferences(&[], &ime_events, &context, policy);
+            prop_assert_eq!(inferences.len(), 1_usize, "one hide inference should derive");
+            let Some(inference) = inferences.first() else {
+                prop_assert_eq!(0_i64, 1_i64, "inference should exist");
+                return Ok(());
+            };
+            let record = inference.to_json(None);
+
+            prop_assert_eq!(
+                record.pointer("/time_delta_ms"),
+                Some(&serde_json::Value::Null),
+                "unsupported clock domains must not emit a delta"
+            );
+            prop_assert_eq!(
+                record
+                    .pointer("/clock_alignment_status")
+                    .and_then(serde_json::Value::as_str),
+                Some("unsupported_clock_domain"),
+                "alignment status should stay unsupported"
+            );
+            prop_assert_eq!(
+                record
+                    .pointer("/clock_alignment/source_clock_domains/0")
+                    .and_then(serde_json::Value::as_str),
+                Some("android_uptime_ms"),
+                "IME clock domain should be explicit"
+            );
+            prop_assert_eq!(
+                record
+                    .pointer("/clock_alignment/source_clock_domains/1")
+                    .and_then(serde_json::Value::as_str),
+                Some("kernel_getevent_us"),
+                "getevent clock domain should be explicit"
+            );
+        }
     }
 
     fn assert_inference_clock_domains_explicit(inference_json: Option<&serde_json::Value>) {

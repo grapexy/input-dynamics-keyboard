@@ -453,6 +453,7 @@ mod tests {
     use proptest::prelude::{Just, any};
     use proptest::prop_assert_eq;
 
+    use crate::clock::micros_to_nanos;
     use crate::derivation::touch::{
         GestureKind, GestureMeasure, TouchSample, classify_gesture, derive_touch_gestures,
     };
@@ -664,6 +665,105 @@ mod tests {
                     "middle swipe should not be screen-edge"
                 );
             }
+        }
+
+        #[test]
+        fn generated_touch_gesture_intervals_use_sorted_getevent_bounds(
+            first_us in 1_000_i64..9_000_000_i64,
+            duration_us in 1_i64..500_000_i64,
+            first_x in 0_i64..1_200_i64,
+            first_y in 0_i64..2_000_i64,
+            dx in -200_i64..200_i64,
+            dy in -200_i64..200_i64,
+            _guard in Just(()),
+        ) {
+            let Some(second_us) = first_us.checked_add(duration_us) else {
+                prop_assert_eq!(0_i64, 1_i64, "generated timestamps should not overflow");
+                return Ok(());
+            };
+            let second_x = first_x.saturating_add(dx).clamp(0_i64, 1_439_i64);
+            let second_y = first_y.saturating_add(dy).clamp(0_i64, 3_119_i64);
+            let records = vec![
+                touch_frame(2_u64, second_us, 10_i64, second_x, second_y),
+                touch_frame(1_u64, first_us, 10_i64, first_x, first_y),
+            ];
+            let policy_result = default_derivation_policy();
+            prop_assert_eq!(policy_result.is_ok(), true, "default policy should load");
+            let Ok(policy) = policy_result else {
+                return Ok(());
+            };
+            let gesture_result = derive_touch_gestures(&records, test_screen(), policy);
+            prop_assert_eq!(gesture_result.is_ok(), true, "gesture should derive");
+            let Ok(gestures) = gesture_result else {
+                return Ok(());
+            };
+            prop_assert_eq!(gestures.len(), 1_usize, "one gesture should derive");
+            let Some(gesture) = gestures.first() else {
+                prop_assert_eq!(0_i64, 1_i64, "derived gesture should exist");
+                return Ok(());
+            };
+            let record = gesture.to_json(
+                &RunContext {
+                    external_run_id: Some(String::from("run-test")),
+                    package_name: Some(String::from("org.inputdynamics.ime.debug")),
+                    session_id: Some(String::from("session-test")),
+                },
+                test_screen(),
+                None,
+            );
+
+            prop_assert_eq!(
+                record
+                    .pointer("/time/source_clock_domain")
+                    .and_then(serde_json::Value::as_str),
+                Some("kernel_getevent_us"),
+                "touch source clock should be getevent microseconds"
+            );
+            prop_assert_eq!(
+                record
+                    .pointer("/time/source_time_interval_us/0")
+                    .and_then(serde_json::Value::as_i64),
+                Some(first_us),
+                "interval start should use earliest getevent timestamp"
+            );
+            prop_assert_eq!(
+                record
+                    .pointer("/time/source_time_interval_us/1")
+                    .and_then(serde_json::Value::as_i64),
+                Some(second_us),
+                "interval end should use latest getevent timestamp"
+            );
+            prop_assert_eq!(
+                record
+                    .pointer("/time/source_time_interval_ns/0")
+                    .and_then(serde_json::Value::as_i64),
+                micros_to_nanos(first_us),
+                "microsecond start should convert to nanoseconds"
+            );
+            prop_assert_eq!(
+                record
+                    .pointer("/time/source_time_interval_ns/1")
+                    .and_then(serde_json::Value::as_i64),
+                micros_to_nanos(second_us),
+                "microsecond end should convert to nanoseconds"
+            );
+            prop_assert_eq!(
+                record.pointer("/time/duration_us").and_then(serde_json::Value::as_i64),
+                Some(duration_us),
+                "duration should use sorted interval bounds"
+            );
+            prop_assert_eq!(
+                record
+                    .pointer("/time/alignment_status")
+                    .and_then(serde_json::Value::as_str),
+                Some("unsupported_clock_domain"),
+                "touch gestures should stay explicitly unaligned"
+            );
+            prop_assert_eq!(
+                record.pointer("/time/normalized_time_interval_ns"),
+                Some(&serde_json::Value::Null),
+                "unsupported getevent gestures should not claim normalized time"
+            );
         }
     }
 
