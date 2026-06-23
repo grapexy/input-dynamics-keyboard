@@ -238,7 +238,7 @@ object ResearchSessionLogger {
         val session = currentSessionSnapshot(appContext) ?: return null
         appendLifecycleEvent(appContext, session, "session_stop")
         appContext.prefs().edit(commit = true) { putBoolean(PREF_ACTIVE, false) }
-        clearFieldEpisodeState(clearLastFinished = true)
+        resetFieldEpisodeIds()
         return session.sessionId
     }
 

@@ -247,6 +247,44 @@ class ResearchSessionLoggerTest {
     }
 
     @Test
+    fun `stopping a session does not discard active non-password field scope`() {
+        ResearchSessionLogger.setEnabled(context, true)
+        ResearchSessionLogger.onInputFieldStarted(context, textAttributes())
+        val firstSessionId = ResearchSessionLogger.startSession(context, "run-restart-field-first")
+        ResearchSessionLogger.stopSession(context)
+        ResearchSessionLogger.waitForPendingWrites()
+
+        val secondSessionId = ResearchSessionLogger.startSession(context, "run-restart-field-second")
+        val status = ResearchSessionLogger.controlStatusJson(context)
+        ResearchSessionLogger.logEvent(context, "manual_probe")
+        ResearchSessionLogger.stopSession(context)
+        ResearchSessionLogger.waitForPendingWrites()
+
+        val firstRecords = readRecords(firstSessionId)
+        assertEquals(listOf("session_start", "field_enter", "session_stop"), firstRecords.map { it.getString("event") })
+
+        assertTrue(status.getBoolean("input_scope_ready"))
+        assertEquals("ready", status.getString("input_scope_state"))
+        assertEquals("org.example.input", status.getString("current_target_package"))
+        assertEquals(1L, status.getLong("current_field_episode_id"))
+
+        val secondRecords = readRecords(secondSessionId)
+        assertEquals(
+            listOf("session_start", "field_enter", "manual_probe", "session_stop"),
+            secondRecords.map { it.getString("event") }
+        )
+        val fieldEnter = secondRecords.first { it.getString("event") == "field_enter" }
+        assertEquals("session_start_current_field", fieldEnter.getString("field_enter_source"))
+        val manualProbe = secondRecords.first { it.getString("event") == "manual_probe" }
+        assertEquals("org.example.input", manualProbe.getString("target_package"))
+        assertEquals(1L, manualProbe.getLong("field_episode_id"))
+        secondRecords.forEach { record ->
+            assertEquals("run-restart-field-second", record.getString("external_run_id"))
+            assertFalse(record.optBoolean("password_field", false))
+        }
+    }
+
+    @Test
     fun `text edit operation records are field scoped and password suppressed`() {
         ResearchSessionLogger.setEnabled(context, true)
         val sessionId = ResearchSessionLogger.startSession(context, "run-text-edit-test")
