@@ -301,6 +301,12 @@ public final class RichInputConnection implements PrivateCommandPerformer {
         return new EditStateSnapshot(mExpectedSelStart, mExpectedSelEnd, mComposingText);
     }
 
+    public Map<String, Object> researchEditStateFields(final String suffix) {
+        final Map<String, Object> fields = new LinkedHashMap<>();
+        editStateSnapshot().writeTo(fields, suffix);
+        return fields;
+    }
+
     private void logTextEditOperation(final String event, final EditStateSnapshot before,
             final Map<String, Object> operationFields) {
         final Map<String, Object> fields = new LinkedHashMap<>();

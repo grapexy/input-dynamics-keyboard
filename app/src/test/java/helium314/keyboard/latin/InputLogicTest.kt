@@ -20,13 +20,16 @@ import helium314.keyboard.latin.SuggestedWords.SuggestedWordInfo
 import helium314.keyboard.latin.common.Constants
 import helium314.keyboard.latin.common.LocaleUtils.constructLocale
 import helium314.keyboard.latin.common.StringUtils
+import helium314.keyboard.latin.dictionary.Dictionary
 import helium314.keyboard.latin.inputlogic.InputLogic
 import helium314.keyboard.latin.inputlogic.SpaceState
+import helium314.keyboard.latin.research.ResearchSessionLogger
 import helium314.keyboard.latin.settings.Settings
 import helium314.keyboard.latin.utils.ScriptUtils
 import helium314.keyboard.latin.utils.SubtypeSettings
 import helium314.keyboard.latin.utils.getTimestampFormatter
 import helium314.keyboard.latin.utils.prefs
+import org.json.JSONObject
 import org.junit.runner.RunWith
 import org.mockito.Mockito
 import org.robolectric.Robolectric
@@ -41,6 +44,7 @@ import kotlin.streams.asSequence
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 
 @RunWith(RobolectricTestRunner::class)
 @Config(shadows = [
@@ -68,6 +72,12 @@ class InputLogicTest {
     @BeforeTest
     fun setUp() {
         latinIME = Robolectric.setupService(LatinIME::class.java)
+        ResearchSessionLogger.stopSession(latinIME)
+        ResearchSessionLogger.waitForPendingWrites()
+        ResearchSessionLogger.setEnabled(latinIME, false)
+        ResearchSessionLogger.deleteAllLogs(latinIME)
+        ResearchSessionLogger.onInputFieldFinished(latinIME)
+        ResearchSessionLogger.waitForPendingWrites()
         // start logging only after latinIME is created, avoids showing the stack traces if library is not found
         ShadowLog.setupLogging()
         ShadowLog.stream = System.out
@@ -689,6 +699,100 @@ class InputLogicTest {
         assertEquals("hello", text)
     }
 
+    @Test fun `research logging records manual suggestion pick metadata`() {
+        reset()
+        val sessionId = startResearchSession("run-suggestion-pick-test")
+        chainInput("teh")
+        val typedInfo = suggestedWord(
+            "teh",
+            SuggestedWordInfo.MAX_SCORE,
+            SuggestedWordInfo.KIND_TYPED
+        )
+        val suggestionInfo = suggestedWord(
+            "the",
+            120,
+            SuggestedWordInfo.KIND_CORRECTION
+        )
+        inputLogic.setSuggestedWords(SuggestedWords(
+            arrayListOf(typedInfo, suggestionInfo),
+            null,
+            typedInfo,
+            false,
+            false,
+            false,
+            SuggestedWords.INPUT_STYLE_TYPING,
+            12
+        ))
+
+        latinIME.pickSuggestionManually(suggestionInfo)
+        assertEquals("the", text)
+
+        val records = stopAndReadResearchRecords(sessionId)
+        val suggestionPick = records.first { it.getString("event") == "suggestion_pick" }
+        assertEquals("the", suggestionPick.getString("suggestion"))
+        assertEquals("teh", suggestionPick.getString("typed_word"))
+        assertEquals("correction", suggestionPick.getString("suggestion_type"))
+        assertEquals(1, suggestionPick.getInt("suggestion_index"))
+        assertEquals(2, suggestionPick.getInt("suggestion_rank"))
+        assertEquals("chosen_word", suggestionPick.getString("suggestion_commit_path"))
+        assertEquals(3, suggestionPick.getInt("selection_start_before"))
+        assertEquals(3, suggestionPick.getInt("selection_start_after"))
+        assertEquals("teh", suggestionPick.getString("composing_word"))
+        assertEquals("org.example.input", suggestionPick.getString("target_package"))
+        assertFalse(suggestionPick.getBoolean("password_field"))
+    }
+
+    @Test fun `research logging records autocorrect commit and revert metadata`() {
+        reset()
+        setInputType(InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_AUTO_CORRECT)
+        val sessionId = startResearchSession("run-autocorrect-test")
+        chainInput("hullo")
+        val typedInfo = suggestedWord(
+            "hullo",
+            SuggestedWordInfo.MAX_SCORE,
+            SuggestedWordInfo.KIND_TYPED
+        )
+        val correctionInfo = suggestedWord(
+            "hello",
+            120,
+            SuggestedWordInfo.KIND_CORRECTION
+        )
+        inputLogic.setSuggestedWords(SuggestedWords(
+            arrayListOf(typedInfo, correctionInfo),
+            null,
+            typedInfo,
+            false,
+            true,
+            false,
+            SuggestedWords.INPUT_STYLE_TYPING,
+            13
+        ))
+        input(' ')
+        assertEquals("hello ", text)
+
+        functionalKeyPress(KeyCode.DELETE)
+        assertEquals("hullo", text)
+
+        val records = stopAndReadResearchRecords(sessionId)
+        val autoCorrection = records.first { it.getString("event") == "auto_correction_commit" }
+        assertEquals("hullo", autoCorrection.getString("typed_word"))
+        assertEquals("hello", autoCorrection.getString("committed_word"))
+        assertEquals(true, autoCorrection.getBoolean("auto_correction_applied"))
+        assertEquals(1, autoCorrection.getInt("auto_correction_index"))
+        assertEquals(2, autoCorrection.getInt("auto_correction_rank"))
+        assertEquals("correction", autoCorrection.getString("auto_correction_type"))
+        assertEquals(5, autoCorrection.getInt("selection_start_before"))
+        assertEquals(5, autoCorrection.getInt("selection_start_after"))
+
+        val revert = records.first { it.getString("event") == "auto_correction_revert" }
+        assertEquals("hullo", revert.getString("originally_typed_word"))
+        assertEquals("hello", revert.getString("committed_word"))
+        assertEquals(" ", revert.getString("separator"))
+        assertEquals(true, revert.getBoolean("use_phantom_space"))
+        assertEquals("org.example.input", revert.getString("target_package"))
+        assertFalse(revert.getBoolean("password_field"))
+    }
+
     @Test fun `remove glide typing word on delete`() {
         reset()
         glideTypingInput("hello")
@@ -914,6 +1018,40 @@ class InputLogicTest {
         currentInputType = inputType
         setText(text)
     }
+
+    private fun startResearchSession(runId: String): String {
+        ResearchSessionLogger.setEnabled(latinIME, true)
+        val sessionId = ResearchSessionLogger.startSession(latinIME, runId)
+        ResearchSessionLogger.onInputFieldStarted(latinIME, InputAttributes(
+            EditorInfo().apply {
+                packageName = "org.example.input"
+                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_NORMAL
+            },
+            false,
+            latinIME.packageName
+        ))
+        return sessionId
+    }
+
+    private fun stopAndReadResearchRecords(sessionId: String): List<JSONObject> {
+        ResearchSessionLogger.stopSession(latinIME)
+        ResearchSessionLogger.waitForPendingWrites()
+        val file = ResearchSessionLogger.logDirectory(latinIME).resolve("session-$sessionId.jsonl")
+        return file.readLines()
+            .filter { it.isNotBlank() }
+            .map { JSONObject(it) }
+    }
+
+    private fun suggestedWord(word: String, score: Int, kind: Int) =
+        SuggestedWordInfo(
+            word,
+            "",
+            score,
+            kind,
+            Dictionary.DICTIONARY_USER_TYPED,
+            SuggestedWordInfo.NOT_AN_INDEX,
+            SuggestedWordInfo.NOT_A_CONFIDENCE
+        )
 
     // always need to handle messages for proper simulation
     private fun handleMessages() {

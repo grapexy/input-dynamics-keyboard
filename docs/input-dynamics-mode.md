@@ -81,6 +81,9 @@ Implemented event types:
 - `key_repeat`
 - `key_long_press`
 - `key_cancel`
+- `suggestion_pick`
+- `auto_correction_commit`
+- `auto_correction_revert`
 
 Key records use `key_class` values such as `letter`, `digit`, `symbol`,
 `space`, `enter`, `delete`, `modifier`, `action`, and `function`.
@@ -212,6 +215,27 @@ Input-scoped non-password records can also include:
 - `selection_end_before`
 - `selection_start_after`
 - `selection_end_after`
+- `suggestion_decision`
+- `suggestion`
+- `suggestion_length`
+- `suggestion_code_point_count`
+- `suggestion_index`
+- `suggestion_rank`
+- `suggestion_type`
+- `suggestion_score`
+- `suggestions_count`
+- `suggestions_will_auto_correct`
+- `typed_word`
+- `typed_word_length`
+- `typed_word_code_point_count`
+- `auto_correction`
+- `auto_correction_type`
+- `auto_correction_index`
+- `auto_correction_rank`
+- `auto_correction_applied`
+- `committed_word`
+- `originally_typed_word`
+- `separator`
 - `input_connection_result`
 - `restarting`
 - `finishing_input`
@@ -271,6 +295,19 @@ wrapper for non-password fields. Current operation events include
 `send_key_event`, and `commit_completion`. They include operation-specific
 fields plus before/after expected selection and composing-text snapshots where
 the keyboard has them.
+
+Suggestion and autocorrection records describe semantic decisions while the
+text-edit operation records describe lower-level editor calls:
+
+- `suggestion_pick`: a suggestion was manually chosen from the suggestion UI.
+  It includes suggestion text, rank/index in the `SuggestedWords` list, kind/type,
+  score, current composing word, and before/after edit-state snapshots.
+- `auto_correction_commit`: the keyboard committed a correction that differs
+  from the typed word. It includes typed word, committed word, correction rank,
+  correction type, separator, and before/after edit-state snapshots.
+- `auto_correction_revert`: backspace reverted an autocorrection. It includes
+  the originally typed word, committed word, separator handling, and before/after
+  edit-state snapshots.
 
 `press_id` correlates pointer samples with key down/up/commit records from the
 same touch sequence. `gesture_id` currently matches `press_id` for ordinary key

@@ -68,7 +68,9 @@ import helium314.keyboard.latin.utils.TextRange;
 import helium314.keyboard.latin.utils.TimestampKt;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.Locale;
+import java.util.Map;
 import java.util.TreeSet;
 import java.util.concurrent.TimeUnit;
 
@@ -284,6 +286,9 @@ public final class InputLogic {
 
         final SuggestedWords suggestedWords = mSuggestedWords;
         final String suggestion = suggestionInfo.mWord;
+        final Map<String, Object> suggestionFields = suggestionDecisionFields(
+                "manual_pick", suggestedWords, suggestionInfo);
+        suggestionFields.putAll(mConnection.researchEditStateFields("before"));
         // If this is a punctuation picked from the suggestion strip, pass it to onCodeInput
         if (suggestion.length() == 1 && suggestedWords.isPunctuationSuggestions()) {
             // We still want to log a suggestion click.
@@ -291,7 +296,12 @@ public final class InputLogic {
             // Word separators are suggested before the user inputs something.
             // Rely on onCodeInput to do the complicated swapping/stripping logic consistently.
             final Event event = Event.createPunctuationSuggestionPickedEvent(suggestionInfo);
-            return onCodeInput(settingsValues, event, keyboardShiftState, currentKeyboardScript, handler);
+            final InputTransaction inputTransaction = onCodeInput(
+                    settingsValues, event, keyboardShiftState, currentKeyboardScript, handler);
+            suggestionFields.put("suggestion_commit_path", "punctuation_code_input");
+            suggestionFields.putAll(mConnection.researchEditStateFields("after"));
+            ResearchSessionLogger.logEvent(mLatinIME, "suggestion_pick", suggestionFields);
+            return inputTransaction;
         }
 
         final Event event = Event.createSuggestionPickedEvent(suggestionInfo);
@@ -327,11 +337,20 @@ public final class InputLogic {
             resetComposingState(true /* alsoResetLastComposedWord */);
             mConnection.commitCompletion(suggestionInfo.mApplicationSpecifiedCompletionInfo);
             mConnection.endBatchEdit();
+            suggestionFields.put("suggestion_commit_path", "application_completion");
+            suggestionFields.putAll(mConnection.researchEditStateFields("after"));
+            ResearchSessionLogger.logEvent(mLatinIME, "suggestion_pick", suggestionFields);
             return inputTransaction;
         }
 
         commitChosenWord(settingsValues, suggestion, LastComposedWord.COMMIT_TYPE_MANUAL_PICK, LastComposedWord.NOT_A_SEPARATOR);
         mConnection.endBatchEdit();
+        suggestionFields.put("suggestion_commit_path", "chosen_word");
+        suggestionFields.put("last_composed_commit_type", LastComposedWord.COMMIT_TYPE_MANUAL_PICK);
+        suggestionFields.put("last_composed_commit_type_name",
+                lastComposedCommitTypeName(LastComposedWord.COMMIT_TYPE_MANUAL_PICK));
+        suggestionFields.putAll(mConnection.researchEditStateFields("after"));
+        ResearchSessionLogger.logEvent(mLatinIME, "suggestion_pick", suggestionFields);
         // Don't allow cancellation of manual pick
         mLastComposedWord.deactivate();
         // Space state must be updated before calling updateShiftState
@@ -347,6 +366,195 @@ public final class InputLogic {
         StatsUtils.onPickSuggestionManually(mSuggestedWords, suggestionInfo, mDictionaryFacilitator);
         StatsUtils.onWordCommitSuggestionPickedManually(suggestionInfo.mWord, mWordComposer.isBatchMode());
         return inputTransaction;
+    }
+
+    private Map<String, Object> suggestionDecisionFields(final String decision,
+            final SuggestedWords suggestedWords, final SuggestedWordInfo suggestionInfo) {
+        final Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put("suggestion_decision", decision);
+        fields.put("suggestion_surface", "suggestions");
+        fields.put("suggestions_available", suggestedWords != null && !suggestedWords.isEmpty());
+        fields.put("suggestions_count", suggestedWords == null ? 0 : suggestedWords.size());
+        fields.put("suggestions_word_count_to_show",
+                suggestedWords == null || suggestedWords.isEmpty() ? 0
+                        : suggestedWords.getWordCountToShow());
+        fields.put("suggestions_will_auto_correct",
+                suggestedWords != null && suggestedWords.mWillAutoCorrect);
+        fields.put("suggestions_typed_word_valid",
+                suggestedWords != null && suggestedWords.mTypedWordValid);
+        fields.put("suggestions_obsolete",
+                suggestedWords != null && suggestedWords.mIsObsoleteSuggestions);
+        fields.put("suggestions_input_style",
+                suggestedWords == null ? SuggestedWords.INPUT_STYLE_NONE : suggestedWords.mInputStyle);
+        fields.put("suggestions_input_style_name",
+                suggestedWords == null ? inputStyleName(SuggestedWords.INPUT_STYLE_NONE)
+                        : inputStyleName(suggestedWords.mInputStyle));
+        fields.put("suggestions_sequence_number",
+                suggestedWords == null ? SuggestedWords.NOT_A_SEQUENCE_NUMBER
+                        : suggestedWords.mSequenceNumber);
+        final int suggestionIndex = suggestedWords == null ? -1 : suggestedWords.indexOf(suggestionInfo);
+        fields.put("suggestion_index", suggestionIndex);
+        fields.put("suggestion_rank", suggestionIndex >= 0 ? suggestionIndex + 1 : null);
+        fields.put("suggestion_rank_basis", "suggested_words_index");
+        putSuggestedWordInfoFields(fields, "suggestion", suggestionInfo);
+        putSuggestedWordInfoFields(
+                fields,
+                "typed_word",
+                suggestedWords == null ? null : suggestedWords.getTypedWordInfo());
+        putTextFields(fields, "composing_word", mWordComposer.getTypedWord());
+        fields.put("composing_word_is_batch_mode", mWordComposer.isBatchMode());
+        fields.put("space_state", mSpaceState);
+        fields.put("space_state_name", spaceStateName(mSpaceState));
+        fields.put("just_reverted_commit_before", mJustRevertedACommit);
+        return fields;
+    }
+
+    private static void putSuggestedWordInfoFields(final Map<String, Object> fields,
+            final String prefix, final SuggestedWordInfo wordInfo) {
+        if (wordInfo == null) {
+            putTextFields(fields, prefix, null);
+            fields.put(prefix + "_present", false);
+            fields.put(prefix + "_kind", null);
+            fields.put(prefix + "_kind_name", null);
+            fields.put(prefix + "_type", null);
+            fields.put(prefix + "_kind_flags", null);
+            fields.put(prefix + "_score", null);
+            fields.put(prefix + "_code_point_count", null);
+            fields.put(prefix + "_source_dictionary_type", null);
+            fields.put(prefix + "_source_dictionary_locale_tag", null);
+            fields.put(prefix + "_possibly_offensive", null);
+            fields.put(prefix + "_exact_match", null);
+            fields.put(prefix + "_exact_match_with_intentional_omission", null);
+            fields.put(prefix + "_appropriate_for_auto_correction", null);
+            fields.put(prefix + "_eligible_for_auto_commit", null);
+            fields.put(prefix + "_index_of_touch_point_of_second_word", null);
+            fields.put(prefix + "_auto_commit_first_word_confidence", null);
+            fields.put(prefix + "_is_emoji", null);
+            return;
+        }
+        putTextFields(fields, prefix, wordInfo.mWord);
+        final int kind = wordInfo.getKind();
+        fields.put(prefix + "_present", true);
+        fields.put(prefix + "_kind", kind);
+        fields.put(prefix + "_kind_name", suggestedWordKindName(kind));
+        fields.put(prefix + "_type", suggestedWordKindName(kind));
+        fields.put(prefix + "_kind_flags", wordInfo.mKindAndFlags & ~0xFF);
+        fields.put(prefix + "_score", wordInfo.mScore);
+        fields.put(prefix + "_code_point_count", wordInfo.mCodePointCount);
+        fields.put(prefix + "_source_dictionary_type",
+                wordInfo.mSourceDict == null ? null : wordInfo.mSourceDict.mDictType);
+        fields.put(prefix + "_source_dictionary_locale_tag",
+                wordInfo.mSourceDict == null || wordInfo.mSourceDict.mLocale == null
+                        ? null : wordInfo.mSourceDict.mLocale.toLanguageTag());
+        fields.put(prefix + "_possibly_offensive", wordInfo.isPossiblyOffensive());
+        fields.put(prefix + "_exact_match", wordInfo.isExactMatch());
+        fields.put(prefix + "_exact_match_with_intentional_omission",
+                wordInfo.isExactMatchWithIntentionalOmission());
+        fields.put(prefix + "_appropriate_for_auto_correction",
+                wordInfo.isAppropriateForAutoCorrection());
+        fields.put(prefix + "_eligible_for_auto_commit", wordInfo.isEligibleForAutoCommit());
+        fields.put(prefix + "_index_of_touch_point_of_second_word",
+                wordInfo.mIndexOfTouchPointOfSecondWord);
+        fields.put(prefix + "_auto_commit_first_word_confidence",
+                wordInfo.mAutoCommitFirstWordConfidence);
+        fields.put(prefix + "_is_emoji", wordInfo.isEmoji());
+    }
+
+    private static void putTextFields(final Map<String, Object> fields, final String prefix,
+            final CharSequence text) {
+        final String value = text == null ? null : text.toString();
+        fields.put(prefix, value);
+        if (value == null) {
+            fields.put(prefix + "_length", null);
+            fields.put(prefix + "_code_point_count", null);
+            return;
+        }
+        fields.put(prefix + "_length", value.length());
+        fields.put(prefix + "_code_point_count", value.codePointCount(0, value.length()));
+    }
+
+    private static String suggestedWordKindName(final int kind) {
+        switch (kind) {
+            case SuggestedWordInfo.KIND_TYPED:
+                return "typed";
+            case SuggestedWordInfo.KIND_CORRECTION:
+                return "correction";
+            case SuggestedWordInfo.KIND_COMPLETION:
+                return "completion";
+            case SuggestedWordInfo.KIND_WHITELIST:
+                return "whitelist";
+            case SuggestedWordInfo.KIND_BLACKLIST:
+                return "blacklist";
+            case SuggestedWordInfo.KIND_HARDCODED:
+                return "hardcoded";
+            case SuggestedWordInfo.KIND_APP_DEFINED:
+                return "app_defined";
+            case SuggestedWordInfo.KIND_SHORTCUT:
+                return "shortcut";
+            case SuggestedWordInfo.KIND_PREDICTION:
+                return "prediction";
+            case SuggestedWordInfo.KIND_RESUMED:
+                return "resumed";
+            case SuggestedWordInfo.KIND_OOV_CORRECTION:
+                return "oov_correction";
+            default:
+                return "unknown";
+        }
+    }
+
+    private static String inputStyleName(final int inputStyle) {
+        switch (inputStyle) {
+            case SuggestedWords.INPUT_STYLE_NONE:
+                return "none";
+            case SuggestedWords.INPUT_STYLE_TYPING:
+                return "typing";
+            case SuggestedWords.INPUT_STYLE_UPDATE_BATCH:
+                return "update_batch";
+            case SuggestedWords.INPUT_STYLE_TAIL_BATCH:
+                return "tail_batch";
+            case SuggestedWords.INPUT_STYLE_APPLICATION_SPECIFIED:
+                return "application_specified";
+            case SuggestedWords.INPUT_STYLE_RECORRECTION:
+                return "recorrection";
+            case SuggestedWords.INPUT_STYLE_PREDICTION:
+                return "prediction";
+            case SuggestedWords.INPUT_STYLE_BEGINNING_OF_SENTENCE_PREDICTION:
+                return "beginning_of_sentence_prediction";
+            default:
+                return "unknown";
+        }
+    }
+
+    private static String spaceStateName(final int spaceState) {
+        switch (spaceState) {
+            case SpaceState.NONE:
+                return "none";
+            case SpaceState.WEAK:
+                return "weak";
+            case SpaceState.PHANTOM:
+                return "phantom";
+            case SpaceState.DOUBLE:
+                return "double";
+            case SpaceState.SWAP_PUNCTUATION:
+                return "swap_punctuation";
+            default:
+                return "unknown";
+        }
+    }
+
+    private static String lastComposedCommitTypeName(final int commitType) {
+        switch (commitType) {
+            case LastComposedWord.COMMIT_TYPE_USER_TYPED_WORD:
+                return "user_typed_word";
+            case LastComposedWord.COMMIT_TYPE_MANUAL_PICK:
+                return "manual_pick";
+            case LastComposedWord.COMMIT_TYPE_DECIDED_WORD:
+                return "decided_word";
+            case LastComposedWord.COMMIT_TYPE_CANCEL_AUTO_CORRECT:
+                return "cancel_auto_correct";
+            default:
+                return "unknown";
+        }
     }
 
     /**
@@ -1899,10 +2107,17 @@ public final class InputLogic {
         final String committedWordString = committedWord.toString();
         final int cancelLength = committedWord.length();
         final String separatorString = mLastComposedWord.mSeparatorString;
+        final Map<String, Object> revertFields = new LinkedHashMap<>();
+        putTextFields(revertFields, "originally_typed_word", originallyTypedWord);
+        putTextFields(revertFields, "committed_word", committedWord);
+        putTextFields(revertFields, "separator", separatorString);
+        revertFields.put("last_composed_commit_type_name", "revert_auto_correct");
+        revertFields.putAll(mConnection.researchEditStateFields("before"));
         // If our separator is a space, we won't actually commit it,
         // but set the space state to PHANTOM so that a space will be inserted
         // on the next keypress
         final boolean usePhantomSpace = separatorString.equals(Constants.STRING_SPACE);
+        revertFields.put("use_phantom_space", usePhantomSpace);
         // We want java chars, not codepoints for the following.
         final int separatorLength = separatorString.length();
         // TODO: should we check our saved separator against the actual contents of the text view?
@@ -1969,6 +2184,10 @@ public final class InputLogic {
             mWordComposer.setComposingWord(codePoints, mLatinIME.getCoordinatesForCurrentKeyboard(codePoints));
             setComposingTextInternal(textToCommit, 1);
         }
+        revertFields.put("language_has_spaces",
+                inputTransaction.getSettingsValues().mSpacingAndPunctuations.mCurrentLanguageHasSpaces);
+        revertFields.putAll(mConnection.researchEditStateFields("after"));
+        ResearchSessionLogger.logEvent(mLatinIME, "auto_correction_revert", revertFields);
         // Don't restart suggestion yet. We'll restart if the user deletes the separator.
         mLastComposedWord = LastComposedWord.NOT_A_COMPOSED_WORD;
 
@@ -2374,6 +2593,29 @@ public final class InputLogic {
         final String stringToCommit = (autoCorrectionOrNull != null) ? autoCorrectionOrNull.mWord : typedWord;
         if (stringToCommit != null) {
             final boolean isBatchMode = mWordComposer.isBatchMode();
+            final Map<String, Object> autoCorrectionFields = new LinkedHashMap<>();
+            putTextFields(autoCorrectionFields, "typed_word", typedWord);
+            putTextFields(autoCorrectionFields, "committed_word", stringToCommit);
+            putTextFields(autoCorrectionFields, "separator", separator);
+            putSuggestedWordInfoFields(autoCorrectionFields, "auto_correction", autoCorrectionOrNull);
+            autoCorrectionFields.put("suggestions_available", !mSuggestedWords.isEmpty());
+            autoCorrectionFields.put("suggestions_count", mSuggestedWords.size());
+            autoCorrectionFields.put("suggestions_will_auto_correct", mSuggestedWords.mWillAutoCorrect);
+            autoCorrectionFields.put("suggestions_input_style", mSuggestedWords.mInputStyle);
+            autoCorrectionFields.put("suggestions_input_style_name",
+                    inputStyleName(mSuggestedWords.mInputStyle));
+            final int autoCorrectionIndex = mSuggestedWords.indexOf(autoCorrectionOrNull);
+            autoCorrectionFields.put("auto_correction_index", autoCorrectionIndex);
+            autoCorrectionFields.put("auto_correction_rank",
+                    autoCorrectionIndex >= 0 ? autoCorrectionIndex + 1 : null);
+            autoCorrectionFields.put("auto_correction_rank_basis", "suggested_words_index");
+            autoCorrectionFields.put("auto_correction_applied", !typedWord.equals(stringToCommit));
+            autoCorrectionFields.put("is_batch_mode", isBatchMode);
+            autoCorrectionFields.put("last_composed_commit_type",
+                    LastComposedWord.COMMIT_TYPE_DECIDED_WORD);
+            autoCorrectionFields.put("last_composed_commit_type_name",
+                    lastComposedCommitTypeName(LastComposedWord.COMMIT_TYPE_DECIDED_WORD));
+            autoCorrectionFields.putAll(mConnection.researchEditStateFields("before"));
             commitChosenWord(settingsValues, stringToCommit, LastComposedWord.COMMIT_TYPE_DECIDED_WORD, separator);
             if (!typedWord.equals(stringToCommit)) {
                 // This will make the correction flash for a short while as a visual clue
@@ -2391,6 +2633,10 @@ public final class InputLogic {
                 StatsUtils.onAutoCorrection(typedWord, stringToCommit, isBatchMode,
                         mDictionaryFacilitator, prevWordsContext);
                 StatsUtils.onWordCommitAutoCorrect(stringToCommit, isBatchMode);
+                autoCorrectionFields.put("prev_words_context", prevWordsContext);
+                autoCorrectionFields.putAll(mConnection.researchEditStateFields("after"));
+                ResearchSessionLogger.logEvent(mLatinIME, "auto_correction_commit",
+                        autoCorrectionFields);
             } else {
                 StatsUtils.onWordCommitUserTyped(stringToCommit, isBatchMode);
             }

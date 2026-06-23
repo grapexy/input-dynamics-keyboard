@@ -48,6 +48,10 @@ Use this reference when validating logs or changing event fields.
   `set_composing_region`, `send_key_event`, and `commit_completion`.
   These records are emitted only for non-password fields and include
   before/after expected selection and composing-state snapshots where available.
+- Semantic correction events currently include `suggestion_pick`,
+  `auto_correction_commit`, and `auto_correction_revert`. These records are
+  emitted only for non-password fields and include before/after expected
+  selection and composing-state snapshots where available.
 - `password_field: true` records should not appear in pulled non-password
   validation logs; password-class contexts are the hard suppression boundary.
 
@@ -88,6 +92,27 @@ include:
 - `selection_end_before`
 - `selection_start_after`
 - `selection_end_after`
+- `suggestion_decision`
+- `suggestion`
+- `suggestion_length`
+- `suggestion_code_point_count`
+- `suggestion_index`
+- `suggestion_rank`
+- `suggestion_type`
+- `suggestion_score`
+- `suggestions_count`
+- `suggestions_will_auto_correct`
+- `typed_word`
+- `typed_word_length`
+- `typed_word_code_point_count`
+- `auto_correction`
+- `auto_correction_type`
+- `auto_correction_index`
+- `auto_correction_rank`
+- `auto_correction_applied`
+- `committed_word`
+- `originally_typed_word`
+- `separator`
 - `press_id`
 - `gesture_id`
 - `keyboard_state_available`
