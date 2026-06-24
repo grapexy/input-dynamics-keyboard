@@ -738,12 +738,9 @@ fn stop_capture_side_effects(
     record_step(ledger, "stop_ime", Requirement::Required, &ime_stop);
     outcomes.insert(String::from("stop_ime"), result_value(&ime_stop));
     let end_evidence = stop_end_evidence(effects, &active.identity, &active.state);
-    if end_evidence
-        .as_ref()
-        .ok()
-        .and_then(|value| value.get("ok"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
+    let end_evidence_value = result_value(&end_evidence);
+    if end_evidence_value.get("ok").and_then(Value::as_bool) == Some(true)
+        && matches!(evidence_requirement(&active.state), Requirement::Required)
     {
         mark_directory_artifact(
             &mut active.state,
@@ -752,16 +749,13 @@ fn stop_capture_side_effects(
             EVIDENCE_CAPTURE_SCHEMA,
         );
     }
-    record_step(
+    record_step_value(
         ledger,
         "capture_end_evidence",
         evidence_requirement(&active.state),
-        &end_evidence,
+        &end_evidence_value,
     );
-    outcomes.insert(
-        String::from("capture_end_evidence"),
-        result_value(&end_evidence),
-    );
+    outcomes.insert(String::from("capture_end_evidence"), end_evidence_value);
     transition_state(
         &active.identity,
         &mut active.state,
@@ -852,25 +846,38 @@ fn finish_stop_session(
         &runtime_cleanup,
     );
     outcomes.insert(String::from("clear_runtime"), runtime_cleanup);
-    let complete = finalization_complete(&ledger.steps, &active.state.artifacts);
-    let terminal = if complete {
-        LifecycleState::Complete
-    } else {
-        LifecycleState::Incomplete
-    };
-    active.state.lifecycle.state = terminal;
-    active.state.lifecycle.stage = lifecycle_stage(terminal);
-    active.state.lifecycle.history.push(history_event(
-        terminal,
-        "terminal",
-        host_wall_millis().unwrap_or(0_u64),
-    ));
-    active.state.transition_seq = active.state.transition_seq.saturating_add(1_u64);
-    active.state.updated_wall_ms = host_wall_millis()?;
-    active.state.finalization = Some(serde_json::to_value(&ledger)?);
+
+    finalize_manifest(
+        &active.identity,
+        &mut active.state,
+        &mut ledger,
+        &mut outcomes,
+    );
+    let mut terminal = terminal_state(&ledger, &active.state);
+    apply_terminal_finalization(&mut active.state, &mut ledger, terminal)?;
+
+    let final_manifest = write_manifest(&active.identity, &active.state, &outcomes);
+    if let Err(error) = final_manifest {
+        mark_failed_artifact(
+            &mut active.state,
+            "manifest",
+            &active.identity.output_dir.join("manifest.json"),
+            RECORD_MANIFEST_SCHEMA,
+            "final manifest rewrite after terminal state failed",
+        );
+        let failure_value = json!({"ok": false, "error": error.to_string()});
+        replace_step_value(
+            &mut ledger,
+            "write_manifest",
+            Requirement::Required,
+            &failure_value,
+        );
+        outcomes.insert(String::from("write_manifest"), failure_value);
+        terminal = LifecycleState::Incomplete;
+        apply_terminal_finalization(&mut active.state, &mut ledger, terminal)?;
+    }
+
     write_state(&active.identity.state_path, &active.state)?;
-    ledger.run_state = terminal;
-    ledger.finished_wall_ms = Some(host_wall_millis()?);
     write_json_atomic(
         &active.identity.finalization_path,
         &serde_json::to_value(&ledger)?,
@@ -879,7 +886,7 @@ fn finish_stop_session(
         &active.identity.lock_snapshot_path,
         &serde_json::to_value(&active.lock)?,
     )?;
-    let completion = if complete {
+    let completion = if terminal == LifecycleState::Complete {
         StopCompletion::Complete
     } else {
         StopCompletion::Incomplete
@@ -1683,7 +1690,6 @@ fn finalize_artifacts(
     finalize_ime_logs(effects, identity, state, ledger, &mut outcomes);
     finalize_video(effects, identity, state, ledger, &mut outcomes);
     finalize_getevent(identity, state, ledger, &mut outcomes);
-    finalize_manifest(identity, state, ledger, &mut outcomes);
     let _state_write = write_state(&identity.state_path, state);
     json!({
         "ok": outcomes.values().all(|value| value.get("ok").and_then(Value::as_bool) == Some(true)),
@@ -1832,21 +1838,71 @@ fn finalize_manifest(
 ) {
     let manifest = write_manifest(identity, state, outcomes);
     let manifest_value = result_value(&manifest);
+    if manifest.is_ok() {
+        mark_manifest_artifact(state, &identity.output_dir.join("manifest.json"));
+    } else {
+        mark_failed_artifact(
+            state,
+            "manifest",
+            &identity.output_dir.join("manifest.json"),
+            RECORD_MANIFEST_SCHEMA,
+            "manifest write failed",
+        );
+    }
     record_step_value(
         ledger,
         "write_manifest",
         Requirement::Required,
         &manifest_value,
     );
-    if manifest.is_ok() {
-        mark_artifact(
-            state,
-            "manifest",
-            &identity.output_dir.join("manifest.json"),
-            RECORD_MANIFEST_SCHEMA,
-        );
-    }
     outcomes.insert(String::from("write_manifest"), manifest_value);
+}
+
+fn terminal_state(ledger: &FinalizationLedger, state: &CaptureSessionState) -> LifecycleState {
+    if finalization_complete(&ledger.steps, &state.artifacts) {
+        LifecycleState::Complete
+    } else {
+        LifecycleState::Incomplete
+    }
+}
+
+fn apply_terminal_finalization(
+    state: &mut CaptureSessionState,
+    ledger: &mut FinalizationLedger,
+    terminal: LifecycleState,
+) -> CliResult<()> {
+    let wall_ms = host_wall_millis()?;
+    if !state.lifecycle.state.is_terminal() || state.lifecycle.state != terminal {
+        state.lifecycle.history.push(history_event(
+            terminal,
+            "terminal",
+            host_wall_millis().unwrap_or(0_u64),
+        ));
+        state.transition_seq = state.transition_seq.saturating_add(1_u64);
+    }
+    state.lifecycle.state = terminal;
+    state.lifecycle.stage = lifecycle_stage(terminal);
+    state.updated_wall_ms = wall_ms;
+    ledger.run_state = terminal;
+    ledger.finished_wall_ms = Some(wall_ms);
+    state.finalization = Some(serde_json::to_value(ledger)?);
+    Ok(())
+}
+
+fn replace_step_value(
+    ledger: &mut FinalizationLedger,
+    name: &str,
+    requirement: Requirement,
+    value: &Value,
+) {
+    ledger.steps.retain(|step| step.name != name);
+    ledger.last_completed_step = ledger
+        .steps
+        .iter()
+        .rev()
+        .find(|step| step.status == StepStatus::Ok)
+        .map(|step| step.name.clone());
+    record_step_value(ledger, name, requirement, value);
 }
 
 fn new_finalization_ledger(identity: &SessionIdentity) -> CliResult<FinalizationLedger> {
@@ -2099,6 +2155,7 @@ fn write_manifest(
             "lock_snapshot_path": identity.lock_snapshot_path,
             "lifecycle": state.lifecycle,
             "processes": state.processes,
+            "finalization": state.finalization,
         },
         "evidence": {
             "enabled": state.start_config.get("with_evidence").cloned().unwrap_or(Value::Bool(false)),
@@ -2220,6 +2277,25 @@ fn mark_failed_artifact(
         .and_then(Value::as_str)
         .map(String::from);
     entry.failure_reason = Some(String::from(reason));
+}
+
+fn mark_manifest_artifact(state: &mut CaptureSessionState, path: &Path) {
+    let present = path.is_file();
+    let entry = state
+        .artifacts
+        .entry(String::from("manifest"))
+        .or_insert_with(|| {
+            ArtifactStatus::new(
+                &path.to_string_lossy(),
+                Requirement::Required,
+                "write_manifest",
+            )
+        });
+    entry.present = present;
+    entry.valid = present;
+    entry.schema = Some(String::from(RECORD_MANIFEST_SCHEMA));
+    entry.fingerprint = None;
+    entry.failure_reason = (!present).then(|| String::from("artifact missing"));
 }
 
 fn mark_directory_artifact(state: &mut CaptureSessionState, key: &str, path: &Path, schema: &str) {
@@ -2973,6 +3049,160 @@ mod tests {
         cleanup_paths(&root, &runtime);
     }
 
+    #[test]
+    fn stop_marks_end_evidence_and_manifest_artifacts_complete() {
+        let root = unique_temp_dir("session-lifecycle-stop-evidence");
+        let mut effects = FakeEffects::new("serial-stop-evidence");
+        let request = HumanSessionStart {
+            run_id: String::from("run-stop-evidence"),
+            out: root.clone(),
+            with_evidence: true,
+            full_accessibility_evidence: false,
+            video_enabled: false,
+        };
+        let Some(_start) = assert_ok(
+            start_human_session_with_effects(&mut effects, &request),
+            "fake start",
+        ) else {
+            return;
+        };
+
+        let Some(stop) = assert_ok(
+            stop_session_with_effects(
+                &mut effects,
+                &SessionStopRequest {
+                    run_id: Some(String::from("run-stop-evidence")),
+                },
+            ),
+            "fake evidence stop",
+        ) else {
+            return;
+        };
+
+        assert_complete_stop_result(&stop);
+        assert_final_manifest(&root);
+        assert_terminal_state_files(&root);
+        let runtime = runtime_paths(effects.package_name(), &effects.serial);
+        cleanup_paths(&root, &runtime);
+    }
+
+    fn assert_complete_stop_result(stop: &Value) {
+        assert_eq!(
+            stop.get("mutated").and_then(Value::as_bool),
+            Some(true),
+            "stop should finalize and report artifact status"
+        );
+        assert_eq!(
+            stop.get("ok").and_then(Value::as_bool),
+            Some(true),
+            "fake stop should complete when every required artifact is valid"
+        );
+        assert_eq!(
+            stop.get("lifecycle_state").and_then(Value::as_str),
+            Some("complete"),
+            "stop result should expose complete lifecycle state"
+        );
+        assert_eq!(
+            stop.pointer("/finalization/run_state")
+                .and_then(Value::as_str),
+            Some("complete"),
+            "finalization ledger should expose complete run state"
+        );
+    }
+
+    fn assert_final_manifest(root: &Path) {
+        let manifest_value = fs::read_to_string(root.join("manifest.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+        assert!(
+            manifest_value.is_some(),
+            "manifest should include parsed JSON"
+        );
+        let Some(parsed_manifest) = manifest_value.as_ref() else {
+            return;
+        };
+        assert_eq!(
+            parsed_manifest
+                .pointer("/artifacts/evidence_end/present")
+                .and_then(Value::as_bool),
+            Some(true),
+            "manifest should include refreshed end-evidence artifact status"
+        );
+        assert_eq!(
+            parsed_manifest
+                .pointer("/artifacts/manifest/present")
+                .and_then(Value::as_bool),
+            Some(true),
+            "manifest should include refreshed self artifact status"
+        );
+        assert_eq!(
+            parsed_manifest
+                .pointer("/artifacts/manifest/fingerprint")
+                .and_then(Value::as_str),
+            None,
+            "manifest should not embed a stale fingerprint for itself"
+        );
+        assert!(
+            parsed_manifest
+                .pointer("/evidence/end")
+                .is_some_and(|value| !value.is_null()),
+            "manifest should include stop-time evidence capture details"
+        );
+        assert_eq!(
+            parsed_manifest
+                .pointer("/session/lifecycle/state")
+                .and_then(Value::as_str),
+            Some("complete"),
+            "manifest should include terminal lifecycle state"
+        );
+        assert_eq!(
+            parsed_manifest
+                .pointer("/session/finalization/run_state")
+                .and_then(Value::as_str),
+            Some("complete"),
+            "manifest should include terminal finalization run state"
+        );
+    }
+
+    fn assert_terminal_state_files(root: &Path) {
+        let Some(stopped_state) = assert_ok(
+            read_state(&root.join("session").join("state.json")),
+            "read stopped state",
+        ) else {
+            return;
+        };
+        assert_eq!(stopped_state.lifecycle.state, LifecycleState::Complete);
+        assert_eq!(
+            stopped_state
+                .finalization
+                .as_ref()
+                .and_then(|value| value.get("run_state"))
+                .and_then(Value::as_str),
+            Some("complete"),
+            "embedded state finalization should match lifecycle"
+        );
+        assert!(
+            stopped_state
+                .finalization
+                .as_ref()
+                .and_then(|value| value.get("finished_wall_ms"))
+                .and_then(Value::as_u64)
+                .is_some(),
+            "embedded state finalization should include finished_wall_ms"
+        );
+        let finalization_value = fs::read_to_string(root.join("session").join("finalization.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+        assert_eq!(
+            finalization_value
+                .as_ref()
+                .and_then(|value| value.get("run_state"))
+                .and_then(Value::as_str),
+            Some("complete"),
+            "standalone finalization ledger should match embedded state finalization"
+        );
+    }
+
     struct FakeEffects {
         package: String,
         adb: String,
@@ -2986,7 +3216,7 @@ mod tests {
             Self {
                 package: String::from("org.inputdynamics.ime.debug"),
                 adb: String::from("adb"),
-                serial: format!("{serial_suffix}-{id}"),
+                serial: format!("{serial_suffix}-{}-{id}", process::id()),
                 next_pid: Cell::new(10_000_u32),
             }
         }
@@ -3035,9 +3265,13 @@ mod tests {
         fn pull_logs(&self, out: &Path) -> CliResult<Value> {
             let log_dir = out.join(LOG_DIR);
             fs::create_dir_all(&log_dir)?;
+            let run_id = fake_run_id_for_pull(out).unwrap_or_else(|| String::from("run"));
             fs::write(
                 log_dir.join("session-run.jsonl"),
-                "{\"schema\":\"typing_event.v1\",\"event\":\"session_start\",\"session_id\":\"s\",\"external_run_id\":\"run\"}\n",
+                [
+                    format!("{{\"schema\":\"input_dynamics_event.v1\",\"event\":\"session_start\",\"session_id\":\"s\",\"external_run_id\":\"{run_id}\",\"t_wall_ms\":1,\"t_uptime_ms\":1,\"input_actor\":\"human\",\"input_controller\":null,\"input_cadence_policy\":\"manual\",\"target_package\":\"org.example.input\",\"password_field\":false}}\n"),
+                    format!("{{\"schema\":\"input_dynamics_event.v1\",\"event\":\"session_stop\",\"session_id\":\"s\",\"external_run_id\":\"{run_id}\",\"t_wall_ms\":2,\"t_uptime_ms\":2,\"target_package\":\"org.example.input\",\"password_field\":false}}\n"),
+                ].concat(),
             )?;
             Ok(json!({"ok": true}))
         }
@@ -3122,7 +3356,6 @@ mod tests {
         ) -> CliResult<Value> {
             fs::create_dir_all(out)?;
             Ok(json!({
-                "ok": true,
                 "schema": EVIDENCE_CAPTURE_SCHEMA,
                 "phase": phase,
             }))
@@ -3140,7 +3373,11 @@ mod tests {
             if let Some(parent) = stderr_path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::write(stdout_path, "")?;
+            if spec.name == GETEVENT_PROCESS {
+                fs::write(stdout_path, fake_getevent_raw_log())?;
+            } else {
+                fs::write(stdout_path, "")?;
+            }
             fs::write(stderr_path, "")?;
             let pid = self.next_pid.get();
             self.next_pid.set(pid.saturating_add(1_u32));
@@ -3186,6 +3423,22 @@ mod tests {
                 recommended_state: ProcessState::Stopped,
             }
         }
+    }
+
+    fn fake_getevent_raw_log() -> &'static str {
+        include_str!(
+            "../../../crates/input-dynamics-analysis/tests/fixtures/getevent/simple_tap.raw.log"
+        )
+    }
+
+    fn fake_run_id_for_pull(out: &Path) -> Option<String> {
+        let state_path = out.parent()?.join("session").join("state.json");
+        let text = fs::read_to_string(state_path).ok()?;
+        let value = serde_json::from_str::<Value>(&text).ok()?;
+        value
+            .get("run_id")
+            .and_then(Value::as_str)
+            .map(String::from)
     }
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {
