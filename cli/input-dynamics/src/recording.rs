@@ -215,6 +215,19 @@ struct VideoMapOutputCheck<'a> {
     description: &'a str,
 }
 
+struct RequiredProcessFlags {
+    ended_early: bool,
+    unverifiable: bool,
+    stop_failed: bool,
+    failure_codes: Vec<String>,
+}
+
+impl RequiredProcessFlags {
+    const fn failed(&self) -> bool {
+        self.ended_early || self.unverifiable || self.stop_failed
+    }
+}
+
 /// Inspect a recording directory without modifying it.
 pub(crate) fn inspect_recording(dir: &Path) -> CliResult<Value> {
     require_directory(dir)?;
@@ -2441,20 +2454,11 @@ fn flags_json(inputs: &FlagInputs<'_>) -> Value {
         &inputs.session_state.finalization.summary,
         SessionErrorCode::VideoEndedEarly,
     );
-    let needs_session_rerun =
-        video_ended_early || inputs.session_state.classification.is_incomplete();
-    let incomplete_or_superseded = !inputs.validation.current_ok
-        || session_blocks_analysis
-        || inputs
-            .note_flags
-            .get("mentions_incomplete")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        || inputs
-            .note_flags
-            .get("mentions_superseded")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+    let required_process = required_process_flags(&inputs.session_state.finalization.summary);
+    let needs_session_rerun = video_ended_early
+        || required_process.failed()
+        || inputs.session_state.classification.is_incomplete();
+    let incomplete_or_superseded = incomplete_or_superseded(inputs);
     json!({
         "valid_for_analysis": inputs.manifest.is_some()
             && inputs.session.selected.is_some()
@@ -2487,11 +2491,48 @@ fn flags_json(inputs: &FlagInputs<'_>) -> Value {
         "needs_session_stop": inputs.session_state.classification.needs_stop(),
         "needs_session_repair": inputs.session_state.classification.needs_repair(),
         "video_ended_early": video_ended_early,
+        "required_process_failed": required_process.failed(),
+        "required_process_ended_early": required_process.ended_early,
+        "required_process_unverifiable": required_process.unverifiable,
+        "required_process_stop_failed": required_process.stop_failed,
+        "required_process_failure_codes": required_process.failure_codes,
         "needs_session_rerun": needs_session_rerun,
         "has_sensitive_evidence": has_evidence || has_video,
         "incomplete_or_superseded": incomplete_or_superseded,
         "needs_cleanup": needs_cleanup(inputs.manifest),
     })
+}
+
+fn incomplete_or_superseded(inputs: &FlagInputs<'_>) -> bool {
+    !inputs.validation.current_ok
+        || inputs.session_state.classification.blocks_analysis()
+        || bool_at(inputs.note_flags, "/mentions_incomplete")
+        || bool_at(inputs.note_flags, "/mentions_superseded")
+}
+
+fn required_process_flags(summary: &Value) -> RequiredProcessFlags {
+    let ended_early =
+        finalization_has_error_code(summary, SessionErrorCode::RequiredProcessEndedEarly);
+    let unverifiable =
+        finalization_has_error_code(summary, SessionErrorCode::RequiredProcessUnverifiable);
+    let stop_failed =
+        finalization_has_error_code(summary, SessionErrorCode::RequiredProcessStopFailed);
+    let mut failure_codes = Vec::new();
+    if ended_early {
+        failure_codes.push(String::from("required_process_ended_early"));
+    }
+    if unverifiable {
+        failure_codes.push(String::from("required_process_unverifiable"));
+    }
+    if stop_failed {
+        failure_codes.push(String::from("required_process_stop_failed"));
+    }
+    RequiredProcessFlags {
+        ended_early,
+        unverifiable,
+        stop_failed,
+        failure_codes,
+    }
 }
 
 fn finalization_has_error_code(summary: &Value, error_code: SessionErrorCode) -> bool {
@@ -2751,6 +2792,15 @@ fn session_refresh_start_argv(evidence: EvidenceRefresh) -> Value {
 fn session_refresh_reason(flags: &Value, evidence: EvidenceRefresh) -> &'static str {
     if bool_at(flags, "/video_ended_early") {
         return "rerun because screen recording ended before session finalization";
+    }
+    if bool_at(flags, "/required_process_ended_early") {
+        return "rerun because a required capture process ended before session finalization";
+    }
+    if bool_at(flags, "/required_process_unverifiable") {
+        return "rerun because a required capture process could not be verified during finalization";
+    }
+    if bool_at(flags, "/required_process_stop_failed") {
+        return "rerun because a required capture process did not stop cleanly";
     }
     match (evidence, bool_at(flags, "/needs_video")) {
         (EvidenceRefresh::Include, true) => {

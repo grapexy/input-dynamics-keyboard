@@ -91,6 +91,9 @@ pub(crate) enum SessionErrorCode {
     FinalizationInProgress,
     ControllerNotEnabled,
     VideoEndedEarly,
+    RequiredProcessEndedEarly,
+    RequiredProcessUnverifiable,
+    RequiredProcessStopFailed,
     NoActiveSession,
     SequenceMismatch,
 }

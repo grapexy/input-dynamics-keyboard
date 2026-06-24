@@ -635,11 +635,20 @@ fn session_status_with_effects(
     }
     let loaded = load_status_runtime(effects, &device_serial, &runtime_paths, current)?;
 
+    let failure_conditions = status_failure_conditions(
+        &loaded.process_liveness,
+        &loaded.processes,
+        current.get("run_id").and_then(Value::as_str),
+    );
+    let capture_health_ok = failure_conditions.is_empty();
+
     Ok(json!({
         "schema": SESSION_LIFECYCLE_RESULT_SCHEMA,
         "ok": loaded.state_read.status == ReadStatus::Valid
             && loaded.lock_read.status == ReadStatus::Valid
             && loaded.identity_mismatches.is_empty(),
+        "capture_health_ok": capture_health_ok,
+        "has_failure_conditions": !capture_health_ok,
         "command": "session status",
         "mutated": false,
         "package_name": effects.package_name(),
@@ -656,10 +665,7 @@ fn session_status_with_effects(
         "lock_read": classified_json(&loaded.lock_read),
         "identity_mismatches": loaded.identity_mismatches,
         "process_liveness": loaded.process_liveness,
-        "failure_conditions": status_failure_conditions(
-            &loaded.process_liveness,
-            current.get("run_id").and_then(Value::as_str),
-        ),
+        "failure_conditions": failure_conditions,
     }))
 }
 
@@ -670,6 +676,7 @@ struct LoadedStatusRuntime {
     lock_read: crate::session_state::io::ClassifiedJson,
     identity_mismatches: Vec<String>,
     process_liveness: BTreeMap<String, Value>,
+    processes: BTreeMap<String, ProcessDescriptor>,
 }
 
 fn load_status_runtime(
@@ -700,6 +707,9 @@ fn load_status_runtime(
         (None, _) | (_, None) => Vec::new(),
     };
     let process_liveness = status_process_liveness(effects, state_option.as_ref());
+    let processes = state_option
+        .as_ref()
+        .map_or_else(BTreeMap::new, |state| state.processes.clone());
     Ok(LoadedStatusRuntime {
         state_path,
         lock_path,
@@ -707,6 +717,7 @@ fn load_status_runtime(
         lock_read,
         identity_mismatches,
         process_liveness,
+        processes,
     })
 }
 
@@ -757,34 +768,108 @@ fn status_process_liveness(
 
 fn status_failure_conditions(
     process_liveness: &BTreeMap<String, Value>,
+    processes: &BTreeMap<String, ProcessDescriptor>,
     run_id: Option<&str>,
 ) -> Vec<Value> {
     let mut failures = Vec::new();
-    if let Some(screenrecord) = process_liveness.get(SCREENRECORD_PROCESS) {
-        let status = screenrecord.get("status").and_then(Value::as_str);
-        if status.is_some_and(screenrecord_ended_early_status) {
-            let selected_run_id = run_id.unwrap_or("<run-id>");
-            failures.push(json!({
-                "error_code": SessionErrorCode::VideoEndedEarly,
-                "process": SCREENRECORD_PROCESS,
-                "status": status,
-                "message": "screenrecord ended before session stop was requested",
-                "recommended_next_action": "session_stop",
-                "recommended_argv": [
-                    "input-dynamics",
-                    "session",
-                    "stop",
-                    "--run-id",
-                    selected_run_id,
-                ],
-            }));
+    for (name, descriptor) in processes {
+        if let Some(liveness) = process_liveness.get(name)
+            && let Some(condition) =
+                required_process_status_condition(name, descriptor, liveness, run_id)
+        {
+            failures.push(condition);
         }
     }
     failures
 }
 
+fn required_process_status_condition(
+    name: &str,
+    descriptor: &ProcessDescriptor,
+    liveness: &Value,
+    run_id: Option<&str>,
+) -> Option<Value> {
+    if !descriptor.required || descriptor.expected_exit {
+        return None;
+    }
+    let status = liveness.get("status").and_then(Value::as_str)?;
+    let error_code = required_process_status_error_code(name, status)?;
+    let selected_run_id = run_id.unwrap_or("<run-id>");
+    Some(json!({
+        "error_code": error_code,
+        "category": "required_process_failure",
+        "process": name,
+        "required": descriptor.required,
+        "expected_exit": descriptor.expected_exit,
+        "status": status,
+        "message": required_process_status_message(name, error_code),
+        "recommended_next_action": "session_stop",
+        "recommended_command": format!(
+            "input-dynamics session stop --run-id {selected_run_id}"
+        ),
+        "recommended_argv": [
+            "input-dynamics",
+            "session",
+            "stop",
+            "--run-id",
+            selected_run_id,
+        ],
+    }))
+}
+
+fn required_process_status_error_code(name: &str, status: &str) -> Option<SessionErrorCode> {
+    if name == SCREENRECORD_PROCESS {
+        return screenrecord_ended_early_status(status)
+            .then_some(SessionErrorCode::VideoEndedEarly);
+    }
+    if required_process_ended_early_status(status) {
+        return Some(SessionErrorCode::RequiredProcessEndedEarly);
+    }
+    required_process_unverifiable_status(status)
+        .then_some(SessionErrorCode::RequiredProcessUnverifiable)
+}
+
+fn required_process_status_message(name: &str, error_code: SessionErrorCode) -> String {
+    match error_code {
+        SessionErrorCode::VideoEndedEarly => {
+            String::from("screenrecord ended before session stop was requested")
+        }
+        SessionErrorCode::RequiredProcessEndedEarly => {
+            format!("required {name} process ended before session stop was requested")
+        }
+        SessionErrorCode::RequiredProcessUnverifiable => {
+            format!("required {name} process health could not be verified")
+        }
+        SessionErrorCode::RequiredProcessStopFailed => {
+            format!("required {name} process stop did not complete cleanly")
+        }
+        SessionErrorCode::ActiveSessionExists
+        | SessionErrorCode::SelectorMismatch
+        | SessionErrorCode::StateCorrupt
+        | SessionErrorCode::UnsupportedSchema
+        | SessionErrorCode::StaleLock
+        | SessionErrorCode::IoError
+        | SessionErrorCode::RepairRequired
+        | SessionErrorCode::FinalizationInProgress
+        | SessionErrorCode::ControllerNotEnabled
+        | SessionErrorCode::NoActiveSession
+        | SessionErrorCode::SequenceMismatch => format!("required {name} process failed"),
+    }
+}
+
 fn screenrecord_ended_early_status(status: &str) -> bool {
     matches!(status, "exited" | "missing")
+}
+
+fn required_process_ended_early_status(status: &str) -> bool {
+    matches!(status, "exited" | "missing")
+}
+
+fn required_process_unverifiable_status(status: &str) -> bool {
+    matches!(
+        status,
+        "invalid_descriptor" | "identity_mismatch" | "probe_failed" | "unsupported_platform"
+    )
 }
 
 fn stop_session_with_effects(
@@ -1013,6 +1098,7 @@ fn stop_process_step(
     outcomes: &mut BTreeMap<String, Value>,
     process_name: &str,
 ) {
+    let descriptor = active.state.processes.get(process_name).cloned();
     let timing_before = (process_name == SCREENRECORD_PROCESS
         && active.state.processes.contains_key(SCREENRECORD_PROCESS))
     .then(|| effects.capture_clock_probe("before_screenrecord_stop"));
@@ -1020,6 +1106,12 @@ fn stop_process_step(
     let mut stop_value = result_value(&stop);
     if process_name == SCREENRECORD_PROCESS {
         annotate_screenrecord_stop_result(&mut stop_value);
+    } else {
+        annotate_required_process_stop_result_if_present(
+            process_name,
+            descriptor.as_ref(),
+            &mut stop_value,
+        );
     }
     if process_name == SCREENRECORD_PROCESS
         && active.state.processes.contains_key(SCREENRECORD_PROCESS)
@@ -1042,6 +1134,59 @@ fn stop_process_step(
         &stop_value,
     );
     outcomes.insert(String::from(stop_step_name(process_name)), stop_value);
+}
+
+fn annotate_required_process_stop_result_if_present(
+    process_name: &str,
+    descriptor: Option<&ProcessDescriptor>,
+    value: &mut Value,
+) {
+    let Some(process_descriptor) = descriptor else {
+        return;
+    };
+    annotate_required_process_stop_result(process_name, process_descriptor, value);
+}
+
+fn annotate_required_process_stop_result(
+    process_name: &str,
+    descriptor: &ProcessDescriptor,
+    value: &mut Value,
+) {
+    if value.get("ok").and_then(Value::as_bool) != Some(false)
+        || !descriptor.required
+        || descriptor.expected_exit
+    {
+        return;
+    }
+    let initial_status = value
+        .pointer("/initial_liveness/status")
+        .and_then(Value::as_str)
+        .map(String::from);
+    let final_status = value
+        .pointer("/final_liveness/status")
+        .and_then(Value::as_str)
+        .map(String::from);
+    let error_code = match initial_status.as_deref() {
+        Some(status) if required_process_ended_early_status(status) => {
+            SessionErrorCode::RequiredProcessEndedEarly
+        }
+        Some(status) if required_process_unverifiable_status(status) => {
+            SessionErrorCode::RequiredProcessUnverifiable
+        }
+        _ => SessionErrorCode::RequiredProcessStopFailed,
+    };
+    set_json_object_field(value, "error_code", json!(error_code));
+    set_json_object_field(value, "category", json!("required_process_failure"));
+    set_json_object_field(value, "process", json!(process_name));
+    set_json_object_field(value, "required", json!(descriptor.required));
+    set_json_object_field(value, "expected_exit", json!(descriptor.expected_exit));
+    set_json_object_field(value, "initial_status", json!(initial_status));
+    set_json_object_field(value, "final_status", json!(final_status));
+    set_json_object_field(
+        value,
+        "message",
+        json!(required_process_status_message(process_name, error_code)),
+    );
 }
 
 fn annotate_screenrecord_stop_result(value: &mut Value) {
@@ -3276,6 +3421,133 @@ mod tests {
     }
 
     #[test]
+    fn status_reports_getevent_ended_early_without_mutation() {
+        let root = unique_temp_dir("session-lifecycle-status-getevent-ended");
+        let mut effects = FakeEffects::new("serial-status-getevent-ended");
+        start_fake_session(&root, &mut effects, "run-status-getevent-ended");
+        let Some(before_state) = assert_ok(
+            read_state(&root.join("session").join("state.json")),
+            "read state before getevent status",
+        ) else {
+            return;
+        };
+        effects.set_getevent_probe_status(ProcessLivenessStatus::Exited);
+
+        let Some(status) = assert_ok(
+            session_status_with_effects(
+                &effects,
+                &SessionStatusRequest {
+                    run_id: Some(String::from("run-status-getevent-ended")),
+                },
+            ),
+            "status after getevent exit",
+        ) else {
+            return;
+        };
+
+        assert_required_process_status_condition(
+            &status,
+            GETEVENT_PROCESS,
+            "exited",
+            "required_process_ended_early",
+            "run-status-getevent-ended",
+        );
+        assert_eq!(
+            status.get("ok").and_then(Value::as_bool),
+            Some(true),
+            "status ok remains a runtime-read and identity result"
+        );
+        assert_eq!(
+            status.get("capture_health_ok").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            status
+                .get("has_failure_conditions")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        let Some(after_state) = assert_ok(
+            read_state(&root.join("session").join("state.json")),
+            "read state after getevent status",
+        ) else {
+            return;
+        };
+        assert_eq!(
+            before_state, after_state,
+            "status must report getevent exit without mutating state"
+        );
+        let runtime = runtime_paths(effects.package_name(), &effects.serial);
+        cleanup_paths(&root, &runtime);
+    }
+
+    #[test]
+    fn status_reports_missing_getevent_as_ended_early() {
+        let root = unique_temp_dir("session-lifecycle-status-getevent-missing");
+        let mut effects = FakeEffects::new("serial-status-getevent-missing");
+        start_fake_session(&root, &mut effects, "run-status-getevent-missing");
+        effects.set_getevent_probe_status(ProcessLivenessStatus::Missing);
+
+        let Some(status) = assert_ok(
+            session_status_with_effects(
+                &effects,
+                &SessionStatusRequest {
+                    run_id: Some(String::from("run-status-getevent-missing")),
+                },
+            ),
+            "status after missing getevent",
+        ) else {
+            return;
+        };
+
+        assert_required_process_status_condition(
+            &status,
+            GETEVENT_PROCESS,
+            "missing",
+            "required_process_ended_early",
+            "run-status-getevent-missing",
+        );
+        let runtime = runtime_paths(effects.package_name(), &effects.serial);
+        cleanup_paths(&root, &runtime);
+    }
+
+    #[test]
+    fn status_reports_getevent_probe_failure_as_unverifiable() {
+        let root = unique_temp_dir("session-lifecycle-status-getevent-probe-failed");
+        let mut effects = FakeEffects::new("serial-status-getevent-probe-failed");
+        start_fake_session(&root, &mut effects, "run-status-getevent-probe-failed");
+        effects.set_getevent_probe_status(ProcessLivenessStatus::ProbeFailed);
+
+        let Some(status) = assert_ok(
+            session_status_with_effects(
+                &effects,
+                &SessionStatusRequest {
+                    run_id: Some(String::from("run-status-getevent-probe-failed")),
+                },
+            ),
+            "status after getevent probe failure",
+        ) else {
+            return;
+        };
+
+        assert_required_process_status_condition(
+            &status,
+            GETEVENT_PROCESS,
+            "probe_failed",
+            "required_process_unverifiable",
+            "run-status-getevent-probe-failed",
+        );
+        assert_ne!(
+            status
+                .pointer("/failure_conditions/0/error_code")
+                .and_then(Value::as_str),
+            Some("video_ended_early")
+        );
+        let runtime = runtime_paths(effects.package_name(), &effects.serial);
+        cleanup_paths(&root, &runtime);
+    }
+
+    #[test]
     fn status_does_not_label_probe_failure_as_video_ended_early() {
         let root = unique_temp_dir("session-lifecycle-status-video-probe-failed");
         let mut effects = FakeEffects::new("serial-status-video-probe-failed");
@@ -3628,6 +3900,123 @@ mod tests {
     }
 
     #[test]
+    fn stop_reports_getevent_ended_early() {
+        let root = unique_temp_dir("session-lifecycle-getevent-ended");
+        let mut effects = FakeEffects::new("serial-getevent-ended");
+        start_fake_session(&root, &mut effects, "run-getevent-ended");
+        effects.set_getevent_probe_status(ProcessLivenessStatus::Exited);
+
+        let Some(stop) = assert_ok(
+            stop_session_with_effects(
+                &mut effects,
+                &SessionStopRequest {
+                    run_id: Some(String::from("run-getevent-ended")),
+                },
+            ),
+            "fake early getevent stop",
+        ) else {
+            return;
+        };
+
+        assert_required_process_stop_result(
+            &stop,
+            "required_process_ended_early",
+            "/outcomes/stop_getevent",
+        );
+        let Some(inspection) = assert_ok(
+            crate::recording::inspect_recording(&root),
+            "inspect early getevent stop",
+        ) else {
+            return;
+        };
+        assert_required_process_inspection(
+            &inspection,
+            "required_process_ended_early",
+            "required_process_ended_early",
+        );
+        let runtime = runtime_paths(effects.package_name(), &effects.serial);
+        cleanup_paths(&root, &runtime);
+    }
+
+    #[test]
+    fn stop_reports_getevent_probe_failure_as_unverifiable() {
+        let root = unique_temp_dir("session-lifecycle-getevent-probe-failed");
+        let mut effects = FakeEffects::new("serial-getevent-probe-failed");
+        start_fake_session(&root, &mut effects, "run-getevent-probe-failed");
+        effects.set_getevent_probe_status(ProcessLivenessStatus::ProbeFailed);
+
+        let Some(stop) = assert_ok(
+            stop_session_with_effects(
+                &mut effects,
+                &SessionStopRequest {
+                    run_id: Some(String::from("run-getevent-probe-failed")),
+                },
+            ),
+            "fake getevent probe-failed stop",
+        ) else {
+            return;
+        };
+
+        assert_required_process_stop_result(
+            &stop,
+            "required_process_unverifiable",
+            "/outcomes/stop_getevent",
+        );
+        let Some(inspection) = assert_ok(
+            crate::recording::inspect_recording(&root),
+            "inspect getevent probe-failed stop",
+        ) else {
+            return;
+        };
+        assert_required_process_inspection(
+            &inspection,
+            "required_process_unverifiable",
+            "required_process_unverifiable",
+        );
+        let runtime = runtime_paths(effects.package_name(), &effects.serial);
+        cleanup_paths(&root, &runtime);
+    }
+
+    #[test]
+    fn stop_reports_getevent_stop_failure() {
+        let root = unique_temp_dir("session-lifecycle-getevent-stop-failed");
+        let mut effects = FakeEffects::new("serial-getevent-stop-failed");
+        start_fake_session(&root, &mut effects, "run-getevent-stop-failed");
+        effects.set_getevent_stop_failure();
+
+        let Some(stop) = assert_ok(
+            stop_session_with_effects(
+                &mut effects,
+                &SessionStopRequest {
+                    run_id: Some(String::from("run-getevent-stop-failed")),
+                },
+            ),
+            "fake getevent stop failure",
+        ) else {
+            return;
+        };
+
+        assert_required_process_stop_result(
+            &stop,
+            "required_process_stop_failed",
+            "/outcomes/stop_getevent",
+        );
+        let Some(inspection) = assert_ok(
+            crate::recording::inspect_recording(&root),
+            "inspect getevent stop failure",
+        ) else {
+            return;
+        };
+        assert_required_process_inspection(
+            &inspection,
+            "required_process_stop_failed",
+            "required_process_stop_failed",
+        );
+        let runtime = runtime_paths(effects.package_name(), &effects.serial);
+        cleanup_paths(&root, &runtime);
+    }
+
+    #[test]
     fn stop_does_not_label_probe_failure_as_video_ended_early() {
         let root = unique_temp_dir("session-lifecycle-video-probe-failed");
         let mut effects = FakeEffects::new("serial-video-probe-failed");
@@ -3667,6 +4056,18 @@ mod tests {
         cleanup_paths(&root, &runtime);
     }
 
+    fn start_fake_session(root: &Path, effects: &mut FakeEffects, run_id: &str) {
+        let request = HumanSessionStart {
+            run_id: String::from(run_id),
+            out: root.to_path_buf(),
+            with_evidence: false,
+            full_accessibility_evidence: false,
+            video_enabled: false,
+        };
+        let start = start_human_session_with_effects(effects, &request);
+        assert!(start.is_ok(), "fake start failed: {start:?}");
+    }
+
     fn start_fake_video_session(root: &Path, effects: &mut FakeEffects, run_id: &str) {
         let request = HumanSessionStart {
             run_id: String::from(run_id),
@@ -3677,6 +4078,55 @@ mod tests {
         };
         let start = start_human_session_with_effects(effects, &request);
         assert!(start.is_ok(), "fake video start failed: {start:?}");
+    }
+
+    fn assert_required_process_status_condition(
+        status: &Value,
+        process_name: &str,
+        state: &str,
+        error_code: &str,
+        run_id: &str,
+    ) {
+        assert_eq!(
+            status
+                .pointer(&format!("/process_liveness/{process_name}/status"))
+                .and_then(Value::as_str),
+            Some(state)
+        );
+        assert_eq!(
+            status
+                .pointer("/failure_conditions/0/process")
+                .and_then(Value::as_str),
+            Some(process_name)
+        );
+        assert_eq!(
+            status
+                .pointer("/failure_conditions/0/status")
+                .and_then(Value::as_str),
+            Some(state)
+        );
+        assert_eq!(
+            status
+                .pointer("/failure_conditions/0/error_code")
+                .and_then(Value::as_str),
+            Some(error_code)
+        );
+        assert_eq!(
+            status
+                .pointer("/failure_conditions/0/category")
+                .and_then(Value::as_str),
+            Some("required_process_failure")
+        );
+        assert_eq!(
+            status
+                .pointer("/failure_conditions/0/recommended_next_action")
+                .and_then(Value::as_str),
+            Some("session_stop")
+        );
+        assert_eq!(
+            status.pointer("/failure_conditions/0/recommended_argv/4"),
+            Some(&json!(run_id))
+        );
     }
 
     fn assert_video_ended_early_status_condition(status: &Value, state: &str, run_id: &str) {
@@ -3735,6 +4185,42 @@ mod tests {
         );
     }
 
+    fn assert_required_process_stop_result(stop: &Value, error_code: &str, outcome_path: &str) {
+        assert_eq!(
+            stop.get("ok").and_then(Value::as_bool),
+            Some(false),
+            "required process failure should make the run incomplete"
+        );
+        assert_eq!(
+            stop.get("lifecycle_state").and_then(Value::as_str),
+            Some("incomplete")
+        );
+        assert_eq!(
+            stop.pointer(&format!("{outcome_path}/category"))
+                .and_then(Value::as_str),
+            Some("required_process_failure")
+        );
+        assert_eq!(
+            stop.pointer(&format!("{outcome_path}/process"))
+                .and_then(Value::as_str),
+            Some(GETEVENT_PROCESS)
+        );
+        assert_eq!(
+            stop.pointer(&format!("{outcome_path}/error_code"))
+                .and_then(Value::as_str),
+            Some(error_code)
+        );
+        assert_eq!(
+            stop.pointer("/finalization/run_state")
+                .and_then(Value::as_str),
+            Some("incomplete")
+        );
+        assert!(
+            finalization_has_step_error(stop, "stop_getevent", error_code),
+            "finalization step should carry stable required-process code: {stop}"
+        );
+    }
+
     fn assert_video_ended_early_inspection(inspection: &Value) {
         assert_eq!(
             inspection
@@ -3763,6 +4249,50 @@ mod tests {
         assert!(
             next_actions_has_kind(inspection, "session_rerun"),
             "early video inspection should expose a canonical rerun action: {inspection}"
+        );
+    }
+
+    fn assert_required_process_inspection(inspection: &Value, error_code: &str, flag_code: &str) {
+        assert_eq!(
+            inspection
+                .pointer("/session/classification")
+                .and_then(Value::as_str),
+            Some("incomplete")
+        );
+        assert_eq!(
+            inspection
+                .pointer("/session/finalization/summary/failed_step_error_codes/stop_getevent")
+                .and_then(Value::as_str),
+            Some(error_code)
+        );
+        assert_eq!(
+            inspection
+                .pointer("/flags/required_process_failed")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            inspection
+                .pointer("/flags/video_ended_early")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            inspection
+                .pointer("/flags/needs_session_rerun")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(
+            inspection
+                .pointer("/flags/required_process_failure_codes")
+                .and_then(Value::as_array)
+                .is_some_and(|codes| codes.iter().any(|code| code.as_str() == Some(flag_code))),
+            "inspection should expose required-process failure code {flag_code}: {inspection}"
+        );
+        assert!(
+            next_actions_has_kind(inspection, "session_rerun"),
+            "required process failure should expose a canonical rerun action: {inspection}"
         );
     }
 
@@ -4100,6 +4630,8 @@ mod tests {
         serial: String,
         next_pid: Cell<u32>,
         screenrecord_probe_status: Cell<ProcessLivenessStatus>,
+        getevent_probe_status: Cell<ProcessLivenessStatus>,
+        getevent_stop_failure: Cell<bool>,
     }
 
     impl FakeEffects {
@@ -4111,11 +4643,21 @@ mod tests {
                 serial: format!("{serial_suffix}-{}-{id}", process::id()),
                 next_pid: Cell::new(10_000_u32),
                 screenrecord_probe_status: Cell::new(ProcessLivenessStatus::Running),
+                getevent_probe_status: Cell::new(ProcessLivenessStatus::Running),
+                getevent_stop_failure: Cell::new(false),
             }
         }
 
         fn set_screenrecord_probe_status(&self, status: ProcessLivenessStatus) {
             self.screenrecord_probe_status.set(status);
+        }
+
+        fn set_getevent_probe_status(&self, status: ProcessLivenessStatus) {
+            self.getevent_probe_status.set(status);
+        }
+
+        fn set_getevent_stop_failure(&self) {
+            self.getevent_stop_failure.set(true);
         }
     }
 
@@ -4284,6 +4826,8 @@ mod tests {
         fn probe_process(&self, descriptor: &ProcessDescriptor) -> ProcessLiveness {
             let status = if descriptor.name == SCREENRECORD_PROCESS {
                 self.screenrecord_probe_status.get()
+            } else if descriptor.name == GETEVENT_PROCESS {
+                self.getevent_probe_status.get()
             } else {
                 ProcessLivenessStatus::Running
             };
@@ -4300,6 +4844,24 @@ mod tests {
 
         fn stop_process(&mut self, descriptor: &ProcessDescriptor) -> StopOutcome {
             let initial = self.probe_process(descriptor);
+            if descriptor.name == GETEVENT_PROCESS && self.getevent_stop_failure.get() {
+                return StopOutcome {
+                    ok: false,
+                    method: descriptor
+                        .stop_method
+                        .as_deref()
+                        .and_then(|method| method.parse::<StopMethod>().ok()),
+                    final_liveness: initial.clone(),
+                    initial_liveness: initial,
+                    attempts: vec![SignalAttempt {
+                        signal: HostSignal::Terminate,
+                        target_process_group_id: descriptor.host_process_group_id.unwrap_or(1_u32),
+                        ok: false,
+                        detail: json!({"ok": false, "message": "forced getevent stop failure"}),
+                    }],
+                    recommended_state: ProcessState::Failed,
+                };
+            }
             if initial.status != ProcessLivenessStatus::Running {
                 return StopOutcome {
                     ok: false,

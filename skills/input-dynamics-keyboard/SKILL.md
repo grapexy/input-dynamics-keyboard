@@ -134,9 +134,10 @@ idk session stop --run-id "$RUN_ID"
 idk recording inspect --dir "runs/$RUN_ID"
 ```
 
-If `session status` reports `failure_conditions` such as
-`error_code: video_ended_early`, still stop the matching run id and inspect the
-recording directory. Prefer `recommended_argv` when present. Do not analyze an
+If `session status` reports any `failure_conditions`, still stop the matching
+run id and inspect the recording directory. Prefer `recommended_argv` when
+present. `video_ended_early` is only one example; required non-video capture
+process failures use generic `required_process_*` codes. Do not analyze an
 incomplete run as complete.
 
 For start/end screen context, add `--with-evidence` to `session start`. Unless
@@ -237,15 +238,16 @@ Use `flags.valid_for_analysis`, `flags.needs_validation`,
 `flags.session_classification`, `flags.lifecycle_complete`,
 `flags.lifecycle_incomplete`, `flags.lifecycle_active`,
 `flags.lifecycle_in_progress`, `flags.needs_session_stop`, and
-`flags.needs_session_repair`, `flags.video_ended_early`, and
+`flags.needs_session_repair`, `flags.video_ended_early`,
+`flags.required_process_failed`, `flags.required_process_failure_codes`, and
 `flags.needs_session_rerun` to decide the next step. Branch on
 `session_classification` first: `complete` may continue to artifact/timing gates;
 `active` follows `session_stop`; `in_progress` follows `session_status` and then
 inspects again; `incomplete`, `aborted`, and `repair_required` are not complete
 recordings and must not be derived or analyzed as if they were complete.
-If `video_ended_early` is true, preserve the failed run for diagnostics and run
-a new capture through `session start`, `session status`, `session stop`, and
-`recording inspect`.
+If `video_ended_early` or `required_process_failed` is true, preserve the failed
+run for diagnostics and run a new capture through `session start`,
+`session status`, `session stop`, and `recording inspect`.
 Required missing or stale video makes `valid_for_analysis` false. The `clock`
 object classifies saved video/evidence anchors as `bracketed`,
 `legacy_wall_clock_bracketed`, `missing_source`, `stale_inputs`,

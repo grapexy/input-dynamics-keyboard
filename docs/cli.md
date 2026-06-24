@@ -254,10 +254,11 @@ scraping human-oriented text.
   capture using the same session lifecycle and finalization path.
   `--duration-ms` must be positive.
 - `session status [--run-id <id>]`: reads the active umbrella session runtime
-  and process liveness without mutating state. If an owned capture process has
-  ended early, `failure_conditions` reports a stable `error_code`,
-  `recommended_next_action`, and `recommended_argv`; stop/finalize the matching
-  run id before analysis.
+  and process liveness without mutating state. If screen recording ended early,
+  or a required non-video capture process ended early or cannot be verified,
+  `capture_health_ok` is false and `failure_conditions` reports a stable
+  `error_code`, process, observed status, `recommended_next_action`, and
+  `recommended_argv`; stop/finalize the matching run id before analysis.
 - `session stop --run-id <id>`: finalizes the active umbrella session, stops
   capture processes, pulls IME logs, writes validation, and clears runtime
   ownership. Omitting `--run-id` is non-mutating and returns the active run id.
@@ -509,7 +510,10 @@ flags such as `valid_for_analysis`, `has_video`, `needs_video`,
 `needs_video_frame_index`, `has_video_map`, `needs_video_map`,
 `session_classification`, `lifecycle_complete`, `lifecycle_incomplete`,
 `lifecycle_active`, `lifecycle_in_progress`, `needs_session_stop`, and
-`needs_session_repair`, `video_ended_early`, and `needs_session_rerun`.
+`needs_session_repair`, `video_ended_early`, `required_process_failed`,
+`required_process_ended_early`, `required_process_unverifiable`,
+`required_process_stop_failed`, `required_process_failure_codes`, and
+`needs_session_rerun`.
 
 For umbrella-session recordings, inspect also reports a summarized `session`
 object sourced from `session/state.json`, `session/finalization.json`, and
@@ -556,7 +560,10 @@ does not probe the device or derive new clock alignment. If
 `flags.video_ended_early` is true, the screen recording process ended before
 finalization; treat the run as incomplete, preserve it for diagnostics, and
 capture a new session through the same `session start/status/stop/inspect`
-workflow.
+workflow. If `flags.required_process_failed` is true, a required non-video
+capture process ended early, could not be verified, or did not stop cleanly;
+preserve the failed run and follow the same canonical session rerun workflow
+from `next_actions`.
 
 Treat `valid_for_analysis` as a base artifact/readability gate. For any
 video/evidence anchor claim, cross-source timeline claim, or ordering claim that
