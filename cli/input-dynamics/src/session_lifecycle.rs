@@ -107,6 +107,63 @@ pub(crate) fn stop_session(app: &App, request: &SessionStopRequest) -> CliResult
     stop_session_with_effects(&mut effects, request)
 }
 
+pub(crate) fn diagnostic_ime_mutation_guard(
+    app: &App,
+    diagnostic_command: &str,
+) -> CliResult<Option<Value>> {
+    let device_serial = app.selected_device_serial()?;
+    let runtime_paths = runtime_paths(app.package(), &device_serial);
+    let current_read = read_json_classified(&runtime_paths.current, CURRENT_SCHEMA);
+    let lock_read = read_json_classified(&runtime_paths.lock, LOCK_SCHEMA);
+    if current_read.status == ReadStatus::Missing && lock_read.status == ReadStatus::Missing {
+        return Ok(None);
+    }
+
+    let run_id = current_read
+        .value
+        .as_ref()
+        .and_then(|value| value.get("run_id"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            lock_read
+                .value
+                .as_ref()
+                .and_then(|value| value.get("run_id"))
+                .and_then(Value::as_str)
+        });
+    let suggested = run_id.map_or_else(
+        || {
+            json!({
+                "argv": ["input-dynamics", "session", "status"],
+                "reason": "inspect the active or stale umbrella session runtime before using diagnostic IME mutation",
+            })
+        },
+        |observed_run_id| {
+            json!({
+                "argv": ["input-dynamics", "session", "status", "--run-id", observed_run_id],
+                "reason": "inspect the active umbrella session before using diagnostic IME mutation",
+            })
+        },
+    );
+    Ok(Some(json!({
+        "schema": SESSION_LIFECYCLE_RESULT_SCHEMA,
+        "ok": false,
+        "command": diagnostic_command,
+        "error_code": "umbrella_session_active",
+        "message": "diagnostic IME mutation is blocked while an umbrella session runtime is active",
+        "diagnostic_only": true,
+        "mutated": false,
+        "package_name": app.package(),
+        "device_serial": device_serial,
+        "run_id": run_id,
+        "current_path": runtime_paths.current,
+        "lock_path": runtime_paths.lock,
+        "current_read": classified_json(&current_read),
+        "lock_read": classified_json(&lock_read),
+        "suggested_next_command": suggested,
+    })))
+}
+
 fn start_human_session_with_effects(
     effects: &mut dyn LifecycleEffects,
     request: &HumanSessionStart,
@@ -341,7 +398,21 @@ fn session_status_with_effects(
     let device_serial = effects.selected_device_serial()?;
     let runtime_paths = runtime_paths(effects.package_name(), &device_serial);
     let current_read = read_json_classified(&runtime_paths.current, CURRENT_SCHEMA);
+    let runtime_lock_read = read_json_classified(&runtime_paths.lock, LOCK_SCHEMA);
     let Some(current) = current_read.value.as_ref() else {
+        if current_read.status != ReadStatus::Missing
+            || runtime_lock_read.status != ReadStatus::Missing
+        {
+            return Ok(runtime_repair_required_result(&RuntimeRepairRequired {
+                command: "session status",
+                reason_code: "runtime_incomplete",
+                package_name: effects.package_name(),
+                device_serial: &device_serial,
+                runtime_paths: &runtime_paths,
+                current_read: &current_read,
+                lock_read: &runtime_lock_read,
+            }));
+        }
         return Ok(no_active_session_status(
             effects.package_name(),
             &device_serial,
@@ -350,11 +421,15 @@ fn session_status_with_effects(
         ));
     };
     if current_read.status != ReadStatus::Valid {
-        return Ok(invalid_runtime_json_result(
-            "session status",
-            "current_invalid",
-            &current_read,
-        ));
+        return Ok(runtime_repair_required_result(&RuntimeRepairRequired {
+            command: "session status",
+            reason_code: "current_invalid",
+            package_name: effects.package_name(),
+            device_serial: &device_serial,
+            runtime_paths: &runtime_paths,
+            current_read: &current_read,
+            lock_read: &runtime_lock_read,
+        }));
     }
     if let Some(selector) = request.run_id.as_deref() {
         let observed = current.get("run_id").and_then(Value::as_str);
@@ -2443,6 +2518,36 @@ fn invalid_runtime_json_result(
     })
 }
 
+struct RuntimeRepairRequired<'a> {
+    command: &'a str,
+    reason_code: &'a str,
+    package_name: &'a str,
+    device_serial: &'a str,
+    runtime_paths: &'a RuntimeSessionPaths,
+    current_read: &'a crate::session_state::io::ClassifiedJson,
+    lock_read: &'a crate::session_state::io::ClassifiedJson,
+}
+
+fn runtime_repair_required_result(input: &RuntimeRepairRequired<'_>) -> Value {
+    json!({
+        "schema": SESSION_LIFECYCLE_RESULT_SCHEMA,
+        "ok": false,
+        "command": input.command,
+        "error_code": "session_runtime_repair_required",
+        "reason_code": input.reason_code,
+        "message": "session runtime files are present but cannot be used as an active session",
+        "mutated": false,
+        "package_name": input.package_name,
+        "device_serial": input.device_serial,
+        "current_path": input.runtime_paths.current,
+        "lock_path": input.runtime_paths.lock,
+        "current_read": classified_json(input.current_read),
+        "lock_read": classified_json(input.lock_read),
+        "repair_available": false,
+        "suggested_next_command": Value::Null,
+    })
+}
+
 fn required_path(value: &Value, key: &str) -> CliResult<PathBuf> {
     value
         .get(key)
@@ -2695,6 +2800,112 @@ mod tests {
         let after = after_state.transition_seq;
         assert_eq!(before, after, "status must not mutate state");
         let runtime = runtime_paths(effects.package_name(), &effects.serial);
+        cleanup_paths(&root, &runtime);
+    }
+
+    #[test]
+    fn status_reports_lock_only_runtime_as_repair_required() {
+        let root = unique_temp_dir("session-lifecycle-lock-only");
+        let mut effects = FakeEffects::new("serial-lock-only");
+        let request = HumanSessionStart {
+            run_id: String::from("run-lock-only"),
+            out: root.clone(),
+            with_evidence: false,
+            full_accessibility_evidence: false,
+            video_enabled: false,
+        };
+        let Some(_start) = assert_ok(
+            start_human_session_with_effects(&mut effects, &request),
+            "fake start",
+        ) else {
+            return;
+        };
+        let runtime = runtime_paths(effects.package_name(), &effects.serial);
+        let remove_current = fs::remove_file(&runtime.current);
+        assert!(
+            remove_current.is_ok(),
+            "test setup should remove runtime current: {remove_current:?}"
+        );
+
+        let Some(status) = assert_ok(
+            session_status_with_effects(&effects, &SessionStatusRequest { run_id: None }),
+            "status lock-only",
+        ) else {
+            return;
+        };
+
+        assert_eq!(status.get("ok").and_then(Value::as_bool), Some(false));
+        assert_eq!(
+            status.get("error_code").and_then(Value::as_str),
+            Some("session_runtime_repair_required")
+        );
+        assert_eq!(
+            status.get("reason_code").and_then(Value::as_str),
+            Some("runtime_incomplete")
+        );
+        assert_eq!(
+            status
+                .pointer("/current_read/status")
+                .and_then(Value::as_str),
+            Some("missing")
+        );
+        assert_eq!(
+            status.pointer("/lock_read/status").and_then(Value::as_str),
+            Some("valid")
+        );
+        cleanup_paths(&root, &runtime);
+    }
+
+    #[test]
+    fn status_reports_corrupt_current_as_repair_required() {
+        let root = unique_temp_dir("session-lifecycle-corrupt-current");
+        let mut effects = FakeEffects::new("serial-corrupt-current");
+        let request = HumanSessionStart {
+            run_id: String::from("run-corrupt-current"),
+            out: root.clone(),
+            with_evidence: false,
+            full_accessibility_evidence: false,
+            video_enabled: false,
+        };
+        let Some(_start) = assert_ok(
+            start_human_session_with_effects(&mut effects, &request),
+            "fake start",
+        ) else {
+            return;
+        };
+        let runtime = runtime_paths(effects.package_name(), &effects.serial);
+        let corrupt_current = fs::write(&runtime.current, "{");
+        assert!(
+            corrupt_current.is_ok(),
+            "test setup should corrupt runtime current: {corrupt_current:?}"
+        );
+
+        let Some(status) = assert_ok(
+            session_status_with_effects(&effects, &SessionStatusRequest { run_id: None }),
+            "status corrupt-current",
+        ) else {
+            return;
+        };
+
+        assert_eq!(status.get("ok").and_then(Value::as_bool), Some(false));
+        assert_eq!(
+            status.get("error_code").and_then(Value::as_str),
+            Some("session_runtime_repair_required")
+        );
+        assert_eq!(
+            status.get("reason_code").and_then(Value::as_str),
+            Some("runtime_incomplete")
+        );
+        assert_eq!(
+            status
+                .pointer("/current_read/status")
+                .and_then(Value::as_str),
+            Some("corrupt")
+        );
+        assert_eq!(
+            status.pointer("/lock_read/status").and_then(Value::as_str),
+            Some("valid")
+        );
         cleanup_paths(&root, &runtime);
     }
 

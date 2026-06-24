@@ -18,7 +18,8 @@ use serde_json::{Value, json};
 use crate::app::{App, LOG_DIR};
 use crate::args::{
     Commands, ControllerCommand, DeriveCommand, EdgeSide, GeteventCommand, HideKeyboardMethod,
-    KeyboardCommand, ObserveCommand, PressKey, RecordingCommand, SessionCommand, TouchCommand,
+    ImeCommand, KeyboardCommand, ObserveCommand, PressKey, RecordingCommand, SessionCommand,
+    TouchCommand,
 };
 use crate::controller::{self, RunConfig, SessionStartPermit};
 use crate::coordinate_frame::screen_config_from_run_manifest;
@@ -34,8 +35,8 @@ use crate::ratio::{RatioPpm, SignedRatioPpm};
 use crate::record::{RecordConfig, VideoMode, record_run};
 use crate::recording::inspect_recording;
 use crate::session_lifecycle::{
-    HumanSessionStart, SessionStatusRequest, SessionStopRequest, session_status,
-    start_human_session, stop_session,
+    HumanSessionStart, SessionStatusRequest, SessionStopRequest, diagnostic_ime_mutation_guard,
+    session_status, start_human_session, stop_session,
 };
 use crate::session_state::schema::{COMMAND_RESULT_SCHEMA, INPUT_CONTROLLER_CLI};
 use crate::uinput::{self, PathSpec, TapSpec, TouchPoint};
@@ -68,25 +69,34 @@ pub(crate) fn run_command(app: &App, cli_command: Commands) -> CliResult<Value> 
         Commands::Doctor => doctor(app),
         Commands::Install { apk, repo, dir } => install(app, apk.as_deref(), &repo, &dir),
         Commands::SelectIme => select_ime(app),
-        Commands::EnableLogging => app.broadcast("ENABLE", Vec::new()),
-        Commands::DisableLogging => app.broadcast("DISABLE", Vec::new()),
+        Commands::EnableLogging => run_diagnostic_ime_mutation(app, "enable-logging", || {
+            app.broadcast("ENABLE", Vec::new())
+        }),
+        Commands::DisableLogging => run_diagnostic_ime_mutation(app, "disable-logging", || {
+            app.broadcast("DISABLE", Vec::new())
+        }),
         Commands::Start {
             run_id,
             input_actor,
             input_controller,
             input_cadence_policy,
-        } => start(
-            app,
-            &LoggingStartConfig {
-                run_id: &run_id,
-                input_actor: &input_actor,
-                input_controller: input_controller.as_deref(),
-                input_cadence_policy: &input_cadence_policy,
-                input_profile: None,
-            },
-        ),
-        Commands::Stop => app.broadcast("STOP", Vec::new()),
+        } => run_diagnostic_ime_mutation(app, "start", || {
+            start(
+                app,
+                &LoggingStartConfig {
+                    run_id: &run_id,
+                    input_actor: &input_actor,
+                    input_controller: input_controller.as_deref(),
+                    input_cadence_policy: &input_cadence_policy,
+                    input_profile: None,
+                },
+            )
+        }),
+        Commands::Stop => {
+            run_diagnostic_ime_mutation(app, "stop", || app.broadcast("STOP", Vec::new()))
+        }
         Commands::Status => app.broadcast("STATUS", Vec::new()),
+        Commands::Ime { command } => ime_command(app, command),
         Commands::Layout {
             wait_visible,
             wait_hidden,
@@ -105,13 +115,17 @@ pub(crate) fn run_command(app: &App, cli_command: Commands) -> CliResult<Value> 
             hide_keyboard_command(app, hide_command)
         }
         Commands::ListLogs => app.broadcast("LIST_LOGS", Vec::new()),
-        Commands::ClearLogs => app.broadcast("CLEAR_LOGS", Vec::new()),
+        Commands::ClearLogs => run_diagnostic_ime_mutation(app, "clear-logs", || {
+            app.broadcast("CLEAR_LOGS", Vec::new())
+        }),
         Commands::Pull { out } => pull_logs(app, &out),
         Commands::Validate { path, run_id } => validate_logs(&path, run_id.as_deref()),
         Commands::Getevent { command } => getevent(command),
         Commands::Derive { command } => derive(command),
         Commands::Recording { command } => recording(command),
-        ref record_command @ Commands::Record { .. } => run_record_command(app, record_command),
+        ref record_command @ Commands::Record { .. } => {
+            run_diagnostic_ime_mutation(app, "record", || run_record_command(app, record_command))
+        }
         Commands::Session {
             command: session_command,
         } => Ok(session(app, session_command)),
@@ -131,6 +145,55 @@ pub(crate) fn run_command(app: &App, cli_command: Commands) -> CliResult<Value> 
             command: controller_command,
         } => run_controller_command(app, controller_command),
     }
+}
+
+fn ime_command(app: &App, command: ImeCommand) -> CliResult<Value> {
+    match command {
+        ImeCommand::EnableLogging => run_diagnostic_ime_mutation(app, "ime enable-logging", || {
+            app.broadcast("ENABLE", Vec::new())
+        }),
+        ImeCommand::DisableLogging => {
+            run_diagnostic_ime_mutation(app, "ime disable-logging", || {
+                app.broadcast("DISABLE", Vec::new())
+            })
+        }
+        ImeCommand::Start {
+            run_id,
+            input_actor,
+            input_controller,
+            input_cadence_policy,
+        } => run_diagnostic_ime_mutation(app, "ime start", || {
+            start(
+                app,
+                &LoggingStartConfig {
+                    run_id: &run_id,
+                    input_actor: &input_actor,
+                    input_controller: input_controller.as_deref(),
+                    input_cadence_policy: &input_cadence_policy,
+                    input_profile: None,
+                },
+            )
+        }),
+        ImeCommand::Stop => {
+            run_diagnostic_ime_mutation(app, "ime stop", || app.broadcast("STOP", Vec::new()))
+        }
+        ImeCommand::Status => app.broadcast("STATUS", Vec::new()),
+        ImeCommand::ListLogs => app.broadcast("LIST_LOGS", Vec::new()),
+        ImeCommand::ClearLogs => run_diagnostic_ime_mutation(app, "ime clear-logs", || {
+            app.broadcast("CLEAR_LOGS", Vec::new())
+        }),
+        ImeCommand::Pull { out } => pull_logs(app, &out),
+    }
+}
+
+fn run_diagnostic_ime_mutation<F>(app: &App, command_name: &str, action: F) -> CliResult<Value>
+where
+    F: FnOnce() -> CliResult<Value>,
+{
+    if let Some(result) = diagnostic_ime_mutation_guard(app, command_name)? {
+        return Ok(result);
+    }
+    action()
 }
 
 fn recording(command: RecordingCommand) -> CliResult<Value> {
@@ -723,10 +786,6 @@ struct SessionWorkflowUnavailableInput<'a> {
     input_profile_seed: Option<u64>,
 }
 
-fn input_actor_is_umbrella(input_actor: Option<&str>) -> bool {
-    matches!(input_actor, Some("human" | "agent"))
-}
-
 fn rejected_session_start_flags(inputs: &RejectedSessionFlagInputs<'_>) -> Vec<String> {
     let mut rejected = Vec::new();
     if inputs.mode.is_some() {
@@ -748,18 +807,19 @@ fn rejected_session_start_flags(inputs: &RejectedSessionFlagInputs<'_>) -> Vec<S
 }
 
 fn session_start_out_required(run_id: &str, actor: Option<&str>) -> Value {
+    let suggested_actor = actor.filter(|value| matches!(*value, "human" | "agent"));
     let details = json!({
         "run_id": run_id,
         "input_actor": actor,
         "suggested_next_command": {
-            "argv": ["input-dynamics", "session", "start", "--input-actor", actor.unwrap_or("<human|agent>"), "--run-id", run_id, "--out", "<run-dir>"],
-            "reason": "--out selects reserved session start handling and prevents routing an intended human/agent run to diagnostic controller start",
+            "argv": ["input-dynamics", "session", "start", "--input-actor", suggested_actor.unwrap_or("human"), "--run-id", run_id, "--out", "<run-dir>"],
+            "reason": "--out is required for the canonical complete-observation session workflow",
         },
     });
     session_command_error(
         "session start",
         "session_start_out_required",
-        "session start requires --out when --input-actor is human or agent; controller-era session start moved to controller start",
+        "session start requires --out for the complete observation session workflow",
         &details,
     )
 }
@@ -874,9 +934,10 @@ fn session_workflow_unavailable(input: &SessionWorkflowUnavailableInput<'_>) -> 
         },
         "availability": "reserved",
         "reason_code": "not_available",
-        "suggested_next_command": {
-            "argv": ["input-dynamics", "record", "--run-id", input.run_id, "--out", input.out.to_string_lossy().as_ref(), "--duration-ms", "<positive-ms>"],
-            "reason": "use record for bounded capture in this build",
+        "suggested_diagnostic_command": {
+            "argv": ["input-dynamics", "controller", "start", "--run-id", input.run_id],
+            "reason": "agent complete sessions are reserved in this build; controller start is diagnostic live input only and does not create a complete observation bundle",
+            "diagnostic_only": true,
         },
     });
     session_command_error(
@@ -1009,11 +1070,7 @@ fn session_start(app: &App, command: SessionCommand) -> Value {
 }
 
 fn session_start_without_out(config: &ControllerStartMigration) -> Value {
-    if input_actor_is_umbrella(config.input_actor.as_deref()) {
-        session_start_out_required(&config.run_id, config.input_actor.as_deref())
-    } else {
-        moved_command_value(&moved_controller_start_argv(config))
-    }
+    session_start_out_required(&config.run_id, config.input_actor.as_deref())
 }
 
 fn session_start_with_out(
@@ -1380,19 +1437,23 @@ fn run_controller_command(app: &App, command: ControllerCommand) -> CliResult<Va
             input_cadence_policy,
             input_profile,
             input_profile_seed,
-        } => controller_start_lifecycle(
-            app,
-            &SessionStartConfig {
-                run_id: &run_id,
-                input_actor: &input_actor,
-                input_controller: &input_controller,
-                input_cadence_policy: &input_cadence_policy,
-                input_profile_path: input_profile.as_deref(),
-                input_profile_seed,
-            },
-        ),
+        } => run_diagnostic_ime_mutation(app, "controller start", || {
+            controller_start_lifecycle(
+                app,
+                &SessionStartConfig {
+                    run_id: &run_id,
+                    input_actor: &input_actor,
+                    input_controller: &input_controller,
+                    input_cadence_policy: &input_cadence_policy,
+                    input_profile_path: input_profile.as_deref(),
+                    input_profile_seed,
+                },
+            )
+        }),
         ControllerCommand::Status => controller_lifecycle_status(app),
-        ControllerCommand::Stop => controller_lifecycle_stop(app),
+        ControllerCommand::Stop => {
+            run_diagnostic_ime_mutation(app, "controller stop", || controller_lifecycle_stop(app))
+        }
         ControllerCommand::Run {
             socket,
             state,
@@ -3073,7 +3134,7 @@ mod tests {
     }
 
     #[test]
-    fn old_session_start_through_session_branch_preserves_legacy_defaults() {
+    fn visible_session_start_without_out_points_to_canonical_session() {
         let result = parsed_session_result(vec![
             String::from("input-dynamics"),
             String::from("session"),
@@ -3082,26 +3143,20 @@ mod tests {
             String::from("run-test"),
         ]);
 
-        assert_command_moved(&result, "start");
+        assert_session_error(&result, "session_start_out_required");
         assert_eq!(
-            result.pointer("/moved_to/argv"),
-            Some(&json!([
-                "input-dynamics",
-                "controller",
-                "start",
-                "--run-id",
-                "run-test",
-                "--input-actor",
-                "agent_adb",
-                "--input-controller",
-                "input-dynamics-cli",
-                "--input-cadence-policy",
-                "input_profile"
-            ])),
-            "legacy no-out session start should normalize moved controller defaults"
+            result
+                .pointer("/details/suggested_next_command/argv/1")
+                .and_then(Value::as_str),
+            Some("session"),
+            "visible no-out session start should stay in the canonical session namespace"
+        );
+        assert!(
+            !result.to_string().contains("controller"),
+            "visible no-out session start must not redirect agents into diagnostic controller: {result}"
         );
 
-        let agent_adb = parsed_session_result(vec![
+        let invalid_actor = parsed_session_result(vec![
             String::from("input-dynamics"),
             String::from("session"),
             String::from("start"),
@@ -3111,17 +3166,13 @@ mod tests {
             String::from("agent_adb"),
         ]);
 
-        assert_command_moved(&agent_adb, "start");
-        assert!(
-            agent_adb
-                .pointer("/moved_to/argv")
-                .and_then(Value::as_array)
-                .is_some_and(|argv| argv.windows(2).any(|pair| pair
-                    == [
-                        Value::String(String::from("--input-actor")),
-                        Value::String(String::from("agent_adb"))
-                    ])),
-            "legacy no-out session start should preserve explicit agent_adb actor"
+        assert_session_error(&invalid_actor, "session_start_out_required");
+        assert_eq!(
+            invalid_actor
+                .pointer("/details/suggested_next_command/argv/4")
+                .and_then(Value::as_str),
+            Some("human"),
+            "invalid no-out actor should not be copied into canonical suggestion"
         );
     }
 

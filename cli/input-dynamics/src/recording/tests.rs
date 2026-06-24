@@ -282,23 +282,19 @@ fn inspect_requires_declared_video_artifacts() {
         stale_count >= 2,
         "video stale reasons should mention both screen and timing artifacts"
     );
-    let has_record_with_video_action = result
+    let has_session_with_video_action = result
         .get("next_actions")
         .and_then(Value::as_array)
         .is_some_and(|actions| {
             actions.iter().any(|action| {
-                action.get("kind").and_then(Value::as_str) == Some("record_with_video")
+                action.get("kind").and_then(Value::as_str) == Some("session_with_video")
             })
         });
     assert!(
-        has_record_with_video_action,
+        has_session_with_video_action,
         "inspect should give a canonical rerun action for missing video"
     );
-    let action_command = action_command(&result, "record_with_video");
-    assert!(
-        action_command.is_some_and(|command| command.contains("--duration-ms <positive-ms>")),
-        "video rerun action should require an explicit duration placeholder"
-    );
+    assert_session_refresh_sequence(&result, "session_with_video", EvidenceExpectation::Excluded);
     let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
 }
 
@@ -653,12 +649,10 @@ fn inspect_keeps_declared_legacy_video_readable_but_noncanonical() {
         Some("legacy_wall_clock_bracketed"),
         "legacy video timing should be classified as legacy wall-clock bracketed"
     );
-    let action_command = action_command(&result, "record_with_canonical_clocks");
-    assert!(
-        action_command.is_some_and(|command| {
-            command.contains("--duration-ms <positive-ms>") && !command.contains("--with-evidence")
-        }),
-        "video-only canonical rerun should require duration and avoid over-capturing evidence"
+    assert_session_refresh_sequence(
+        &result,
+        "session_with_canonical_clocks",
+        EvidenceExpectation::Excluded,
     );
     let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
 }
@@ -718,10 +712,10 @@ fn inspect_keeps_nested_legacy_video_readable_but_noncanonical() {
         None,
         "legacy video timing must not claim a canonical clock domain"
     );
-    let action_command = action_command(&result, "record_with_canonical_clocks");
-    assert!(
-        action_command.is_some_and(|command| command.contains("--duration-ms <positive-ms>")),
-        "nested legacy timing should request bounded canonical recollection"
+    assert_session_refresh_sequence(
+        &result,
+        "session_with_canonical_clocks",
+        EvidenceExpectation::Excluded,
     );
     let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
 }
@@ -870,13 +864,7 @@ fn inspect_preserves_evidence_capture_in_missing_video_rerun_action() {
         Some(true),
         "legacy requested evidence should be rerun with evidence"
     );
-    let action_command = action_command(&result, "record_with_video");
-    assert!(
-        action_command.is_some_and(|command| {
-            command.contains("--duration-ms <positive-ms>") && command.contains("--with-evidence")
-        }),
-        "video rerun should require duration and preserve requested evidence capture"
-    );
+    assert_session_refresh_sequence(&result, "session_with_video", EvidenceExpectation::Included);
     let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
 }
 
@@ -958,12 +946,10 @@ fn inspect_classifies_legacy_evidence_as_noncanonical() {
         Some(false),
         "legacy evidence should block canonical clock readiness when requested"
     );
-    let action_command = action_command(&result, "record_with_canonical_clocks");
-    assert!(
-        action_command.is_some_and(|command| {
-            command.contains("--duration-ms <positive-ms>") && command.contains("--with-evidence")
-        }),
-        "evidence-only canonical rerun should require duration and preserve evidence capture"
+    assert_session_refresh_sequence(
+        &result,
+        "session_with_canonical_clocks",
+        EvidenceExpectation::Included,
     );
     let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
 }
@@ -1765,6 +1751,93 @@ fn action_command<'a>(result: &'a Value, kind: &str) -> Option<&'a str> {
         .find(|action| action.get("kind").and_then(Value::as_str) == Some(kind))?
         .get("command")
         .and_then(Value::as_str)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EvidenceExpectation {
+    Included,
+    Excluded,
+}
+
+impl EvidenceExpectation {
+    const fn is_included(self) -> bool {
+        matches!(self, Self::Included)
+    }
+}
+
+fn assert_session_refresh_sequence(result: &Value, kind: &str, evidence: EvidenceExpectation) {
+    let action_candidate = result
+        .get("next_actions")
+        .and_then(Value::as_array)
+        .and_then(|actions| {
+            actions
+                .iter()
+                .find(|action| action.get("kind").and_then(Value::as_str) == Some(kind))
+        });
+    assert!(
+        action_candidate.is_some(),
+        "missing session refresh action {kind}"
+    );
+    let Some(action) = action_candidate else {
+        return;
+    };
+    assert_eq!(
+        action.get("workflow").and_then(Value::as_str),
+        Some("session_start_status_stop_inspect"),
+        "session refresh action should name the complete lifecycle"
+    );
+    assert_eq!(
+        action.get("command").and_then(Value::as_str),
+        Some(if evidence.is_included() {
+            "input-dynamics session start --input-actor human --run-id <new-run-id> --out <new-run-dir> --with-evidence"
+        } else {
+            "input-dynamics session start --input-actor human --run-id <new-run-id> --out <new-run-dir>"
+        }),
+        "compatibility command should stay the session start step"
+    );
+    let command_sequence = action.get("commands").and_then(Value::as_array);
+    assert!(
+        command_sequence.is_some(),
+        "session refresh action {kind} should include command sequence"
+    );
+    let Some(commands) = command_sequence else {
+        return;
+    };
+    let steps = commands
+        .iter()
+        .map(|command| command.get("step").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        steps,
+        vec![Some("start"), Some("status"), Some("stop"), Some("inspect")],
+        "session refresh action should include start/status/stop/inspect sequence"
+    );
+    let start_step = commands.first();
+    assert!(
+        start_step.is_some(),
+        "session refresh action {kind} is missing start"
+    );
+    let Some(start) = start_step else {
+        return;
+    };
+    assert_eq!(
+        start.get("command").and_then(Value::as_str),
+        action.get("command").and_then(Value::as_str),
+        "legacy command field should mirror sequence start step"
+    );
+    let start_argv_values = start.get("argv").and_then(Value::as_array);
+    assert!(
+        start_argv_values.is_some(),
+        "session refresh action {kind} start should include argv"
+    );
+    let Some(start_argv) = start_argv_values else {
+        return;
+    };
+    assert_eq!(
+        start_argv.iter().any(|value| value == "--with-evidence"),
+        evidence.is_included(),
+        "session refresh action should preserve evidence request in structured argv"
+    );
 }
 
 fn assert_ok<T, E>(result: Result<T, E>, label: &str) -> Option<T>

@@ -110,12 +110,15 @@ def main() -> None:
 
     if not args.no_verify:
         print("Running release verification...")
-        verify = subprocess.run(
+        for command in [
+            ["cargo", "ci-fmt"],
+            ["cargo", "ci-test"],
+            ["cargo", "ci-clippy"],
             ["./gradlew", ":app:testRunTestsUnitTest", ":app:assembleDebug"],
-            cwd=ROOT,
-        )
-        if verify.returncode != 0:
-            sys.exit(verify.returncode)
+        ]:
+            verify = subprocess.run(command, cwd=ROOT)
+            if verify.returncode != 0:
+                sys.exit(verify.returncode)
 
     run(["git", "add", str(BUILD_GRADLE.relative_to(ROOT))])
     run(["git", "commit", "-m", f"Release {tag}"])

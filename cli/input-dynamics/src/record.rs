@@ -1003,31 +1003,37 @@ fn ensure_record_stop_mode(maybe_duration_ms: Option<u64>) -> CliResult<()> {
 
 fn record_stdin_unavailable_error(reason: &str) -> CliError {
     CliError::with_details(
-        "record requires --duration-ms during the session workflow migration",
+        "record is a legacy compatibility command; use session start/status/stop for complete observation sessions",
         json!({
             "error_code": "record_stdin_unavailable",
             "reason": reason,
-            "safe_current_command": "input-dynamics record --run-id <run-id> --out <run-dir> --duration-ms <positive-ms>",
-            "current_capture_workflow": "input-dynamics record --run-id <run-id> --out <run-dir> --duration-ms <positive-ms>",
-            "future_workflow": "umbrella_session",
-            "future_only": true,
-            "migration_note": "record is a transitional foreground capture path and will be removed before release",
+            "safe_current_command": "input-dynamics session start --input-actor human --run-id <run-id> --out <run-dir>",
+            "current_capture_workflow": "input-dynamics session start --input-actor human --run-id <run-id> --out <run-dir>",
+            "canonical_workflow": "session",
+            "suggested_next_command": {
+                "argv": ["input-dynamics", "session", "start", "--input-actor", "human", "--run-id", "<run-id>", "--out", "<run-dir>"],
+                "reason": "session start is the canonical complete observation workflow",
+            },
+            "migration_note": "record is hidden from normal help and retained only as a legacy diagnostic command",
         }),
     )
 }
 
 fn record_invalid_duration_error(duration_ms: u64) -> CliError {
     CliError::with_details(
-        "record requires a positive --duration-ms value during the session workflow migration",
+        "record is a legacy compatibility command; use session start/status/stop for complete observation sessions",
         json!({
             "error_code": "record_invalid_duration",
             "reason": "duration_must_be_positive",
             "duration_ms": duration_ms,
-            "safe_current_command": "input-dynamics record --run-id <run-id> --out <run-dir> --duration-ms <positive-ms>",
-            "current_capture_workflow": "input-dynamics record --run-id <run-id> --out <run-dir> --duration-ms <positive-ms>",
-            "future_workflow": "umbrella_session",
-            "future_only": true,
-            "migration_note": "record is a transitional foreground capture path and will be removed before release",
+            "safe_current_command": "input-dynamics session start --input-actor human --run-id <run-id> --out <run-dir>",
+            "current_capture_workflow": "input-dynamics session start --input-actor human --run-id <run-id> --out <run-dir>",
+            "canonical_workflow": "session",
+            "suggested_next_command": {
+                "argv": ["input-dynamics", "session", "start", "--input-actor", "human", "--run-id", "<run-id>", "--out", "<run-dir>"],
+                "reason": "session start is the canonical complete observation workflow",
+            },
+            "migration_note": "record is hidden from normal help and retained only as a legacy diagnostic command",
         }),
     )
 }
@@ -1617,33 +1623,23 @@ mod tests {
                 .pointer("/details/current_capture_workflow")
                 .and_then(Value::as_str),
             Some(
-                "input-dynamics record --run-id <run-id> --out <run-dir> --duration-ms <positive-ms>"
+                "input-dynamics session start --input-actor human --run-id <run-id> --out <run-dir>"
             ),
-            "record errors should keep bounded record as current-safe workflow"
-        );
-        assert!(
-            error_json.pointer("/details/canonical_workflow").is_none(),
-            "record errors should not name current session workflow during Checkpoint 3"
+            "record errors should point to canonical session workflow"
         );
         assert_eq!(
             error_json
-                .pointer("/details/future_workflow")
+                .pointer("/details/canonical_workflow")
                 .and_then(Value::as_str),
-            Some("umbrella_session"),
-            "future umbrella workflow should be named without command-shaped guidance"
+            Some("session"),
+            "record errors should name the current canonical workflow"
         );
         assert_eq!(
             error_json
-                .pointer("/details/future_only")
-                .and_then(Value::as_bool),
-            Some(true),
-            "future workflow metadata should be explicitly non-current"
-        );
-        assert!(
-            error_json
-                .pointer("/details/future_canonical_workflow")
-                .is_none(),
-            "record errors should not expose future session commands as machine guidance"
+                .pointer("/details/suggested_next_command/argv/1")
+                .and_then(Value::as_str),
+            Some("session"),
+            "record errors should offer branchable session command guidance"
         );
     }
 
@@ -1747,13 +1743,17 @@ mod tests {
     }
 
     #[test]
-    fn public_docs_do_not_teach_controller_only_session_commands() {
+    fn public_docs_teach_canonical_session_workflow() {
         let documents = [
             ("README.md", include_str!("../../../README.md")),
             ("docs/cli.md", include_str!("../../../docs/cli.md")),
             (
                 "docs/input-profiles.md",
                 include_str!("../../../docs/input-profiles.md"),
+            ),
+            (
+                "docs/adb-control.md",
+                include_str!("../../../docs/adb-control.md"),
             ),
             (
                 "docs/releases.md",
@@ -1763,27 +1763,39 @@ mod tests {
                 "skills/input-dynamics-keyboard/SKILL.md",
                 include_str!("../../../skills/input-dynamics-keyboard/SKILL.md"),
             ),
+            (
+                "skills/input-dynamics-keyboard/references/adb-control.md",
+                include_str!("../../../skills/input-dynamics-keyboard/references/adb-control.md"),
+            ),
         ];
-        let forbidden_phrases = [
-            "idk session start",
-            "idk session status",
-            "idk session stop",
-            "input-dynamics session start --run-id",
-            "cargo run --quiet -p input-dynamics -- session start",
-            "cargo run --quiet -p input-dynamics -- session status",
-            "cargo run --quiet -p input-dynamics -- session stop",
-            "requires `session start`",
-            "poll `session status`",
-            "canonical live-input path",
-            "stateful session lifecycle",
-            "`session start` uses",
-        ];
+        for (name, contents) in documents {
+            assert!(
+                contents.contains("session start")
+                    && contents.contains("session status")
+                    && contents.contains("session stop"),
+                "{name} should teach canonical session start/status/stop"
+            );
+        }
 
+        let forbidden_phrases = [
+            "idk record --run-id",
+            "idk record \\",
+            "input-dynamics record --run-id",
+            "cargo run --quiet -p input-dynamics -- record --run-id",
+            "cargo run --quiet -p input-dynamics -- record \\",
+            "target/debug/input-dynamics record --run-id",
+            "bounded experiment capture during the session-workflow migration",
+            "Lower-level session commands remain available for debugging",
+            "input-dynamics -- start --run-id",
+            "idk start --run-id",
+            "idk status",
+            "idk stop",
+        ];
         for (name, contents) in documents {
             for phrase in forbidden_phrases {
                 assert!(
                     !contents.contains(phrase),
-                    "{name} should not contain stale controller-only session guidance: {phrase}"
+                    "{name} should not contain stale non-canonical capture guidance: {phrase}"
                 );
             }
         }

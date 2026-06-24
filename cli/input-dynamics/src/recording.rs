@@ -1818,25 +1818,73 @@ fn next_actions(dir: &Path, external_run_id: Option<&str>, flags: &Value) -> Cli
             "reason": "refresh validation from current IME JSONL files",
         }));
     }
-    add_record_next_action(&mut actions, flags);
+    add_session_next_action(&mut actions, flags);
     add_derivation_next_actions(&mut actions, dir, flags)?;
     Ok(Value::Array(actions))
 }
 
-fn add_record_next_action(actions: &mut Vec<Value>, flags: &Value) {
+fn add_session_next_action(actions: &mut Vec<Value>, flags: &Value) {
     if bool_at(flags, "/needs_video") || bool_at(flags, "/needs_canonical_recording") {
         let include_evidence = bool_at(flags, "/needs_canonical_evidence");
         let kind = if bool_at(flags, "/needs_video") {
-            "record_with_video"
+            "session_with_video"
         } else {
-            "record_with_canonical_clocks"
+            "session_with_canonical_clocks"
         };
-        let mut command = String::from(
-            "input-dynamics record --run-id <new-run-id> --out <new-run-dir> --duration-ms <positive-ms>",
+        let mut start_command = String::from(
+            "input-dynamics session start --input-actor human --run-id <new-run-id> --out <new-run-dir>",
         );
         if include_evidence {
-            command.push_str(" --with-evidence");
+            start_command.push_str(" --with-evidence");
         }
+        let start_argv = if include_evidence {
+            json!([
+                "input-dynamics",
+                "session",
+                "start",
+                "--input-actor",
+                "human",
+                "--run-id",
+                "<new-run-id>",
+                "--out",
+                "<new-run-dir>",
+                "--with-evidence"
+            ])
+        } else {
+            json!([
+                "input-dynamics",
+                "session",
+                "start",
+                "--input-actor",
+                "human",
+                "--run-id",
+                "<new-run-id>",
+                "--out",
+                "<new-run-dir>"
+            ])
+        };
+        let commands = json!([
+            {
+                "step": "start",
+                "command": start_command.clone(),
+                "argv": start_argv,
+            },
+            {
+                "step": "status",
+                "command": "input-dynamics session status --run-id <new-run-id>",
+                "argv": ["input-dynamics", "session", "status", "--run-id", "<new-run-id>"],
+            },
+            {
+                "step": "stop",
+                "command": "input-dynamics session stop --run-id <new-run-id>",
+                "argv": ["input-dynamics", "session", "stop", "--run-id", "<new-run-id>"],
+            },
+            {
+                "step": "inspect",
+                "command": "input-dynamics recording inspect --dir <new-run-dir>",
+                "argv": ["input-dynamics", "recording", "inspect", "--dir", "<new-run-dir>"],
+            },
+        ]);
         let reason = match (include_evidence, bool_at(flags, "/needs_video")) {
             (true, true) => {
                 "rerun with video and evidence to refresh request-correlated device clock anchors"
@@ -1845,11 +1893,13 @@ fn add_record_next_action(actions: &mut Vec<Value>, flags: &Value) {
                 "rerun with evidence to refresh request-correlated device clock anchors"
             }
             (false, true) => "rerun with video to refresh request-correlated device clock anchors",
-            (false, false) => "rerun with an explicit duration to refresh device clock anchors",
+            (false, false) => "start a new session to refresh device clock anchors",
         };
         actions.push(json!({
             "kind": kind,
-            "command": command,
+            "workflow": "session_start_status_stop_inspect",
+            "command": start_command,
+            "commands": commands,
             "reason": reason,
         }));
     }

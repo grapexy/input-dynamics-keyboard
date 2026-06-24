@@ -1,6 +1,6 @@
 ---
 name: input-dynamics-keyboard
-description: Run and validate local Android Input Dynamics Keyboard sessions over ADB. Use when Codex needs to download or build the Android IME APK, install it on a device, enable or select it, record a bounded input dynamics run with screen video and an external run_id, inspect status, keyboard layout, accessibility, or screenshot evidence, avoid screenshot-dependent keyboard automation, pull JSONL logs, or validate the password-field suppression boundary.
+description: Run and validate local Android Input Dynamics Keyboard sessions over ADB. Use when Codex needs to download or build the Android IME APK, install it on a device, enable or select it, start/status/stop a complete input dynamics session with screen video and an external run_id, inspect keyboard layout, accessibility, or screenshot evidence, avoid screenshot-dependent keyboard automation, pull JSONL logs, or validate the password-field suppression boundary.
 ---
 
 # Input Dynamics Keyboard
@@ -24,7 +24,7 @@ instrumentation surface. Keep workflows app-neutral, offline, and ADB-driven.
 - Use `observe` commands for optional screen-context evidence. Accessibility
   dumps and screenshots may contain visible screen content; store them with the
   same care as local run artifacts.
-- `record` captures screen video by default. Treat `video/screen.mp4` and
+- Complete sessions capture screen video by default. Treat `video/screen.mp4` and
   `video/timing.json` as sensitive local run artifacts. Use `--no-video` only
   for explicit diagnostics or CI, not for normal bounded capture.
 - Treat everything under `derived/video_map/` as sensitive local run artifacts.
@@ -118,7 +118,28 @@ APK="$(ls -t app/build/outputs/apk/debug/*-debug.apk | head -n 1)"
 idk install --apk "$APK"
 ```
 
-3. For diagnostic live agent-driven input, start one controller run:
+3. For a complete human-operated observation session, use `session` with an
+   external run id:
+
+```bash
+RUN_ID=run-YYYYMMDD-HHMMSS-local-android
+idk session start --input-actor human --run-id "$RUN_ID" --out "runs/$RUN_ID"
+idk session status --run-id "$RUN_ID"
+```
+
+Use the device, then finalize the run:
+
+```bash
+idk session stop --run-id "$RUN_ID"
+idk recording inspect --dir "runs/$RUN_ID"
+```
+
+For start/end screen context, add `--with-evidence` to `session start`. Unless
+`--no-video` is explicitly used, complete sessions include screen video,
+request-correlated timing metadata, IME logs, ADB touchscreen capture,
+normalization, validation, and a manifest after stop/finalization.
+
+4. For diagnostic live agent-driven input, start one controller run:
 
 ```bash
 RUN_ID=run-YYYYMMDD-HHMMSS-local-android
@@ -176,86 +197,6 @@ If an old hidden session-lifecycle instruction returns
 `error_code: "command_moved"`, follow `moved_to.argv` or
 `suggested_next_command.argv`; do not retry the old namespace.
 
-4. For bounded capture, use `record` with an external run id:
-
-```bash
-RUN_ID=run-YYYYMMDD-HHMMSS-local-android
-idk record --run-id "$RUN_ID" --out "runs/$RUN_ID" --duration-ms 10000
-```
-
-Always pass a positive `--duration-ms <ms>` for agent-run or scripted captures.
-Open-ended `record` is disabled during the session-workflow migration; omitting
-`--duration-ms` is a hard error. Do not use open-ended `record` for automated or
-agent-driven human-operated runs.
-
-The command writes `manifest.json`, `validation.json`, `ime/`, `adb/`,
-`video/`, and `derived/` under the output directory. The
-`adb/getevent.raw.log` stream is device-level touchscreen data and should be
-analyzed separately from IME-owned JSONL privacy guarantees. The
-`video/screen.mp4` artifact is device-level visual context and is sensitive
-local run data. Current manifests include `coordinate_frame`, derived from
-recorded touchscreen profile and layout snapshots, plus `video.enabled`,
-`video.required`, timing brackets, and the pulled video fingerprint.
-
-When a run needs screen context, add `--with-evidence`. This writes start/end
-observation bundles under `evidence/start/` and `evidence/end/`, each with
-accessibility XML, screenshot PNG, status JSON, layout JSON, state JSON, and
-index JSON:
-
-```bash
-idk record \
-  --run-id "$RUN_ID" \
-  --out "runs/$RUN_ID" \
-  --duration-ms 10000 \
-  --with-evidence
-```
-
-These bundles are separate from the continuous video captured by default. Use
-`--full-accessibility-evidence` only when a protocol requires uncompressed
-accessibility hierarchy dumps. Treat evidence artifacts as sensitive local run
-data. Current evidence phase metadata is bracketed by the same STATUS-backed
-`device_clock_probe` helper as screenrecord timing, with
-`before_evidence_start`, `after_evidence_start`, `before_evidence_end`, and
-`after_evidence_end` phases.
-
-For a bounded agent-driven run that also needs persistent uinput controller
-metadata, run `record` with `--with-input-controller` and a duration. Then drive
-input from another CLI process while the record process is active. Use
-`type <text>` for ordinary text entry:
-
-```bash
-RUN_ID=run-YYYYMMDD-HHMMSS-local-android
-idk record \
-  --run-id "$RUN_ID" \
-  --out "runs/$RUN_ID" \
-  --duration-ms 10000 \
-  --with-input-controller \
-  --input-actor agent_adb
-```
-
-Do not send input after a fixed sleep. In the second CLI process, poll
-`idk controller status` until `input.session_lock.state: "active"` and
-`input.ready_for_input: true`. For `type`, `press`, and keyboard-scoped
-commands, also require `ime.input_scope_ready: true`; if it is false, establish
-the input scope with the canonical UI step for the run, then poll status again.
-
-The resulting manifest should include
-`coordinate_frame`,
-`input_controller_runtime.summary.input_backend`,
-`input_controller_runtime.summary.input_device_command`,
-`input_controller_runtime.summary.input_profile`,
-`input_controller_runtime.summary.physical_touchscreen_profile_hash`,
-`input_controller_runtime.summary.virtual_touchscreen_event_path`,
-`input_controller_runtime.summary.command_sequence`,
-`input_controller_runtime.summary.current_command`,
-`input_controller_runtime.summary.last_command`,
-`input_controller_runtime.summary.last_error`, and
-`input_controller_runtime.summary.cleanup`. If `--with-evidence` was used, it
-should also include `evidence.enabled: true` and `evidence.policy: start_end`.
-Unless `--no-video` was explicitly used, it should include `video.enabled:
-true`, `video.required: true`, `video.local_path`, and a non-null
-`video.file.sha256`.
-
 Before deriving or interpreting a completed run, inspect it:
 
 ```bash
@@ -275,10 +216,14 @@ object classifies saved video/evidence anchors as `bracketed`,
 `probe_failed`, `not_requested`, or `not_estimated`. If `next_actions` is
 non-empty, prefer those CLI command templates over ad hoc file inspection. Each
 `next_actions` item has `kind`, `command`, and `reason`; branch on `kind`.
-Recorder actions include placeholders such as `<new-run-id>`, `<new-run-dir>`,
-and `<positive-ms>`; fill them before running the command.
-Current action kinds are `validate`, `record_with_video`,
-`record_with_canonical_clocks`, `derive_presses`, `derive_summary`,
+Session refresh actions include placeholders such as `<new-run-id>` and
+`<new-run-dir>`; fill them before running any command. These actions also carry
+`workflow: session_start_status_stop_inspect` and a structured `commands` array
+with `start`, `status`, `stop`, and `inspect` steps. The compatibility
+`command` field mirrors the first `start` step only; execute the full
+`commands` sequence for a complete observation refresh.
+Current action kinds are `validate`, `session_with_video`,
+`session_with_canonical_clocks`, `derive_presses`, `derive_summary`,
 `derive_dismissals`, `derive_timeline`, and `derive_video_map`.
 Use `has_video_frame_index` only for encoded frame metadata readiness. Use
 `has_video_map` for event-frame windows. Canonical timing confidence is
@@ -310,7 +255,7 @@ Clock reasoning rules for agents:
 - Canonical clock domains are `android_uptime_ms`, `android_uptime_ns`,
   `device_elapsed_realtime_ns`, `kernel_getevent_us`, `media_pts_ns`,
   `host_process_monotonic_ns`, `host_wall_ms`, and `device_wall_ms`.
-- `idk status` and recording video markers use the app `STATUS`
+- `idk ime status` and recording video markers use the app `STATUS`
   request-result path. The canonical status/control sample is
   `device_clock_probe` with schema `input_dynamics_device_clock_probe.v1`.
 - Treat `device_clock_probe.t_elapsed_realtime_ns` as the canonical device
@@ -339,7 +284,7 @@ Clock reasoning rules for agents:
   `host_wall_ms_bracketed_device_epoch_ms` as pre-vocabulary legacy labels, not
   canonical domains.
 - Do not invent lower-level clock workflows during normal runs. Use saved
-  `record` artifacts and `recording inspect`; raw ADB status files are for
+  session artifacts and `recording inspect`; raw ADB status files are for
   diagnostics.
 
 Then derive a run-level press summary:
@@ -416,14 +361,14 @@ clock-anchor readiness, but it does not rewrite validation or derived files.
 Do not treat `valid_for_analysis: true` as enough for clock-dependent claims.
 For video/evidence anchors, cross-source timeline claims, or ordering claims
 that depend on canonical clocks, require `flags.canonical_clock_ready: true`,
-`flags.needs_canonical_recording: false`, and no `record_with_video` or
-`record_with_canonical_clocks` action.
+`flags.needs_canonical_recording: false`, and no `session_with_video` or
+`session_with_canonical_clocks` action.
 
 5. Diagnostic-only: use lower-level status and layout commands when debugging
    the raw IME control surface:
 
 ```bash
-idk status
+idk ime status
 idk layout
 ```
 
@@ -431,8 +376,8 @@ idk layout
    capture workflow, stop, pull, and validate logs manually:
 
 ```bash
-idk stop
-idk pull --out "runs/$RUN_ID"
+idk ime stop
+idk ime pull --out "runs/$RUN_ID"
 idk validate "runs/$RUN_ID" --run-id "$RUN_ID"
 ```
 

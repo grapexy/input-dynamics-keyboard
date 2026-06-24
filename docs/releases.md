@@ -49,7 +49,8 @@ The helper updates Android version metadata, runs release verification, commits
 the version bump, creates an annotated tag, and can push `main` plus the tag.
 The workflow can also be run manually from GitHub Actions with an existing tag.
 Initial public releases should stay marked as prereleases until a clean-device
-install, diagnostic controller start, keypress, controller stop, pull, and
+install, `session start`, `session status`, `session stop`, recording
+inspection, diagnostic controller start, keypress, controller stop, pull, and
 JSONL validation pass has been completed.
 
 ## Versioning
@@ -83,6 +84,9 @@ above earlier 3.9-based local debug builds.
 The workflow runs:
 
 ```bash
+cargo ci-fmt
+cargo ci-test
+cargo ci-clippy
 ./gradlew :app:testRunTestsUnitTest :app:assembleDebug
 ```
 
@@ -97,4 +101,14 @@ Local release builds use the same project signing key when signing is configured
 
 ```text
 app/build/outputs/apk/release/*-release.apk
+```
+
+Prerelease device smoke should use the canonical complete-session lifecycle:
+
+```bash
+RUN_ID=run-YYYYMMDD-HHMMSS-release-smoke
+input-dynamics session start --input-actor human --run-id "$RUN_ID" --out "runs/$RUN_ID"
+input-dynamics session status --run-id "$RUN_ID"
+input-dynamics session stop --run-id "$RUN_ID"
+input-dynamics recording inspect --dir "runs/$RUN_ID"
 ```

@@ -77,7 +77,21 @@ finishes registering the service:
 adb shell ime list -a | rg "$PKG|$IME"
 ```
 
-## Session Commands
+## Raw IME Broadcast Commands
+
+These are raw IME broadcast commands, not the complete observation workflow.
+For normal capture use `idk session start`, `idk session status`, and
+`idk session stop`.
+
+Canonical complete observation session:
+
+```bash
+RUN_ID=run-YYYYMMDD-HHMMSS-local-android
+idk session start --input-actor human --run-id "$RUN_ID" --out "runs/$RUN_ID"
+idk session status --run-id "$RUN_ID"
+idk session stop --run-id "$RUN_ID"
+idk recording inspect --dir "runs/$RUN_ID"
+```
 
 ```bash
 RUN_ID=run-YYYYMMDD-HHMMSS-local-android

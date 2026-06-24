@@ -47,13 +47,13 @@ mutable control files remain stable for current-controller lookup, while each
 controller start also creates a preserved diagnostics invocation under
 `<runtime>/<package>.<serial>.runs/`.
 
-## Common Workflow
+## Complete Observation Session
 
-For bounded experiment capture during the session-workflow migration, use
-`record` with an explicit duration. It starts IME logging, captures a concurrent
-ADB touchscreen event stream with `getevent`, records screen video, normalizes
-the event stream to JSONL, stops the session, pulls IME logs, writes
-`manifest.json`, and writes `validation.json`:
+For human-operated complete observation, use the stateful session lifecycle.
+`session start` starts IME logging, screen video, and a concurrent ADB
+touchscreen event stream with `getevent`. `session stop` finalizes the run,
+pulls IME logs, normalizes the event stream to JSONL, writes `manifest.json`,
+and writes `validation.json`:
 
 ```bash
 RUN_ID=run-YYYYMMDD-HHMMSS-human-android
@@ -62,16 +62,20 @@ cargo run --quiet -p input-dynamics -- doctor
 cargo run --quiet -p input-dynamics -- install
 cargo run --quiet -p input-dynamics -- select-ime
 cargo run --quiet -p input-dynamics -- touch doctor
-cargo run --quiet -p input-dynamics -- record \
+cargo run --quiet -p input-dynamics -- session start \
+  --input-actor human \
   --run-id "$RUN_ID" \
-  --out "runs/$RUN_ID" \
-  --duration-ms 10000
+  --out "runs/$RUN_ID"
+cargo run --quiet -p input-dynamics -- session status --run-id "$RUN_ID"
+
+# Use the device, then finalize the run:
+cargo run --quiet -p input-dynamics -- session stop --run-id "$RUN_ID"
+cargo run --quiet -p input-dynamics -- recording inspect --dir "runs/$RUN_ID"
 ```
 
-Use a positive `--duration-ms <ms>` for agent-run or scripted captures.
-Open-ended `record` is disabled during the session-workflow migration; omitting
-`--duration-ms` is a hard error. Do not use open-ended `record` for automated or
-agent-driven human-operated runs.
+Video is enabled by default for complete sessions and stored under `video/`.
+Treat `video/screen.mp4`, ADB event streams, screenshots, accessibility dumps,
+and pulled JSONL as sensitive local run artifacts.
 
 ## Diagnostic Live Input
 
@@ -143,44 +147,17 @@ cargo run --quiet -p input-dynamics -- observe all --out-dir /tmp/input-dynamics
 screenshots may contain visible screen content, so store them with the same care
 as run artifacts.
 
-For a bounded experiment capture during the session-workflow migration, use
-`record` with an explicit duration. It starts IME logging, captures a concurrent
-ADB touchscreen event stream with `getevent`, records screen video, normalizes
-the event stream to JSONL, stops the session, pulls IME logs, writes
-`manifest.json`, and writes `validation.json`:
-
-```bash
-RUN_ID=run-YYYYMMDD-HHMMSS-human-android
-
-cargo run --quiet -p input-dynamics -- doctor
-cargo run --quiet -p input-dynamics -- install
-cargo run --quiet -p input-dynamics -- select-ime
-cargo run --quiet -p input-dynamics -- touch doctor
-cargo run --quiet -p input-dynamics -- record \
-  --run-id "$RUN_ID" \
-  --out "runs/$RUN_ID" \
-  --duration-ms 10000
-```
-
-Use a positive `--duration-ms <ms>` for agent-run or scripted captures.
-Open-ended `record` is disabled during the session-workflow migration; omitting
-`--duration-ms` is a hard error. Do not use open-ended `record` for automated or
-agent-driven human-operated runs.
-
-Video is enabled by default for this bounded capture path. It is
-stored under `video/` and treated as sensitive local recording data. Use
-`--no-video` only for diagnostics or CI environments where device screen
-recording is intentionally unavailable.
-
 To preserve screen context at the beginning and end of a run, add
 `--with-evidence`:
 
 ```bash
-cargo run --quiet -p input-dynamics -- record \
+cargo run --quiet -p input-dynamics -- session start \
+  --input-actor human \
   --run-id "$RUN_ID" \
   --out "runs/$RUN_ID" \
-  --duration-ms 10000 \
   --with-evidence
+cargo run --quiet -p input-dynamics -- session status --run-id "$RUN_ID"
+cargo run --quiet -p input-dynamics -- session stop --run-id "$RUN_ID"
 ```
 
 This captures `observe all` bundles under `evidence/start/` and
@@ -188,31 +165,7 @@ This captures `observe all` bundles under `evidence/start/` and
 default. Use `--full-accessibility-evidence` only when a protocol needs
 uncompressed accessibility hierarchy dumps.
 
-For bounded agent-driven input, add `--with-input-controller`. This starts the
-persistent uinput controller for the record window and writes controller
-runtime metadata plus cleanup results into `manifest.json`. A second CLI
-process can send `type`, `tap`, `press`, `touch swipe`, `touch path`, or
-`hide-keyboard` commands while the timed record process is running:
-
-```bash
-RUN_ID=run-YYYYMMDD-HHMMSS-agent-android
-
-cargo run --quiet -p input-dynamics -- record \
-  --run-id "$RUN_ID" \
-  --out "runs/$RUN_ID" \
-  --duration-ms 10000 \
-  --with-input-controller \
-  --input-actor agent_adb
-```
-
-Do not use fixed sleeps as the synchronization primitive. In the second
-process, poll `controller status` until `input.session_lock.state: "active"` and
-`input.ready_for_input: true`. For text and key
-commands, also require `ime.input_scope_ready: true`; if it is false, establish
-the input scope with the canonical UI step for the run, then poll status again
-before sending input.
-
-Lower-level session commands remain available for debugging:
+Raw IME controls remain available only under the diagnostic `ime` namespace:
 
 ```bash
 RUN_ID=run-YYYYMMDD-HHMMSS-local-android
@@ -221,13 +174,16 @@ cargo run --quiet -p input-dynamics -- doctor
 cargo run --quiet -p input-dynamics -- install
 cargo run --quiet -p input-dynamics -- select-ime
 cargo run --quiet -p input-dynamics -- touch doctor
-cargo run --quiet -p input-dynamics -- start --run-id "$RUN_ID"
-cargo run --quiet -p input-dynamics -- status
+cargo run --quiet -p input-dynamics -- ime start --run-id "$RUN_ID"
+cargo run --quiet -p input-dynamics -- ime status
 cargo run --quiet -p input-dynamics -- layout
-cargo run --quiet -p input-dynamics -- stop
-cargo run --quiet -p input-dynamics -- pull --out "runs/$RUN_ID"
+cargo run --quiet -p input-dynamics -- ime stop
+cargo run --quiet -p input-dynamics -- ime pull --out "runs/$RUN_ID"
 cargo run --quiet -p input-dynamics -- validate "runs/$RUN_ID" --run-id "$RUN_ID"
 ```
+
+These commands do not create a complete observation bundle. Mutating diagnostic
+IME commands fail when an umbrella session runtime is active.
 
 `install` downloads the latest published debug APK with GitHub CLI when `--apk`
 is omitted. To install a local build instead:
@@ -263,13 +219,26 @@ scraping human-oriented text.
   GitHub CLI presence.
 - `install`: downloads or installs an APK.
 - `select-ime`: enables and selects the IME.
-- `enable-logging` / `disable-logging`: toggles logging.
-- `start --run-id <id>`: enables logging, starts a session, and records
-  `external_run_id`. Optional provenance flags are `--input-actor`,
-  `--input-controller`, and `--input-cadence-policy`; defaults are `human`,
-  null, and `manual`.
-- `stop`: stops the active session.
-- `status`: returns current control status.
+- `session start --input-actor human --run-id <id> --out <dir>`: starts a
+  complete human-operated observation session with IME JSONL, screen video, ADB
+  touchscreen event capture, runtime state, and finalization metadata. Add
+  `--with-evidence` for start/end observation bundles. Use `--no-video` only
+  for diagnostics or CI.
+- `session status [--run-id <id>]`: reads the active umbrella session runtime
+  and process liveness without mutating state.
+- `session stop --run-id <id>`: finalizes the active umbrella session, stops
+  capture processes, pulls IME logs, writes validation, and clears runtime
+  ownership. Omitting `--run-id` is non-mutating and returns the active run id.
+- `ime enable-logging` / `ime disable-logging`: diagnostic raw IME logging
+  toggles.
+- `ime start --run-id <id>`: diagnostic raw IME-only logging session. Optional
+  provenance flags are `--input-actor`, `--input-controller`, and
+  `--input-cadence-policy`; defaults are `human`, null, and `manual`.
+- `ime status`: returns current raw IME control status.
+- `ime stop`: stops the active raw IME logging session.
+- `ime list-logs`: lists app-specific external log files.
+- `ime clear-logs`: clears raw IME logs when no IME session is active.
+- `ime pull --out <dir>`: pulls app-specific external log storage.
 - `controller start --run-id <id>`: diagnostic live-input lifecycle. It
   enables/selects the IME, enables logging, starts an IME session, starts a
   persistent local uinput controller, and binds an input profile. If another
@@ -295,11 +264,6 @@ scraping human-oriented text.
   runtime files and reports cleanup from the saved state. Final controller state
   and final controller lock are preserved in the diagnostics invocation
   directory.
-- `session start/status/stop`: transitional moved-command surface during the
-  umbrella session migration. These old controller-only forms parse and return
-  `ok: false`, `error_code: "command_moved"`, command-specific `moved_to`
-  guidance, and `mutated: false`. Use `controller start/status/stop` for the
-  diagnostic controller lifecycle until umbrella `session` commands are wired.
 - `layout`: returns status including `keyboard_layout` when the IME is visible.
   Layout output includes keyboard-view bounds, display size/rotation, and
   screen-space key centers for coordinate calibration.
@@ -355,24 +319,11 @@ scraping human-oriented text.
 - `touch path --points-json '<json>'` or `touch path --points-file <path>`:
   sends an absolute point path through the active diagnostic controller. Points
   may be `[{"x":1,"y":2}]` objects or `[[1,2]]` arrays.
-- `list-logs`: lists log files.
-- `clear-logs`: clears logs when no session is active.
-- `pull --out <dir>`: pulls app-specific external log storage.
 - `validate <path> --run-id <id>`: validates JSONL lifecycle, safety fields,
   timestamp metadata, and clock-validation diagnostics.
 - `getevent normalize --input <raw.log> --output <events.jsonl>`: parses
   `adb shell getevent -lt` output into neutral JSONL records with schema
   `input_dynamics_getevent.v1`.
-- `record --run-id <id> --out <dir> --duration-ms <positive-ms>`: records a bounded
-  transitional run with IME JSONL, ADB `getevent` raw and normalized touch
-  streams, default screen video, manifest, pull, and validation output. Add
-  `--with-input-controller` for
-  bounded agent-driven runs that need persistent uinput controller metadata in
-  the manifest. Add `--with-evidence` to capture start/end observation bundles
-  containing accessibility XML, screenshot PNG, status, layout, state, and
-  index JSON. Use `--no-video` only as an explicit diagnostic or CI escape
-  hatch. Open-ended `record` is disabled during the session-workflow migration
-  and is not the normal agent path.
 - `derive presses --recording-dir <dir>`: derives per-press summaries from IME
   JSONL records. The output includes key timing, hold/flight timing, landing
   geometry, pointer movement, and pressure/contact ranges. It does not infer
@@ -414,9 +365,9 @@ Controller-backed input and `touch` commands use AOSP `/system/bin/uinput` for
 touchscreen input. They fail if the device does not expose that command instead
 of falling back to a second touch implementation.
 
-## Record Output
+## Session Output
 
-`record` creates:
+A finalized complete session creates:
 
 ```text
 <out>/
@@ -467,14 +418,14 @@ cleanup status, and the pulled `screen.mp4` file fingerprint. The companion
 artifact-local inspection.
 
 Timing fields use explicit clock domains. Android input event timestamps are
-in the Android uptime domain, `t_elapsed_realtime_ns` is a record/status
+in the Android uptime domain, `t_elapsed_realtime_ns` is a session/status
 elapsed-realtime timestamp, raw `getevent` timestamps stay in the
 `kernel_getevent_us` domain until aligned, and video frame timestamps will use
 media PTS. Do not treat wall-clock fields as ordering truth; they are
 diagnostic/provenance fields.
 
 Screenrecord start/stop timing samples are captured through the same app
-`STATUS` request-result path used by `input-dynamics status`. Each marker
+`STATUS` request-result path used by `input-dynamics ime status`. Each marker
 contains a validated `device_clock_probe` with schema
 `input_dynamics_device_clock_probe.v1`, plus host wall and host process
 monotonic brackets as diagnostics. The probe's canonical device timestamp is
@@ -490,28 +441,13 @@ Future records that carry event, capture, and write timestamps should describe
 each timestamp role separately instead of relying on one record-level
 `clock_domain`.
 
-When `record` is run with `--with-evidence`, `manifest.json` includes
+When `session start` is run with `--with-evidence`, `manifest.json` includes
 `evidence.enabled: true`, `evidence.policy: start_end`, and the start/end
 observation bundle metadata. Each evidence phase is bracketed by the same
 request-correlated `device_clock_probe` helper used for screenrecord anchors:
 `before_evidence_start`, `after_evidence_start`, `before_evidence_end`, and
 `after_evidence_end`. Accessibility dumps and screenshots may contain visible
 screen content; keep them with the same care as raw run artifacts.
-
-When `record` is run with `--with-input-controller`, `manifest.json` includes:
-
-- `input_controller_runtime.summary.input_backend`
-- `input_controller_runtime.summary.input_device_command`
-- `input_controller_runtime.summary.input_profile`
-- `input_controller_runtime.summary.physical_touchscreen_profile_hash`
-- `input_controller_runtime.summary.physical_touchscreen`
-- `input_controller_runtime.summary.virtual_touchscreen`
-- `input_controller_runtime.summary.virtual_touchscreen_event_path`
-- `input_controller_runtime.summary.command_sequence`
-- `input_controller_runtime.summary.current_command`
-- `input_controller_runtime.summary.last_command`
-- `input_controller_runtime.summary.last_error`
-- `input_controller_runtime.summary.cleanup`
 
 The `adb/getevent.raw.log` stream is device-level touchscreen data.
 `adb/getevent.jsonl` is a normalized form of that stream. It includes
@@ -550,22 +486,26 @@ The `clock` object classifies saved video and evidence anchors as
 `bracketed`, `legacy_wall_clock_bracketed`, `missing_source`, `stale_inputs`,
 `probe_failed`, `not_requested`, or `not_estimated`. Legacy wall-clock timing
 remains readable, but it does not set `canonical_clock_ready`. Required missing
-or stale video makes `valid_for_analysis` false and adds a bounded
-`record_with_video` action. Missing, legacy, stale, or malformed canonical
-clock anchors add a bounded recorder action. `next_actions` contains local CLI
+or stale video makes `valid_for_analysis` false and adds a
+`session_with_video` action. Missing, legacy, stale, or malformed canonical
+clock anchors add a session refresh action. `next_actions` contains local CLI
 command templates an agent can use to refresh missing or stale artifacts.
-Recorder actions include placeholders such as `<new-run-id>`, `<new-run-dir>`,
-and `<positive-ms>`; fill them before running the command. Each item has `kind`,
-`command`, and `reason`; branch on `kind`. Current action kinds are `validate`,
-`record_with_video`,
-`record_with_canonical_clocks`, `derive_presses`, `derive_summary`,
+Session refresh actions include placeholders such as `<new-run-id>` and
+`<new-run-dir>`; fill them before running any command. Each item has `kind`,
+`command`, and `reason`; branch on `kind`. Session refresh items also include
+`workflow: session_start_status_stop_inspect` and a structured `commands` array
+with `start`, `status`, `stop`, and `inspect` steps. The compatibility
+`command` field mirrors the first `start` step only; agents should execute the
+full `commands` sequence. Current action kinds are `validate`,
+`session_with_video`,
+`session_with_canonical_clocks`, `derive_presses`, `derive_summary`,
 `derive_dismissals`, `derive_timeline`, and `derive_video_map`. It does not
 probe the device or derive new clock alignment.
 
 Treat `valid_for_analysis` as a base artifact/readability gate. For any
 video/evidence anchor claim, cross-source timeline claim, or ordering claim that
 depends on canonical clocks, also require `flags.canonical_clock_ready: true`,
-`flags.needs_canonical_recording: false`, and no recorder rerun action in
+`flags.needs_canonical_recording: false`, and no session refresh action in
 `next_actions`.
 
 Derived artifacts preserve source timing and normalized timing separately.
@@ -593,7 +533,7 @@ clock metadata:
   `mixed_clock_domain_without_alignment_count`,
   `normalized_claim_without_domain_count`, and `unit_mismatch_count`.
 
-After recording with the current CLI:
+After a finalized complete session:
 
 ```bash
 input-dynamics derive presses --recording-dir "runs/$RUN_ID"

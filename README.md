@@ -32,9 +32,9 @@ Use this keyboard only in consented, local research settings.
   screenshot-based coordinate discovery.
 - CLI observation bundles for current status, keyboard layout, accessibility
   hierarchy, and screenshot evidence when screen context is needed.
-- Default `record` screen video capture for bounded local runs, stored as a
+- Default session screen video capture for local observation runs, stored as a
   sensitive local artifact with timing metadata.
-- Optional `record --with-evidence` start/end observation bundles for bounded
+- Optional `session start --with-evidence` start/end observation bundles for
   runs that need screen context.
 - Derived press summaries for per-key timing, landing geometry, pointer
   movement, and pressure/contact ranges from IME JSONL records.
@@ -50,8 +50,7 @@ Use this keyboard only in consented, local research settings.
 - AOSP uinput-backed CLI touch commands for local agent-driven key presses,
   layout-aware text entry, absolute taps, gesture paths, and edge-back keyboard
   dismissal.
-- Optional `record --with-input-controller` manifests with uinput controller
-  runtime metadata and cleanup results.
+- Session manifests with capture runtime metadata and cleanup results.
 - Single-owner stateful CLI sessions; competing starts return a non-destructive
   busy result.
 - Strict live-input readiness gates: agent key commands fail unless the uinput
@@ -67,16 +66,19 @@ cargo build -p input-dynamics
 ```
 
 Install the latest published debug APK, select the IME, and run a local
-experiment capture:
+observation capture:
 
 ```bash
-RUN_ID=run-YYYYMMDD-HHMMSS-human-android
+RUN_ID=run-YYYYMMDD-HHMMSS-local-android
 
 target/debug/input-dynamics doctor
 target/debug/input-dynamics install
 target/debug/input-dynamics select-ime
 target/debug/input-dynamics touch doctor
-target/debug/input-dynamics record --run-id "$RUN_ID" --out "runs/$RUN_ID" --duration-ms 10000
+target/debug/input-dynamics session start --input-actor human --run-id "$RUN_ID" --out "runs/$RUN_ID"
+target/debug/input-dynamics session status --run-id "$RUN_ID"
+# Use the device, then finalize the run:
+target/debug/input-dynamics session stop --run-id "$RUN_ID"
 target/debug/input-dynamics recording inspect --dir "runs/$RUN_ID"
 ```
 
@@ -84,14 +86,10 @@ If more than one Android device is connected, pass `--serial <adb-serial>` to
 each `input-dynamics` command. Session runtime files and locks are keyed by
 package and device serial.
 
-The transitional `record` command starts IME logging, captures an ADB
-touchscreen event stream, records screen video, writes normalized
-`adb/getevent.jsonl`, pulls logs, writes `manifest.json`, and writes
-`validation.json`. Use positive `--duration-ms` values for agent-run or
-scripted captures.
-Open-ended `record` is disabled during the session-workflow migration; omitting
-`--duration-ms` is a hard error so agents cannot accidentally create short
-valid-looking runs. Screen video is sensitive local recording data.
+The `session` workflow starts IME logging, captures an ADB touchscreen event
+stream, records screen video, writes normalized `adb/getevent.jsonl`, pulls
+logs, writes `manifest.json`, and writes `validation.json`. Screen video is
+sensitive local recording data.
 
 To build and install a local debug APK instead:
 

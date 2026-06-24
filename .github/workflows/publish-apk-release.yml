@@ -100,6 +100,12 @@ jobs:
             echo "INPUT_DYNAMICS_KEY_PASSWORD=$INPUT_DYNAMICS_KEY_PASSWORD"
           } >> "$GITHUB_ENV"
 
+      - name: Verify Rust CLI contracts
+        run: |
+          cargo ci-fmt
+          cargo ci-test
+          cargo ci-clippy
+
       - name: Test and build debug APK
         run: ./gradlew :app:testRunTestsUnitTest :app:assembleDebug
 
@@ -165,11 +171,19 @@ jobs:
 
           Verification:
 
-          - Unit tests passed in CI.
+          - Rust CLI format, tests, and clippy checks passed in CI.
+          - Android unit tests passed in CI.
           - Debug APK was built from tag \`$tag_name\` and signed with the project APK key.
           - Debug APK was checked for absence of \`android.permission.INTERNET\`.
 
-          Local control surface:
+          Canonical local session workflow:
+
+          - \`input-dynamics session start --input-actor human --run-id <run-id> --out <run-dir>\`
+          - \`input-dynamics session status --run-id <run-id>\`
+          - \`input-dynamics session stop --run-id <run-id>\`
+          - \`input-dynamics recording inspect --dir <run-dir>\`
+
+          Diagnostic raw IME control surface:
 
           - ADB receiver: \`.control.InputDynamicsControlReceiver\`
           - Action prefix: \`org.inputdynamics.ime.action\`

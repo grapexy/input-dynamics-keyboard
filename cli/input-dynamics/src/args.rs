@@ -49,10 +49,13 @@ pub(crate) enum Commands {
     /// Enable and select the IME.
     SelectIme,
     /// Enable input dynamics logging.
+    #[command(hide = true)]
     EnableLogging,
     /// Disable input dynamics logging.
+    #[command(hide = true)]
     DisableLogging,
-    /// Start a logging session.
+    /// Start a diagnostic IME-only logging session.
+    #[command(hide = true)]
     Start {
         /// External run id to write into each session record.
         #[arg(long)]
@@ -67,10 +70,17 @@ pub(crate) enum Commands {
         #[arg(long, default_value = "manual")]
         input_cadence_policy: String,
     },
-    /// Stop the active logging session.
+    /// Stop the active diagnostic IME-only logging session.
+    #[command(hide = true)]
     Stop,
-    /// Read current status.
+    /// Read diagnostic IME control status.
+    #[command(hide = true)]
     Status,
+    /// Low-level diagnostic IME logging controls.
+    Ime {
+        #[command(subcommand)]
+        command: ImeCommand,
+    },
     /// Read keyboard layout status.
     Layout {
         /// Wait until the keyboard layout is visible.
@@ -113,10 +123,13 @@ pub(crate) enum Commands {
         steps: Option<u16>,
     },
     /// List log files.
+    #[command(hide = true)]
     ListLogs,
     /// Clear log files when no session is active.
+    #[command(hide = true)]
     ClearLogs,
     /// Pull log files to a local directory.
+    #[command(hide = true)]
     Pull {
         /// Local output directory.
         #[arg(long)]
@@ -145,17 +158,18 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         command: RecordingCommand,
     },
-    /// Transitional bounded foreground capture with IME logs, ADB touch events, and screen video.
+    /// Legacy bounded foreground capture with IME logs, ADB touch events, and screen video.
     ///
-    /// Requires --duration-ms; missing duration returns a structured JSON error.
+    /// Hidden from normal help. Use `session start/status/stop` for complete observation sessions.
+    #[command(hide = true)]
     Record {
         /// External run id to write into each session record.
         #[arg(long)]
         run_id: String,
-        /// Local experiment output directory.
+        /// Local output directory.
         #[arg(long)]
         out: PathBuf,
-        /// Positive capture duration. Required for every transitional record invocation.
+        /// Positive capture duration. Required for every legacy record invocation.
         #[arg(long)]
         duration_ms: Option<u64>,
         /// Start a persistent uinput controller during the record run.
@@ -180,8 +194,7 @@ pub(crate) enum Commands {
         #[arg(long, default_value = "manual")]
         input_cadence_policy: String,
     },
-    /// Transitional parser for moved controller-only session commands.
-    #[command(hide = true)]
+    /// Manage complete observation sessions.
     Session {
         #[command(subcommand)]
         command: SessionCommand,
@@ -277,6 +290,43 @@ pub(crate) enum ObserveCommand {
         /// Request the full accessibility hierarchy instead of Android's compressed dump.
         #[arg(long)]
         full_accessibility: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ImeCommand {
+    /// Enable input dynamics logging.
+    EnableLogging,
+    /// Disable input dynamics logging.
+    DisableLogging,
+    /// Start a diagnostic IME-only logging session.
+    Start {
+        /// External run id to write into each session record.
+        #[arg(long)]
+        run_id: String,
+        /// Session-level input actor provenance.
+        #[arg(long, default_value = "human")]
+        input_actor: String,
+        /// Session-level controller provenance.
+        #[arg(long)]
+        input_controller: Option<String>,
+        /// Session-level cadence provenance.
+        #[arg(long, default_value = "manual")]
+        input_cadence_policy: String,
+    },
+    /// Stop the active diagnostic IME-only logging session.
+    Stop,
+    /// Read diagnostic IME control status.
+    Status,
+    /// List IME log files.
+    ListLogs,
+    /// Clear IME log files when no IME session is active.
+    ClearLogs,
+    /// Pull IME log files to a local directory.
+    Pull {
+        /// Local output directory.
+        #[arg(long)]
+        out: PathBuf,
     },
 }
 
@@ -459,61 +509,58 @@ pub(crate) enum TouchCommand {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum SessionCommand {
-    /// Internal session compatibility parser.
-    #[command(hide = true)]
+    /// Start a complete observation session.
     Start {
-        /// Internal compatibility field.
-        #[arg(long, hide = true)]
+        /// External run id for provenance and finalization.
+        #[arg(long)]
         run_id: String,
-        /// Internal compatibility field.
-        #[arg(long, hide = true)]
+        /// Local output directory for session artifacts.
+        #[arg(long)]
         out: Option<PathBuf>,
-        /// Internal compatibility field.
-        #[arg(long, hide = true)]
+        /// Input actor for this run.
+        #[arg(long)]
         input_actor: Option<String>,
-        /// Internal compatibility field.
+        /// Deprecated compatibility field.
         #[arg(long, hide = true)]
         mode: Option<String>,
-        /// Internal compatibility field.
+        /// Deprecated compatibility field.
         #[arg(long, hide = true)]
         with_input_controller: bool,
-        /// Internal compatibility field.
+        /// Deprecated compatibility field.
         #[arg(long, hide = true)]
         no_input_controller: bool,
-        /// Internal compatibility field.
+        /// Deprecated compatibility field.
         #[arg(long, hide = true)]
         input_controller: Option<String>,
-        /// Internal compatibility field.
+        /// Deprecated compatibility field.
         #[arg(long, hide = true)]
         input_cadence_policy: Option<String>,
-        /// Internal compatibility field.
-        #[arg(long, hide = true)]
+        /// Capture start/end observation evidence bundles.
+        #[arg(long)]
         with_evidence: bool,
-        /// Internal compatibility field.
-        #[arg(long, requires = "with_evidence", hide = true)]
+        /// Use full accessibility hierarchy dumps for --with-evidence.
+        #[arg(long, requires = "with_evidence")]
         full_accessibility_evidence: bool,
-        /// Internal compatibility field.
-        #[arg(long, hide = true)]
+        /// Disable default screen video capture for diagnostics or CI.
+        #[arg(long)]
         no_video: bool,
-        /// Internal compatibility field.
-        #[arg(long, hide = true)]
+        /// Local input profile JSON file. Supported for agent sessions after agent lifecycle is implemented.
+        #[arg(long)]
         input_profile: Option<PathBuf>,
-        /// Internal compatibility field.
-        #[arg(long, hide = true)]
+        /// Explicit input profile seed for reproducible sampled input.
+        #[arg(long)]
         input_profile_seed: Option<u64>,
     },
     /// Read active umbrella session status.
-    #[command(hide = true)]
     Status {
         /// Optional run id selector. When omitted, status reads the active pointer.
-        #[arg(long, hide = true)]
+        #[arg(long)]
         run_id: Option<String>,
     },
     /// Stop and finalize an active umbrella session.
-    #[command(hide = true)]
     Stop {
         /// Required for mutation. When omitted, stop only reports the active run id.
-        #[arg(long, hide = true)]
+        #[arg(long)]
         run_id: Option<String>,
     },
 }
@@ -582,7 +629,7 @@ pub(crate) enum ControllerCommand {
 mod tests {
     use clap::{CommandFactory, Parser};
 
-    use super::{Cli, Commands, ControllerCommand, SessionCommand};
+    use super::{Cli, Commands, ControllerCommand, ImeCommand, SessionCommand};
 
     #[test]
     fn controller_lifecycle_commands_parse() {
@@ -727,6 +774,63 @@ mod tests {
     }
 
     #[test]
+    fn diagnostic_ime_namespace_parses() {
+        let start = Cli::try_parse_from(["input-dynamics", "ime", "start", "--run-id", "run-test"]);
+        let status = Cli::try_parse_from(["input-dynamics", "ime", "status"]);
+        let stop = Cli::try_parse_from(["input-dynamics", "ime", "stop"]);
+        let pull = Cli::try_parse_from(["input-dynamics", "ime", "pull", "--out", "/tmp/logs"]);
+
+        assert!(
+            matches!(
+                start,
+                Ok(Cli {
+                    command: Commands::Ime {
+                        command: ImeCommand::Start { .. }
+                    },
+                    ..
+                })
+            ),
+            "ime start should parse"
+        );
+        assert!(
+            matches!(
+                status,
+                Ok(Cli {
+                    command: Commands::Ime {
+                        command: ImeCommand::Status
+                    },
+                    ..
+                })
+            ),
+            "ime status should parse"
+        );
+        assert!(
+            matches!(
+                stop,
+                Ok(Cli {
+                    command: Commands::Ime {
+                        command: ImeCommand::Stop
+                    },
+                    ..
+                })
+            ),
+            "ime stop should parse"
+        );
+        assert!(
+            matches!(
+                pull,
+                Ok(Cli {
+                    command: Commands::Ime {
+                        command: ImeCommand::Pull { .. }
+                    },
+                    ..
+                })
+            ),
+            "ime pull should parse"
+        );
+    }
+
+    #[test]
     fn umbrella_session_start_shapes_parse_for_json_handling() {
         let human = Cli::try_parse_from([
             "input-dynamics",
@@ -808,8 +912,13 @@ mod tests {
 
     #[test]
     fn session_help_keeps_controller_lifecycle_out_of_session_namespace() {
+        let top_help = Cli::command().render_help().to_string();
         let session_help = Cli::command()
             .find_subcommand_mut("session")
+            .map(|command| command.render_help().to_string())
+            .unwrap_or_default();
+        let ime_help = Cli::command()
+            .find_subcommand_mut("ime")
             .map(|command| command.render_help().to_string())
             .unwrap_or_default();
         let direct_start_help = session_subcommand_help("start");
@@ -817,14 +926,34 @@ mod tests {
         let direct_stop_help = session_subcommand_help("stop");
 
         assert!(
+            top_help.contains("session") && top_help.contains("ime"),
+            "top-level help should expose canonical session and diagnostic ime namespaces"
+        );
+        assert_top_help_hides_legacy_commands(&top_help);
+        assert!(
+            ime_help.contains("start")
+                && ime_help.contains("status")
+                && ime_help.contains("stop")
+                && ime_help.contains("pull"),
+            "ime help should expose diagnostic IME lifecycle and log commands"
+        );
+        assert!(
             !session_help.contains("Start IME logging")
                 && !session_help.contains("Read IME and local input-controller status")
                 && !session_help.contains("Stop the persistent input controller"),
             "session help should not present old controller-only lifecycle as normal"
         );
         assert!(
-            direct_start_help.contains("Internal session compatibility"),
-            "direct hidden session start help should remain compatibility-only: {direct_start_help}"
+            session_help.contains("start")
+                && session_help.contains("status")
+                && session_help.contains("stop"),
+            "session help should expose start/status/stop"
+        );
+        assert!(
+            direct_start_help.contains("Start a complete observation session")
+                && direct_start_help.contains("--input-actor")
+                && direct_start_help.contains("--out"),
+            "direct session start help should advertise canonical full-run flags: {direct_start_help}"
         );
         assert!(
             direct_status_help.contains("Read active umbrella session status"),
@@ -843,11 +972,9 @@ mod tests {
             );
         }
         assert!(
-            !direct_start_help.contains("umbrella")
-                && !direct_start_help.contains("workflow")
-                && !direct_start_help.contains("--out")
-                && !direct_start_help.contains("--input-actor"),
-            "direct hidden session start help should not advertise unfinished start flags: {direct_start_help}"
+            !direct_start_help.contains("--with-input-controller")
+                && !direct_start_help.contains("--input-controller"),
+            "session start help should not advertise deprecated controller flags: {direct_start_help}"
         );
         for help in [&direct_status_help, &direct_stop_help] {
             assert!(
@@ -864,5 +991,32 @@ mod tests {
             .and_then(|session| session.find_subcommand_mut(name))
             .map(|subcommand| subcommand.render_help().to_string())
             .unwrap_or_default()
+    }
+
+    fn assert_top_help_hides_legacy_commands(top_help: &str) {
+        for hidden_alias in [
+            "record",
+            "start",
+            "status",
+            "stop",
+            "pull",
+            "enable-logging",
+            "disable-logging",
+            "list-logs",
+            "clear-logs",
+        ] {
+            assert!(
+                !help_lists_command(top_help, hidden_alias),
+                "top-level help should hide legacy top-level command {hidden_alias}: {top_help}"
+            );
+        }
+    }
+
+    fn help_lists_command(help: &str, name: &str) -> bool {
+        let command_prefix = format!("{name} ");
+        help.lines().any(|line| {
+            let trimmed = line.trim_start();
+            trimmed == name || trimmed.starts_with(&command_prefix)
+        })
     }
 }

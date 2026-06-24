@@ -32,6 +32,12 @@ Live commands such as `type`, `tap`, and semantic `press` inherit the active
 controller profile. Lower-level absolute touch commands remain explicit
 coordinate commands.
 
+The complete human observation lifecycle is `session start`, `session status`,
+and `session stop`. Human sessions use manual cadence and do not accept input
+profiles. Agent complete sessions are reserved until that lifecycle is
+implemented; until then, profiles apply only to diagnostic controller-driven
+input.
+
 ## Provenance
 
 The CLI validates the profile, computes a stable hash, chooses or accepts a

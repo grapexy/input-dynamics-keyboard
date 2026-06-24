@@ -71,10 +71,24 @@ adb shell ime set org.inputdynamics.ime.debug/helium314.keyboard.latin.LatinIME
 
 Use the debug package for local validation:
 
+These are raw IME broadcast commands, not the complete observation workflow.
+For normal capture use `input-dynamics session start`, `input-dynamics session
+status`, and `input-dynamics session stop` from [cli.md](cli.md).
+
+Canonical complete observation session:
+
+```bash
+RUN_ID=run-YYYYMMDD-HHMMSS-local-android
+input-dynamics session start --input-actor human --run-id "$RUN_ID" --out "runs/$RUN_ID"
+input-dynamics session status --run-id "$RUN_ID"
+input-dynamics session stop --run-id "$RUN_ID"
+input-dynamics recording inspect --dir "runs/$RUN_ID"
+```
+
 ```bash
 PKG=org.inputdynamics.ime.debug
 IME=helium314.keyboard.latin.LatinIME
-RUN_ID=run-YYYYMMDD-HHMMSS-human-android
+RUN_ID=run-YYYYMMDD-HHMMSS-local-android
 
 adb shell ime enable "$PKG/$IME"
 adb shell ime set "$PKG/$IME"
