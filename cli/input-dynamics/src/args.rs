@@ -502,12 +502,20 @@ pub(crate) enum SessionCommand {
         #[arg(long, hide = true)]
         input_profile_seed: Option<u64>,
     },
-    /// Moved diagnostic controller status parser; use `controller status`.
+    /// Read active umbrella session status.
     #[command(hide = true)]
-    Status,
-    /// Moved diagnostic controller stop parser; use `controller stop`.
+    Status {
+        /// Optional run id selector. When omitted, status reads the active pointer.
+        #[arg(long, hide = true)]
+        run_id: Option<String>,
+    },
+    /// Stop and finalize an active umbrella session.
     #[command(hide = true)]
-    Stop,
+    Stop {
+        /// Required for mutation. When omitted, stop only reports the active run id.
+        #[arg(long, hide = true)]
+        run_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -697,7 +705,7 @@ mod tests {
                 status,
                 Ok(Cli {
                     command: Commands::Session {
-                        command: SessionCommand::Status
+                        command: SessionCommand::Status { .. }
                     },
                     ..
                 })
@@ -709,7 +717,7 @@ mod tests {
                 stop,
                 Ok(Cli {
                     command: Commands::Session {
-                        command: SessionCommand::Stop
+                        command: SessionCommand::Stop { .. }
                     },
                     ..
                 })
@@ -799,7 +807,7 @@ mod tests {
     }
 
     #[test]
-    fn session_help_does_not_promote_old_controller_lifecycle() {
+    fn session_help_keeps_controller_lifecycle_out_of_session_namespace() {
         let session_help = Cli::command()
             .find_subcommand_mut("session")
             .map(|command| command.render_help().to_string())
@@ -814,24 +822,37 @@ mod tests {
                 && !session_help.contains("Stop the persistent input controller"),
             "session help should not present old controller-only lifecycle as normal"
         );
-        for help in [direct_start_help, direct_status_help, direct_stop_help] {
-            assert!(
-                help.contains("Internal session compatibility")
-                    || help.contains("Moved diagnostic controller"),
-                "direct hidden session subcommand help should explain internal or migrated status: {help}"
-            );
+        assert!(
+            direct_start_help.contains("Internal session compatibility"),
+            "direct hidden session start help should remain compatibility-only: {direct_start_help}"
+        );
+        assert!(
+            direct_status_help.contains("Read active umbrella session status"),
+            "direct hidden session status help should describe umbrella status: {direct_status_help}"
+        );
+        assert!(
+            direct_stop_help.contains("Stop and finalize an active umbrella session"),
+            "direct hidden session stop help should describe umbrella stop: {direct_stop_help}"
+        );
+        for help in [&direct_start_help, &direct_status_help, &direct_stop_help] {
             assert!(
                 !help.contains("Start IME logging")
                     && !help.contains("Read IME and local input-controller status")
                     && !help.contains("Stop the persistent input controller"),
                 "direct hidden session subcommand help should not promote old lifecycle: {help}"
             );
+        }
+        assert!(
+            !direct_start_help.contains("umbrella")
+                && !direct_start_help.contains("workflow")
+                && !direct_start_help.contains("--out")
+                && !direct_start_help.contains("--input-actor"),
+            "direct hidden session start help should not advertise unfinished start flags: {direct_start_help}"
+        );
+        for help in [&direct_status_help, &direct_stop_help] {
             assert!(
-                !help.contains("umbrella")
-                    && !help.contains("workflow")
-                    && !help.contains("--out")
-                    && !help.contains("--input-actor"),
-                "direct hidden session subcommand help should not advertise unfinished session start flags: {help}"
+                !help.contains("--out") && !help.contains("--input-actor"),
+                "direct hidden session status/stop help should not advertise start-only flags: {help}"
             );
         }
     }

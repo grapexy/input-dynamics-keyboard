@@ -33,6 +33,10 @@ use crate::profile::{
 use crate::ratio::{RatioPpm, SignedRatioPpm};
 use crate::record::{RecordConfig, VideoMode, record_run};
 use crate::recording::inspect_recording;
+use crate::session_lifecycle::{
+    HumanSessionStart, SessionStatusRequest, SessionStopRequest, session_status,
+    start_human_session, stop_session,
+};
 use crate::session_state::schema::{COMMAND_RESULT_SCHEMA, INPUT_CONTROLLER_CLI};
 use crate::uinput::{self, PathSpec, TapSpec, TouchPoint};
 use crate::validate::validate_logs;
@@ -658,10 +662,13 @@ fn start(app: &App, config: &LoggingStartConfig<'_>) -> CliResult<Value> {
     app.broadcast("START", extras)
 }
 
-fn session(_app: &App, command: SessionCommand) -> Value {
+fn session(app: &App, command: SessionCommand) -> Value {
     match command {
-        start @ SessionCommand::Start { .. } => session_start(start),
-        SessionCommand::Status | SessionCommand::Stop => moved_session_command(command),
+        start @ SessionCommand::Start { .. } => session_start(app, start),
+        SessionCommand::Status { run_id } => session_status(app, &SessionStatusRequest { run_id })
+            .unwrap_or_else(|error| session_operation_error("session status", &error)),
+        SessionCommand::Stop { run_id } => stop_session(app, &SessionStopRequest { run_id })
+            .unwrap_or_else(|error| session_operation_error("session stop", &error)),
     }
 }
 
@@ -946,7 +953,7 @@ fn moved_command_value(moved_command: &MovedCommand) -> Value {
     })
 }
 
-fn session_start(command: SessionCommand) -> Value {
+fn session_start(app: &App, command: SessionCommand) -> Value {
     let SessionCommand::Start {
         run_id,
         out,
@@ -976,6 +983,7 @@ fn session_start(command: SessionCommand) -> Value {
         });
     };
     session_start_with_out(
+        app,
         &run_id,
         &out_path,
         input_actor.as_deref(),
@@ -1009,6 +1017,7 @@ fn session_start_without_out(config: &ControllerStartMigration) -> Value {
 }
 
 fn session_start_with_out(
+    app: &App,
     run_id: &str,
     out_path: &Path,
     input_actor: Option<&str>,
@@ -1034,6 +1043,19 @@ fn session_start_with_out(
             validation.profile.input_profile,
             validation.profile.input_profile_seed,
         );
+    }
+    if actor == "human" {
+        return start_human_session(
+            app,
+            &HumanSessionStart {
+                run_id: String::from(run_id),
+                out: out_path.to_path_buf(),
+                with_evidence: validation.evidence.with_evidence,
+                full_accessibility_evidence: validation.evidence.full_accessibility_evidence,
+                video_enabled: !validation.evidence.no_video,
+            },
+        )
+        .unwrap_or_else(|error| session_operation_error("session start", &error));
     }
     session_workflow_unavailable(&SessionWorkflowUnavailableInput {
         run_id,
@@ -1070,17 +1092,29 @@ fn moved_session_argv(command: SessionCommand) -> MovedCommand {
             input_profile,
             input_profile_seed,
         }),
-        SessionCommand::Status => MovedCommand {
+        SessionCommand::Status { .. } => MovedCommand {
             deprecated_argv: command_argv("session", "status"),
             moved_argv: command_argv("controller", "status"),
             action: "status",
         },
-        SessionCommand::Stop => MovedCommand {
+        SessionCommand::Stop { .. } => MovedCommand {
             deprecated_argv: command_argv("session", "stop"),
             moved_argv: command_argv("controller", "stop"),
             action: "stop",
         },
     }
+}
+
+fn session_operation_error(command: &str, error: &CliError) -> Value {
+    let mut value = error.to_json();
+    if let Some(object) = value.as_object_mut() {
+        object.insert(String::from("schema"), json!(COMMAND_RESULT_SCHEMA));
+        object.insert(String::from("command"), json!(command));
+        object
+            .entry(String::from("mutated"))
+            .or_insert_with(|| json!(false));
+    }
+    value
 }
 
 fn moved_controller_start_argv(config: &ControllerStartMigration) -> MovedCommand {
@@ -2959,45 +2993,6 @@ mod tests {
     }
 
     #[test]
-    fn umbrella_session_start_human_path_is_profile_free_and_non_mutating() {
-        let out = unique_temp_dir("session-parser-human-unavailable");
-        let result = parsed_session_result(vec![
-            String::from("input-dynamics"),
-            String::from("session"),
-            String::from("start"),
-            String::from("--input-actor"),
-            String::from("human"),
-            String::from("--run-id"),
-            String::from("run-test"),
-            String::from("--out"),
-            path_string_lossy(&out),
-        ]);
-
-        assert_session_error(&result, "session_workflow_unavailable");
-        assert_eq!(
-            result.pointer("/details/input_controller"),
-            Some(&Value::Null),
-            "human result should expose null controller provenance"
-        );
-        assert_eq!(
-            result
-                .pointer("/details/input_cadence_policy")
-                .and_then(Value::as_str),
-            Some("manual"),
-            "human result should expose manual cadence"
-        );
-        assert_eq!(
-            result.pointer("/details/profile_provenance"),
-            Some(&Value::Null),
-            "human result should not have profile provenance"
-        );
-        assert!(
-            !out.exists(),
-            "human unavailable result must not create output directory"
-        );
-    }
-
-    #[test]
     fn umbrella_session_start_human_profile_path_is_rejected_without_reading() {
         let out = unique_temp_dir("session-parser-human-profile-path");
         let profile = unique_temp_dir("missing-human-profile").join("profile.json");
@@ -3127,25 +3122,6 @@ mod tests {
                         Value::String(String::from("agent_adb"))
                     ])),
             "legacy no-out session start should preserve explicit agent_adb actor"
-        );
-    }
-
-    #[test]
-    fn old_session_status_and_stop_return_command_moved_without_mutation() {
-        let status = moved_session_command(SessionCommand::Status);
-        let stop = moved_session_command(SessionCommand::Stop);
-
-        assert_command_moved(&status, "status");
-        assert_command_moved(&stop, "stop");
-        assert_eq!(
-            status.pointer("/moved_to/argv/2").and_then(Value::as_str),
-            Some("status"),
-            "old session status should move to controller status"
-        );
-        assert_eq!(
-            stop.pointer("/moved_to/argv/2").and_then(Value::as_str),
-            Some("stop"),
-            "old session stop should move to controller stop"
         );
     }
 
