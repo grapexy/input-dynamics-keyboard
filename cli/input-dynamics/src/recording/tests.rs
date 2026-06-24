@@ -294,6 +294,11 @@ fn inspect_requires_declared_video_artifacts() {
         has_record_with_video_action,
         "inspect should give a canonical rerun action for missing video"
     );
+    let action_command = action_command(&result, "record_with_video");
+    assert!(
+        action_command.is_some_and(|command| command.contains("--duration-ms <positive-ms>")),
+        "video rerun action should require an explicit duration placeholder"
+    );
     let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
 }
 
@@ -650,8 +655,10 @@ fn inspect_keeps_declared_legacy_video_readable_but_noncanonical() {
     );
     let action_command = action_command(&result, "record_with_canonical_clocks");
     assert!(
-        action_command.is_some_and(|command| !command.contains("--with-evidence")),
-        "video-only canonical rerun should not over-capture evidence"
+        action_command.is_some_and(|command| {
+            command.contains("--duration-ms <positive-ms>") && !command.contains("--with-evidence")
+        }),
+        "video-only canonical rerun should require duration and avoid over-capturing evidence"
     );
     let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
 }
@@ -713,8 +720,8 @@ fn inspect_keeps_nested_legacy_video_readable_but_noncanonical() {
     );
     let action_command = action_command(&result, "record_with_canonical_clocks");
     assert!(
-        action_command.is_some(),
-        "nested legacy timing should request canonical recollection"
+        action_command.is_some_and(|command| command.contains("--duration-ms <positive-ms>")),
+        "nested legacy timing should request bounded canonical recollection"
     );
     let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
 }
@@ -865,8 +872,10 @@ fn inspect_preserves_evidence_capture_in_missing_video_rerun_action() {
     );
     let action_command = action_command(&result, "record_with_video");
     assert!(
-        action_command.is_some_and(|command| command.contains("--with-evidence")),
-        "video rerun should preserve requested evidence capture"
+        action_command.is_some_and(|command| {
+            command.contains("--duration-ms <positive-ms>") && command.contains("--with-evidence")
+        }),
+        "video rerun should require duration and preserve requested evidence capture"
     );
     let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
 }
@@ -951,8 +960,10 @@ fn inspect_classifies_legacy_evidence_as_noncanonical() {
     );
     let action_command = action_command(&result, "record_with_canonical_clocks");
     assert!(
-        action_command.is_some_and(|command| command.contains("--with-evidence")),
-        "evidence-only canonical rerun should preserve evidence capture"
+        action_command.is_some_and(|command| {
+            command.contains("--duration-ms <positive-ms>") && command.contains("--with-evidence")
+        }),
+        "evidence-only canonical rerun should require duration and preserve evidence capture"
     );
     let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
 }

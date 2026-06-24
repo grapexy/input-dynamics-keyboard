@@ -37,7 +37,11 @@ impl CliError {
         let mut payload = Map::new();
         payload.insert(String::from("ok"), json!(false));
         payload.insert(String::from("error"), json!(self.message));
+        payload.insert(String::from("message"), json!(self.message));
         if let Some(details) = self.details.as_ref() {
+            if let Some(error_code) = details.get("error_code").and_then(Value::as_str) {
+                payload.insert(String::from("error_code"), json!(error_code));
+            }
             payload.insert(String::from("details"), details.clone());
         }
         Value::Object(payload)
@@ -83,3 +87,34 @@ impl From<std::string::FromUtf8Error> for CliError {
 }
 
 pub(crate) type CliResult<T> = Result<T, CliError>;
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use crate::error::CliError;
+
+    #[test]
+    fn cli_error_json_exposes_message_and_error_code() {
+        let error = CliError::with_details(
+            "duration is required",
+            json!({"error_code": "record_stdin_unavailable"}),
+        );
+
+        let payload = error.to_json();
+
+        assert_eq!(payload.get("ok").and_then(Value::as_bool), Some(false));
+        assert_eq!(
+            payload.get("message").and_then(Value::as_str),
+            Some("duration is required")
+        );
+        assert_eq!(
+            payload.get("error").and_then(Value::as_str),
+            Some("duration is required")
+        );
+        assert_eq!(
+            payload.get("error_code").and_then(Value::as_str),
+            Some("record_stdin_unavailable")
+        );
+    }
+}

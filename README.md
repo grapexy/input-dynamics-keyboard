@@ -76,7 +76,7 @@ target/debug/input-dynamics doctor
 target/debug/input-dynamics install
 target/debug/input-dynamics select-ime
 target/debug/input-dynamics touch doctor
-target/debug/input-dynamics record --run-id "$RUN_ID" --out "runs/$RUN_ID"
+target/debug/input-dynamics record --run-id "$RUN_ID" --out "runs/$RUN_ID" --duration-ms 10000
 target/debug/input-dynamics recording inspect --dir "runs/$RUN_ID"
 ```
 
@@ -84,10 +84,14 @@ If more than one Android device is connected, pass `--serial <adb-serial>` to
 each `input-dynamics` command. Session runtime files and locks are keyed by
 package and device serial.
 
-The `record` command starts IME logging, captures an ADB touchscreen event
-stream, records screen video, writes normalized `adb/getevent.jsonl`, stops
-cleanly when you press Enter, pulls logs, writes `manifest.json`, and writes
-`validation.json`. Screen video is sensitive local recording data.
+The transitional `record` command starts IME logging, captures an ADB
+touchscreen event stream, records screen video, writes normalized
+`adb/getevent.jsonl`, pulls logs, writes `manifest.json`, and writes
+`validation.json`. Use positive `--duration-ms` values for agent-run or
+scripted captures.
+Open-ended `record` is disabled during the session-workflow migration; omitting
+`--duration-ms` is a hard error so agents cannot accidentally create short
+valid-looking runs. Screen video is sensitive local recording data.
 
 To build and install a local debug APK instead:
 

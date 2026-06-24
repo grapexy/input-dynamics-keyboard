@@ -1831,8 +1831,9 @@ fn add_record_next_action(actions: &mut Vec<Value>, flags: &Value) {
         } else {
             "record_with_canonical_clocks"
         };
-        let mut command =
-            String::from("input-dynamics record --run-id <new-run-id> --out <new-run-dir>");
+        let mut command = String::from(
+            "input-dynamics record --run-id <new-run-id> --out <new-run-dir> --duration-ms <positive-ms>",
+        );
         if include_evidence {
             command.push_str(" --with-evidence");
         }
@@ -1844,9 +1845,7 @@ fn add_record_next_action(actions: &mut Vec<Value>, flags: &Value) {
                 "rerun with evidence to refresh request-correlated device clock anchors"
             }
             (false, true) => "rerun with video to refresh request-correlated device clock anchors",
-            (false, false) => {
-                "rerun through the canonical recorder to refresh device clock anchors"
-            }
+            (false, false) => "rerun with an explicit duration to refresh device clock anchors",
         };
         actions.push(json!({
             "kind": kind,

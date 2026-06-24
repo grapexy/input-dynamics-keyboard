@@ -145,7 +145,9 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         command: RecordingCommand,
     },
-    /// Record a bounded research run with IME logs, ADB touch events, and screen video.
+    /// Transitional bounded foreground capture with IME logs, ADB touch events, and screen video.
+    ///
+    /// Requires --duration-ms; missing duration returns a structured JSON error.
     Record {
         /// External run id to write into each session record.
         #[arg(long)]
@@ -153,7 +155,7 @@ pub(crate) enum Commands {
         /// Local experiment output directory.
         #[arg(long)]
         out: PathBuf,
-        /// Optional capture duration. If omitted, press Enter on stdin to stop.
+        /// Positive capture duration. Required for every transitional record invocation.
         #[arg(long)]
         duration_ms: Option<u64>,
         /// Start a persistent uinput controller during the record run.
@@ -295,7 +297,7 @@ pub(crate) enum GeteventCommand {
 pub(crate) enum DeriveCommand {
     /// Derive per-press summaries from IME JSONL records.
     Presses {
-        /// Recording directory created by `input-dynamics record`.
+        /// Recording directory created by an input-dynamics capture workflow.
         #[arg(long)]
         recording_dir: PathBuf,
         /// IME session JSONL path. Defaults to the single `ime/session-*.jsonl`.
@@ -307,7 +309,7 @@ pub(crate) enum DeriveCommand {
     },
     /// Derive a run-level summary from press summaries.
     Summary {
-        /// Recording directory created by `input-dynamics record`.
+        /// Recording directory created by an input-dynamics capture workflow.
         #[arg(long)]
         recording_dir: PathBuf,
         /// Derived press summary JSONL path. Defaults under `--recording-dir`.
@@ -319,7 +321,7 @@ pub(crate) enum DeriveCommand {
     },
     /// Derive touch gestures and dismissal inferences.
     Dismissals {
-        /// Recording directory created by `input-dynamics record`.
+        /// Recording directory created by an input-dynamics capture workflow.
         #[arg(long)]
         recording_dir: PathBuf,
         /// Local derivation policy JSON used for analysis thresholds.
@@ -340,7 +342,7 @@ pub(crate) enum DeriveCommand {
     },
     /// Derive a cross-source recording timeline.
     Timeline {
-        /// Recording directory created by `input-dynamics record`.
+        /// Recording directory created by an input-dynamics capture workflow.
         #[arg(long)]
         recording_dir: PathBuf,
         /// IME session JSONL path. Defaults to the single `ime/session-*.jsonl`.
@@ -358,7 +360,7 @@ pub(crate) enum DeriveCommand {
     },
     /// Derive encoded video frame metadata and event-frame windows.
     VideoMap {
-        /// Recording directory created by `input-dynamics record`.
+        /// Recording directory created by an input-dynamics capture workflow.
         #[arg(long)]
         recording_dir: PathBuf,
         /// Video-map output directory. Defaults to `derived/video_map`.
@@ -374,7 +376,7 @@ pub(crate) enum DeriveCommand {
 pub(crate) enum RecordingCommand {
     /// Inspect a recording directory without modifying it.
     Inspect {
-        /// Recording directory created by `input-dynamics record`.
+        /// Recording directory created by an input-dynamics capture workflow.
         #[arg(long)]
         dir: PathBuf,
     },

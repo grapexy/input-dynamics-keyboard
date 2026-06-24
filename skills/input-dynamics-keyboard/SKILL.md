@@ -175,11 +175,13 @@ controller exit. Do not rely on manual `/tmp` snapshots for normal forensics.
 
 ```bash
 RUN_ID=run-YYYYMMDD-HHMMSS-local-android
-idk record --run-id "$RUN_ID" --out "runs/$RUN_ID"
+idk record --run-id "$RUN_ID" --out "runs/$RUN_ID" --duration-ms 10000
 ```
 
-When `--duration-ms` is omitted, press Enter in the terminal to stop capture
-cleanly. Agents should use `--duration-ms <ms>` for scripted smoke tests.
+Always pass a positive `--duration-ms <ms>` for agent-run or scripted captures.
+Open-ended `record` is disabled during the session-workflow migration; omitting
+`--duration-ms` is a hard error. Do not use open-ended `record` for automated or
+agent-driven human-operated runs.
 
 The command writes `manifest.json`, `validation.json`, `ime/`, `adb/`,
 `video/`, and `derived/` under the output directory. The
@@ -199,6 +201,7 @@ index JSON:
 idk record \
   --run-id "$RUN_ID" \
   --out "runs/$RUN_ID" \
+  --duration-ms 10000 \
   --with-evidence
 ```
 
@@ -265,8 +268,10 @@ Required missing or stale video makes `valid_for_analysis` false. The `clock`
 object classifies saved video/evidence anchors as `bracketed`,
 `legacy_wall_clock_bracketed`, `missing_source`, `stale_inputs`,
 `probe_failed`, `not_requested`, or `not_estimated`. If `next_actions` is
-non-empty, prefer those CLI commands over ad hoc file inspection. Each
+non-empty, prefer those CLI command templates over ad hoc file inspection. Each
 `next_actions` item has `kind`, `command`, and `reason`; branch on `kind`.
+Recorder actions include placeholders such as `<new-run-id>`, `<new-run-dir>`,
+and `<positive-ms>`; fill them before running the command.
 Current action kinds are `validate`, `record_with_video`,
 `record_with_canonical_clocks`, `derive_presses`, `derive_summary`,
 `derive_dismissals`, `derive_timeline`, and `derive_video_map`.
@@ -409,14 +414,16 @@ that depend on canonical clocks, require `flags.canonical_clock_ready: true`,
 `flags.needs_canonical_recording: false`, and no `record_with_video` or
 `record_with_canonical_clocks` action.
 
-5. Use lower-level status and layout commands when debugging:
+5. Diagnostic-only: use lower-level status and layout commands when debugging
+   the raw IME control surface:
 
 ```bash
 idk status
 idk layout
 ```
 
-6. If not using `record`, stop, pull, and validate logs manually:
+6. Diagnostic-only: if investigating the raw IME lifecycle outside the normal
+   capture workflow, stop, pull, and validate logs manually:
 
 ```bash
 idk stop

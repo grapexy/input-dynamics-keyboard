@@ -73,7 +73,7 @@ pub(crate) fn screen_config_from_run_manifest(run_dir: &Path) -> CliResult<Scree
     let manifest = serde_json::from_str::<Value>(&manifest_text)?;
     screen_config_from_manifest(&manifest).map_err(|error| {
         CliError::new(format!(
-            "{error}; record a new run with current input-dynamics record so manifest.json contains coordinate_frame"
+            "{error}; capture a new run with current input-dynamics tooling so manifest.json contains coordinate_frame"
         ))
     })
 }

@@ -2,7 +2,7 @@
 
 use std::fmt::Write;
 use std::fs;
-use std::io;
+use std::io::{self, BufRead};
 use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::thread;
@@ -528,7 +528,7 @@ impl<'a> InputControllerCapture<'a> {
 }
 
 pub(crate) fn record_run(app: &App, config: &RecordConfig) -> CliResult<Value> {
-    let paths = prepare_paths(&config.out)?;
+    let paths = prepare_record_paths(config)?;
     let host_start_wall_ms = host_wall_millis()?;
     let ActiveRecordWindow {
         pre_stop,
@@ -931,12 +931,65 @@ fn wait_for_stop(maybe_duration_ms: Option<u64>) -> CliResult<Value> {
             "duration_ms": capture_duration_ms,
         }));
     }
+    let stdin_handle = io::stdin();
+    let mut locked_stdin = stdin_handle.lock();
+    wait_for_stdin_enter(&mut locked_stdin)
+}
+
+fn wait_for_stdin_enter(reader: &mut impl BufRead) -> CliResult<Value> {
     let mut line = String::new();
-    let bytes = io::stdin().read_line(&mut line)?;
+    let bytes = reader.read_line(&mut line)?;
+    if bytes == 0_usize {
+        return Err(record_stdin_unavailable_error("stdin_eof"));
+    }
     Ok(json!({
         "stop_mode": "stdin_enter",
         "stdin_bytes": bytes,
     }))
+}
+
+fn validate_record_stop_mode(config: &RecordConfig) -> CliResult<()> {
+    ensure_record_stop_mode(config.duration_ms)
+}
+
+fn prepare_record_paths(config: &RecordConfig) -> CliResult<RecordPaths> {
+    validate_record_stop_mode(config)?;
+    prepare_paths(&config.out)
+}
+
+fn ensure_record_stop_mode(maybe_duration_ms: Option<u64>) -> CliResult<()> {
+    match maybe_duration_ms {
+        Some(duration_ms) if duration_ms > 0_u64 => Ok(()),
+        Some(duration_ms) => Err(record_invalid_duration_error(duration_ms)),
+        None => Err(record_stdin_unavailable_error("duration_required")),
+    }
+}
+
+fn record_stdin_unavailable_error(reason: &str) -> CliError {
+    CliError::with_details(
+        "record requires --duration-ms during the session workflow migration",
+        json!({
+            "error_code": "record_stdin_unavailable",
+            "reason": reason,
+            "safe_current_command": "input-dynamics record --run-id <run-id> --out <run-dir> --duration-ms <positive-ms>",
+            "canonical_workflow": "input-dynamics session start/status/stop",
+            "migration_note": "record is a transitional foreground capture path and will be removed before release",
+        }),
+    )
+}
+
+fn record_invalid_duration_error(duration_ms: u64) -> CliError {
+    CliError::with_details(
+        "record requires a positive --duration-ms value during the session workflow migration",
+        json!({
+            "error_code": "record_invalid_duration",
+            "reason": "duration_must_be_positive",
+            "duration_ms": duration_ms,
+            "safe_current_command": "input-dynamics record --run-id <run-id> --out <run-dir> --duration-ms <positive-ms>",
+            "canonical_workflow": "input-dynamics session start/status/stop",
+            "migration_note": "record is a transitional foreground capture path and will be removed before release",
+        }),
+    )
 }
 
 fn prepare_paths(out: &Path) -> CliResult<RecordPaths> {
@@ -1384,13 +1437,17 @@ fn path_string_lossy(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::io::Cursor;
     use std::path::PathBuf;
+    use std::process;
 
     use serde_json::{Value, json};
 
     use crate::record::{
-        RecordConfig, VideoMode, input_controller_result_ok, input_controller_summary,
-        record_input_controller, should_stage_ime_file,
+        RecordConfig, VideoMode, ensure_record_stop_mode, input_controller_result_ok,
+        input_controller_summary, prepare_record_paths, record_input_controller,
+        should_stage_ime_file, wait_for_stdin_enter,
     };
 
     #[test]
@@ -1413,6 +1470,171 @@ mod tests {
             Some(String::from("input-dynamics-cli")),
             "record should default controller provenance when runtime controller is requested"
         );
+    }
+
+    #[test]
+    fn record_stop_mode_allows_duration_without_terminal_stdin() {
+        assert!(
+            ensure_record_stop_mode(Some(1_u64)).is_ok(),
+            "bounded records should not require stdin"
+        );
+    }
+
+    #[test]
+    fn record_rejects_open_ended_config_before_creating_output_dir() {
+        let out = std::env::temp_dir().join(format!(
+            "input-dynamics-record-no-duration-{}",
+            process::id()
+        ));
+        let _cleanup_before = fs::remove_dir_all(&out);
+        let config = RecordConfig {
+            run_id: String::from("run-test"),
+            out: out.clone(),
+            duration_ms: None,
+            with_input_controller: false,
+            with_evidence: false,
+            full_accessibility_evidence: false,
+            video_mode: VideoMode::Disabled,
+            input_actor: String::from("human"),
+            input_controller: None,
+            input_cadence_policy: String::from("manual"),
+        };
+
+        let outcome = prepare_record_paths(&config);
+
+        assert!(
+            outcome.is_err(),
+            "open-ended record config should be rejected"
+        );
+        assert!(
+            !out.exists(),
+            "open-ended record rejection must not create artifacts"
+        );
+        let _cleanup_after = fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn record_stop_mode_rejects_open_ended_record() {
+        let outcome = ensure_record_stop_mode(None);
+
+        assert!(
+            outcome.is_err(),
+            "open-ended record must fail during migration"
+        );
+        let error_json = outcome
+            .err()
+            .map_or_else(|| json!({}), |error| error.to_json());
+
+        assert_eq!(
+            error_json
+                .pointer("/details/error_code")
+                .and_then(Value::as_str),
+            Some("record_stdin_unavailable"),
+            "error should be machine-readable"
+        );
+        assert_eq!(
+            error_json.get("error_code").and_then(Value::as_str),
+            Some("record_stdin_unavailable"),
+            "error_code should be promoted for agent branching"
+        );
+        assert_eq!(
+            error_json
+                .pointer("/details/reason")
+                .and_then(Value::as_str),
+            Some("duration_required"),
+            "error should explain that duration is required"
+        );
+    }
+
+    #[test]
+    fn record_stop_mode_rejects_zero_duration() {
+        let outcome = ensure_record_stop_mode(Some(0_u64));
+
+        assert!(outcome.is_err(), "zero-duration record must fail");
+        let error_json = outcome
+            .err()
+            .map_or_else(|| json!({}), |error| error.to_json());
+
+        assert_eq!(
+            error_json.get("error_code").and_then(Value::as_str),
+            Some("record_invalid_duration"),
+            "zero duration should have a distinct machine-readable error"
+        );
+        assert_eq!(
+            error_json
+                .pointer("/details/reason")
+                .and_then(Value::as_str),
+            Some("duration_must_be_positive"),
+            "zero duration should explain the positive-duration requirement"
+        );
+    }
+
+    #[test]
+    fn record_wait_accepts_enter_from_interactive_stdin() {
+        let mut input = Cursor::new(b"\n".as_slice());
+        let outcome = wait_for_stdin_enter(&mut input);
+
+        assert!(outcome.is_ok(), "Enter should stop the record: {outcome:?}");
+        let result = outcome.unwrap_or_else(|error| json!({"error": error.to_string()}));
+
+        assert_eq!(
+            result.get("stop_mode").and_then(Value::as_str),
+            Some("stdin_enter")
+        );
+        assert_eq!(result.get("stdin_bytes").and_then(Value::as_u64), Some(1));
+    }
+
+    #[test]
+    fn record_wait_rejects_stdin_eof() {
+        let mut input = Cursor::new(Vec::<u8>::new());
+        let outcome = wait_for_stdin_enter(&mut input);
+
+        assert!(outcome.is_err(), "EOF is not an Enter stop");
+        let error_json = outcome
+            .err()
+            .map_or_else(|| json!({}), |error| error.to_json());
+
+        assert_eq!(
+            error_json
+                .pointer("/details/error_code")
+                .and_then(Value::as_str),
+            Some("record_stdin_unavailable"),
+            "EOF error should be machine-readable"
+        );
+        assert_eq!(
+            error_json
+                .pointer("/details/reason")
+                .and_then(Value::as_str),
+            Some("stdin_eof"),
+            "EOF should be distinguishable from nonterminal preflight"
+        );
+    }
+
+    #[test]
+    fn public_docs_do_not_teach_open_ended_record() {
+        let documents = [
+            ("README.md", include_str!("../../../README.md")),
+            ("docs/cli.md", include_str!("../../../docs/cli.md")),
+            (
+                "skills/input-dynamics-keyboard/SKILL.md",
+                include_str!("../../../skills/input-dynamics-keyboard/SKILL.md"),
+            ),
+        ];
+        let forbidden_phrases = [
+            "press Enter",
+            "duration-ms is omitted",
+            "stdin to stop",
+            "requires a real interactive terminal",
+        ];
+
+        for (name, contents) in documents {
+            for phrase in forbidden_phrases {
+                assert!(
+                    !contents.contains(phrase),
+                    "{name} should not contain stale open-ended record guidance: {phrase}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -118,10 +118,11 @@ cargo run --quiet -p input-dynamics -- observe all --out-dir /tmp/input-dynamics
 screenshots may contain visible screen content, so store them with the same care
 as run artifacts.
 
-For a complete bounded experiment capture, use `record`. It starts IME logging,
-captures a concurrent ADB touchscreen event stream with `getevent`, records
-screen video, normalizes the event stream to JSONL, stops the session, pulls
-IME logs, writes `manifest.json`, and writes `validation.json`:
+For a bounded experiment capture during the session-workflow migration, use
+`record` with an explicit duration. It starts IME logging, captures a concurrent
+ADB touchscreen event stream with `getevent`, records screen video, normalizes
+the event stream to JSONL, stops the session, pulls IME logs, writes
+`manifest.json`, and writes `validation.json`:
 
 ```bash
 RUN_ID=run-YYYYMMDD-HHMMSS-human-android
@@ -130,13 +131,18 @@ cargo run --quiet -p input-dynamics -- doctor
 cargo run --quiet -p input-dynamics -- install
 cargo run --quiet -p input-dynamics -- select-ime
 cargo run --quiet -p input-dynamics -- touch doctor
-cargo run --quiet -p input-dynamics -- record --run-id "$RUN_ID" --out "runs/$RUN_ID"
+cargo run --quiet -p input-dynamics -- record \
+  --run-id "$RUN_ID" \
+  --out "runs/$RUN_ID" \
+  --duration-ms 10000
 ```
 
-When `--duration-ms` is omitted, press Enter in the terminal to stop capture
-cleanly. For scripted smoke tests, pass `--duration-ms <ms>`.
+Use a positive `--duration-ms <ms>` for agent-run or scripted captures.
+Open-ended `record` is disabled during the session-workflow migration; omitting
+`--duration-ms` is a hard error. Do not use open-ended `record` for automated or
+agent-driven human-operated runs.
 
-Video is enabled by default and is part of the canonical recording path. It is
+Video is enabled by default for this bounded capture path. It is
 stored under `video/` and treated as sensitive local recording data. Use
 `--no-video` only for diagnostics or CI environments where device screen
 recording is intentionally unavailable.
@@ -148,6 +154,7 @@ To preserve screen context at the beginning and end of a run, add
 cargo run --quiet -p input-dynamics -- record \
   --run-id "$RUN_ID" \
   --out "runs/$RUN_ID" \
+  --duration-ms 10000 \
   --with-evidence
 ```
 
@@ -215,6 +222,7 @@ or clap text to stderr:
 ```json
 {
   "ok": false,
+  "message": "keyboard is hidden (keyboard_view_not_shown); run `input-dynamics keyboard ensure-visible` or focus a non-password editable field first",
   "error": "keyboard is hidden (keyboard_view_not_shown); run `input-dynamics keyboard ensure-visible` or focus a non-password editable field first"
 }
 ```
@@ -323,15 +331,16 @@ scraping human-oriented text.
 - `getevent normalize --input <raw.log> --output <events.jsonl>`: parses
   `adb shell getevent -lt` output into neutral JSONL records with schema
   `input_dynamics_getevent.v1`.
-- `record --run-id <id> --out <dir>`: records a complete run with IME JSONL,
-  ADB `getevent` raw and normalized touch streams, default screen video,
-  manifest, pull, and validation output. Use `--duration-ms <ms>` for timed
-  runs; otherwise press Enter to stop. Add `--with-input-controller` for
+- `record --run-id <id> --out <dir> --duration-ms <positive-ms>`: records a bounded
+  transitional run with IME JSONL, ADB `getevent` raw and normalized touch
+  streams, default screen video, manifest, pull, and validation output. Add
+  `--with-input-controller` for
   bounded agent-driven runs that need persistent uinput controller metadata in
   the manifest. Add `--with-evidence` to capture start/end observation bundles
   containing accessibility XML, screenshot PNG, status, layout, state, and
   index JSON. Use `--no-video` only as an explicit diagnostic or CI escape
-  hatch.
+  hatch. Open-ended `record` is disabled during the session-workflow migration
+  and is not the normal agent path.
 - `derive presses --recording-dir <dir>`: derives per-press summaries from IME
   JSONL records. The output includes key timing, hold/flight timing, landing
   geometry, pointer movement, and pressure/contact ranges. It does not infer
@@ -509,12 +518,14 @@ The `clock` object classifies saved video and evidence anchors as
 `bracketed`, `legacy_wall_clock_bracketed`, `missing_source`, `stale_inputs`,
 `probe_failed`, `not_requested`, or `not_estimated`. Legacy wall-clock timing
 remains readable, but it does not set `canonical_clock_ready`. Required missing
-or stale video makes `valid_for_analysis` false and adds a canonical
+or stale video makes `valid_for_analysis` false and adds a bounded
 `record_with_video` action. Missing, legacy, stale, or malformed canonical
-clock anchors add a canonical recorder action. `next_actions` contains local
-CLI commands an agent can run to refresh missing or stale artifacts. Each item
-has `kind`, `command`, and `reason`; branch on `kind` and run `command` when
-appropriate. Current action kinds are `validate`, `record_with_video`,
+clock anchors add a bounded recorder action. `next_actions` contains local CLI
+command templates an agent can use to refresh missing or stale artifacts.
+Recorder actions include placeholders such as `<new-run-id>`, `<new-run-dir>`,
+and `<positive-ms>`; fill them before running the command. Each item has `kind`,
+`command`, and `reason`; branch on `kind`. Current action kinds are `validate`,
+`record_with_video`,
 `record_with_canonical_clocks`, `derive_presses`, `derive_summary`,
 `derive_dismissals`, `derive_timeline`, and `derive_video_map`. It does not
 probe the device or derive new clock alignment.
