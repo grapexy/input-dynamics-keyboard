@@ -512,8 +512,11 @@ flags such as `valid_for_analysis`, `has_video`, `needs_video`,
 `lifecycle_active`, `lifecycle_in_progress`, `needs_session_stop`, and
 `needs_session_repair`, `video_ended_early`, `required_process_failed`,
 `required_process_ended_early`, `required_process_unverifiable`,
-`required_process_stop_failed`, `required_process_failure_codes`, and
-`needs_session_rerun`.
+`required_process_stop_failed`, `required_process_failure_codes`,
+`required_artifact_failed`, `ime_logs_failed`, `ime_logs_pull_failed`,
+`ime_logs_staging_failed`, `ime_validation_failed`, `getevent_failed`,
+`getevent_normalization_failed`, `getevent_content_missing`,
+`required_artifact_failure_codes`, and `needs_session_rerun`.
 
 For umbrella-session recordings, inspect also reports a summarized `session`
 object sourced from `session/state.json`, `session/finalization.json`, and
@@ -563,7 +566,12 @@ capture a new session through the same `session start/status/stop/inspect`
 workflow. If `flags.required_process_failed` is true, a required non-video
 capture process ended early, could not be verified, or did not stop cleanly;
 preserve the failed run and follow the same canonical session rerun workflow
-from `next_actions`.
+from `next_actions`. If `flags.required_artifact_failed` is true, required
+post-stop finalization did not produce a usable IME log, validation result, or
+normalized ADB touchscreen event stream. Preserve the failed run for diagnostics
+and follow the canonical session rerun workflow from `next_actions`; do not
+treat lower-level validation or derivation commands as a normal repair path for
+that run.
 
 Treat `valid_for_analysis` as a base artifact/readability gate. For any
 video/evidence anchor claim, cross-source timeline claim, or ordering claim that

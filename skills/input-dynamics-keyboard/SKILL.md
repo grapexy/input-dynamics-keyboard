@@ -239,15 +239,24 @@ Use `flags.valid_for_analysis`, `flags.needs_validation`,
 `flags.lifecycle_incomplete`, `flags.lifecycle_active`,
 `flags.lifecycle_in_progress`, `flags.needs_session_stop`, and
 `flags.needs_session_repair`, `flags.video_ended_early`,
-`flags.required_process_failed`, `flags.required_process_failure_codes`, and
-`flags.needs_session_rerun` to decide the next step. Branch on
+`flags.required_process_failed`, `flags.required_process_failure_codes`,
+`flags.required_artifact_failed`, `flags.ime_logs_failed`,
+`flags.ime_logs_pull_failed`, `flags.ime_logs_staging_failed`,
+`flags.ime_validation_failed`, `flags.getevent_failed`,
+`flags.getevent_normalization_failed`, `flags.getevent_content_missing`,
+`flags.required_artifact_failure_codes`, and `flags.needs_session_rerun` to
+decide the next step. Branch on
 `session_classification` first: `complete` may continue to artifact/timing gates;
 `active` follows `session_stop`; `in_progress` follows `session_status` and then
 inspects again; `incomplete`, `aborted`, and `repair_required` are not complete
 recordings and must not be derived or analyzed as if they were complete.
-If `video_ended_early` or `required_process_failed` is true, preserve the failed
-run for diagnostics and run a new capture through `session start`,
-`session status`, `session stop`, and `recording inspect`.
+If `video_ended_early`, `required_process_failed`, or
+`required_artifact_failed` is true, preserve the failed run for diagnostics and
+run a new capture through `session start`, `session status`, `session stop`, and
+`recording inspect`. Required artifact failures mean post-stop finalization did
+not produce usable IME logs, validation output, or normalized ADB touchscreen
+events; do not use lower-level validation or derivation commands as the normal
+repair path for that run.
 Required missing or stale video makes `valid_for_analysis` false. The `clock`
 object classifies saved video/evidence anchors as `bracketed`,
 `legacy_wall_clock_bracketed`, `missing_source`, `stale_inputs`,
@@ -460,12 +469,17 @@ key-local landing ratios, hold duration, contact fields, and inter-key delay.
 
 ## Validation
 
-Validate pulled JSONL before considering a run complete:
+Complete `session stop` finalization writes validation automatically. Run manual
+validation only for diagnostic raw IME pulls, or when `recording inspect`
+returns a `next_actions` item with `kind: "validate"`:
 
 ```bash
 idk validate "runs/$RUN_ID" --run-id "$RUN_ID"
 idk recording inspect --dir "runs/$RUN_ID"
 ```
+
+If `flags.required_artifact_failed` is true, preserve the failed run and follow
+the session rerun action instead of manually validating that run.
 
 Expected validation includes `session_start`, `session_stop`,
 `external_run_id`, session-level `input_actor`, optional `input_profile_*`

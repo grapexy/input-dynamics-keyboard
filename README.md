@@ -53,8 +53,9 @@ Use this keyboard only in consented, local research settings.
 - Session manifests with capture runtime metadata and cleanup results.
 - Single-owner stateful CLI sessions; competing starts return a non-destructive
   busy result.
-- Session status and inspection surfaces report required capture process
-  failures with stable machine-readable codes and canonical rerun guidance.
+- Session status and inspection surfaces report required capture process and
+  required artifact finalization failures with stable machine-readable codes and
+  canonical rerun guidance.
 - Strict live-input readiness gates: agent key commands fail unless the uinput
   controller is ready and the IME has a known non-password input scope.
 - Device-scoped CLI operation with `--serial` for multi-device hosts.

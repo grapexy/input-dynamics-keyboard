@@ -228,6 +228,50 @@ impl RequiredProcessFlags {
     }
 }
 
+struct RequiredArtifactFlags {
+    failure_codes: Vec<String>,
+}
+
+impl RequiredArtifactFlags {
+    fn failed(&self) -> bool {
+        !self.failure_codes.is_empty()
+    }
+
+    fn ime_logs_pull_failed(&self) -> bool {
+        self.has_code("ime_logs_pull_failed")
+    }
+
+    fn ime_logs_staging_failed(&self) -> bool {
+        self.has_code("ime_logs_staging_failed")
+    }
+
+    fn ime_validation_failed(&self) -> bool {
+        self.has_code("ime_validation_failed")
+    }
+
+    fn getevent_normalization_failed(&self) -> bool {
+        self.has_code("getevent_normalization_failed")
+    }
+
+    fn getevent_content_missing(&self) -> bool {
+        self.has_code("getevent_content_missing")
+    }
+
+    fn ime_logs_failed(&self) -> bool {
+        self.ime_logs_pull_failed()
+            || self.ime_logs_staging_failed()
+            || self.ime_validation_failed()
+    }
+
+    fn getevent_failed(&self) -> bool {
+        self.getevent_normalization_failed() || self.getevent_content_missing()
+    }
+
+    fn has_code(&self, expected: &str) -> bool {
+        self.failure_codes.iter().any(|code| code == expected)
+    }
+}
+
 /// Inspect a recording directory without modifying it.
 pub(crate) fn inspect_recording(dir: &Path) -> CliResult<Value> {
     require_directory(dir)?;
@@ -2428,79 +2472,276 @@ fn note_flags(dir: &Path) -> CliResult<Value> {
 }
 
 fn flags_json(inputs: &FlagInputs<'_>) -> Value {
+    let mut flags = Map::new();
+    insert_analysis_flags(&mut flags, inputs);
+    insert_clock_flags(&mut flags, inputs);
+    insert_derivation_flags(&mut flags, inputs);
+    insert_session_flags(&mut flags, inputs);
+    insert_failure_flags(&mut flags, inputs);
+    insert_recording_housekeeping_flags(&mut flags, inputs);
+    Value::Object(flags)
+}
+
+fn insert_analysis_flags(flags: &mut Map<String, Value>, inputs: &FlagInputs<'_>) {
     let has_getevent_jsonl = artifact_exists(inputs.artifacts, "adb_getevent_jsonl");
-    let has_press_summaries = artifact_exists(inputs.artifacts, "press_summaries");
-    let has_touch_gestures = artifact_exists(inputs.artifacts, "touch_gestures");
-    let has_dismissals = artifact_exists(inputs.artifacts, "dismissal_inferences");
-    let has_video = inputs.video.exists && inputs.video.stale_reasons.is_empty();
+    let has_video = fresh_video_present(inputs);
     let needs_video = inputs.video.required && !has_video;
+    let valid_for_analysis = inputs.manifest.is_some()
+        && inputs.session.selected.is_some()
+        && has_getevent_jsonl
+        && inputs.validation.current_ok
+        && !inputs.session_state.classification.blocks_analysis()
+        && !needs_video;
+    insert_bool_flags(
+        flags,
+        &[
+            ("valid_for_analysis", valid_for_analysis),
+            (
+                "needs_validation",
+                !inputs.validation.stored_present || !inputs.validation.stale_reasons.is_empty(),
+            ),
+            ("needs_video", needs_video),
+            ("has_video", has_video),
+        ],
+    );
+}
+
+fn insert_clock_flags(flags: &mut Map<String, Value>, inputs: &FlagInputs<'_>) {
+    insert_bool_flags(
+        flags,
+        &[
+            ("canonical_clock_ready", inputs.clock.canonical_clock_ready),
+            ("has_legacy_timing", inputs.clock.has_legacy_timing),
+            (
+                "needs_canonical_recording",
+                inputs.clock.needs_canonical_recording,
+            ),
+            (
+                "needs_canonical_video",
+                bool_at(&inputs.clock.value, "/video/required")
+                    && !bool_at(&inputs.clock.value, "/video/canonical"),
+            ),
+            (
+                "needs_canonical_evidence",
+                bool_at(&inputs.clock.value, "/evidence/requested")
+                    && !bool_at(&inputs.clock.value, "/evidence/canonical"),
+            ),
+        ],
+    );
+}
+
+fn insert_derivation_flags(flags: &mut Map<String, Value>, inputs: &FlagInputs<'_>) {
+    let has_video = fresh_video_present(inputs);
     let needs_timeline = !inputs.timeline.exists || !inputs.timeline.stale_reasons.is_empty();
     let timeline_ready = !needs_timeline;
-    let has_video_frame_index = has_video && inputs.video_map.frame_index_exists;
-    let needs_video_frame_index = has_video && !inputs.video_map.frame_index_exists;
-    let has_video_map = has_video && timeline_ready && inputs.video_map.event_map_exists;
-    let needs_video_map = has_video && timeline_ready && !inputs.video_map.event_map_exists;
-    let has_evidence = artifact_exists(inputs.artifacts, "evidence_start_index")
-        || artifact_exists(inputs.artifacts, "evidence_end_index");
-    let needs_derivation = !has_touch_gestures || !has_dismissals;
-    let needs_run_summary =
-        !inputs.run_summary.exists || !inputs.run_summary.stale_reasons.is_empty();
-    let needs_canonical_video = bool_at(&inputs.clock.value, "/video/required")
-        && !bool_at(&inputs.clock.value, "/video/canonical");
-    let needs_canonical_evidence = bool_at(&inputs.clock.value, "/evidence/requested")
-        && !bool_at(&inputs.clock.value, "/evidence/canonical");
-    let session_blocks_analysis = inputs.session_state.classification.blocks_analysis();
+    insert_bool_flags(
+        flags,
+        &[
+            (
+                "needs_press_summaries",
+                !artifact_exists(inputs.artifacts, "press_summaries"),
+            ),
+            (
+                "needs_run_summary",
+                !inputs.run_summary.exists || !inputs.run_summary.stale_reasons.is_empty(),
+            ),
+            ("needs_derivation", needs_derivation(inputs)),
+            ("needs_timeline", needs_timeline),
+            (
+                "has_video_frame_index",
+                has_video && inputs.video_map.frame_index_exists,
+            ),
+            (
+                "needs_video_frame_index",
+                has_video && !inputs.video_map.frame_index_exists,
+            ),
+            (
+                "has_video_map",
+                has_video && timeline_ready && inputs.video_map.event_map_exists,
+            ),
+            (
+                "needs_video_map",
+                has_video && timeline_ready && !inputs.video_map.event_map_exists,
+            ),
+        ],
+    );
+}
+
+fn insert_session_flags(flags: &mut Map<String, Value>, inputs: &FlagInputs<'_>) {
+    insert_bool_flags(
+        flags,
+        &[
+            (
+                "lifecycle_complete",
+                inputs.session_state.classification.is_complete(),
+            ),
+            (
+                "lifecycle_incomplete",
+                inputs.session_state.classification.is_incomplete(),
+            ),
+            (
+                "lifecycle_active",
+                inputs.session_state.classification.is_active(),
+            ),
+            (
+                "lifecycle_in_progress",
+                inputs.session_state.classification.is_in_progress(),
+            ),
+            (
+                "needs_session_stop",
+                inputs.session_state.classification.needs_stop(),
+            ),
+            (
+                "needs_session_repair",
+                inputs.session_state.classification.needs_repair(),
+            ),
+        ],
+    );
+    flags.insert(
+        String::from("session_classification"),
+        json!(inputs.session_state.classification.as_str()),
+    );
+}
+
+fn insert_failure_flags(flags: &mut Map<String, Value>, inputs: &FlagInputs<'_>) {
     let video_ended_early = finalization_has_error_code(
         &inputs.session_state.finalization.summary,
         SessionErrorCode::VideoEndedEarly,
     );
     let required_process = required_process_flags(&inputs.session_state.finalization.summary);
+    let required_artifact = required_artifact_flags(&inputs.session_state.finalization.summary);
     let needs_session_rerun = video_ended_early
         || required_process.failed()
+        || required_artifact.failed()
         || inputs.session_state.classification.is_incomplete();
-    let incomplete_or_superseded = incomplete_or_superseded(inputs);
-    json!({
-        "valid_for_analysis": inputs.manifest.is_some()
-            && inputs.session.selected.is_some()
-            && has_getevent_jsonl
-            && inputs.validation.current_ok
-            && !session_blocks_analysis
-            && !needs_video,
-        "needs_validation": !inputs.validation.stored_present
-            || !inputs.validation.stale_reasons.is_empty(),
-        "needs_video": needs_video,
-        "has_video": has_video,
-        "canonical_clock_ready": inputs.clock.canonical_clock_ready,
-        "has_legacy_timing": inputs.clock.has_legacy_timing,
-        "needs_canonical_recording": inputs.clock.needs_canonical_recording,
-        "needs_canonical_video": needs_canonical_video,
-        "needs_canonical_evidence": needs_canonical_evidence,
-        "needs_press_summaries": !has_press_summaries,
-        "needs_run_summary": needs_run_summary,
-        "needs_derivation": needs_derivation,
-        "needs_timeline": needs_timeline,
-        "has_video_frame_index": has_video_frame_index,
-        "needs_video_frame_index": needs_video_frame_index,
-        "has_video_map": has_video_map,
-        "needs_video_map": needs_video_map,
-        "lifecycle_complete": inputs.session_state.classification.is_complete(),
-        "lifecycle_incomplete": inputs.session_state.classification.is_incomplete(),
-        "lifecycle_active": inputs.session_state.classification.is_active(),
-        "lifecycle_in_progress": inputs.session_state.classification.is_in_progress(),
-        "session_classification": inputs.session_state.classification.as_str(),
-        "needs_session_stop": inputs.session_state.classification.needs_stop(),
-        "needs_session_repair": inputs.session_state.classification.needs_repair(),
-        "video_ended_early": video_ended_early,
-        "required_process_failed": required_process.failed(),
-        "required_process_ended_early": required_process.ended_early,
-        "required_process_unverifiable": required_process.unverifiable,
-        "required_process_stop_failed": required_process.stop_failed,
-        "required_process_failure_codes": required_process.failure_codes,
-        "needs_session_rerun": needs_session_rerun,
-        "has_sensitive_evidence": has_evidence || has_video,
-        "incomplete_or_superseded": incomplete_or_superseded,
-        "needs_cleanup": needs_cleanup(inputs.manifest),
-    })
+    flags.insert(String::from("video_ended_early"), json!(video_ended_early));
+    insert_process_failure_flags(flags, &required_process);
+    insert_artifact_failure_flags(flags, &required_artifact);
+    flags.insert(
+        String::from("required_process_failure_codes"),
+        json!(required_process.failure_codes),
+    );
+    flags.insert(
+        String::from("required_artifact_failure_codes"),
+        json!(required_artifact.failure_codes),
+    );
+    flags.insert(
+        String::from("needs_session_rerun"),
+        json!(needs_session_rerun),
+    );
+}
+
+fn insert_process_failure_flags(
+    flags: &mut Map<String, Value>,
+    required_process: &RequiredProcessFlags,
+) {
+    insert_bool_flags(
+        flags,
+        &[
+            ("required_process_failed", required_process.failed()),
+            ("required_process_ended_early", required_process.ended_early),
+            (
+                "required_process_unverifiable",
+                required_process.unverifiable,
+            ),
+            ("required_process_stop_failed", required_process.stop_failed),
+        ],
+    );
+}
+
+fn insert_artifact_failure_flags(
+    flags: &mut Map<String, Value>,
+    required_artifact: &RequiredArtifactFlags,
+) {
+    insert_bool_flags(
+        flags,
+        &[
+            ("required_artifact_failed", required_artifact.failed()),
+            ("ime_logs_failed", required_artifact.ime_logs_failed()),
+            (
+                "ime_logs_pull_failed",
+                required_artifact.ime_logs_pull_failed(),
+            ),
+            (
+                "ime_logs_staging_failed",
+                required_artifact.ime_logs_staging_failed(),
+            ),
+            (
+                "ime_validation_failed",
+                required_artifact.ime_validation_failed(),
+            ),
+            ("getevent_failed", required_artifact.getevent_failed()),
+            (
+                "getevent_normalization_failed",
+                required_artifact.getevent_normalization_failed(),
+            ),
+            (
+                "getevent_content_missing",
+                required_artifact.getevent_content_missing(),
+            ),
+        ],
+    );
+}
+
+fn insert_recording_housekeeping_flags(flags: &mut Map<String, Value>, inputs: &FlagInputs<'_>) {
+    let has_evidence = artifact_exists(inputs.artifacts, "evidence_start_index")
+        || artifact_exists(inputs.artifacts, "evidence_end_index");
+    insert_bool_flags(
+        flags,
+        &[
+            (
+                "has_sensitive_evidence",
+                has_evidence || fresh_video_present(inputs),
+            ),
+            ("incomplete_or_superseded", incomplete_or_superseded(inputs)),
+            ("needs_cleanup", needs_cleanup(inputs.manifest)),
+        ],
+    );
+}
+
+fn fresh_video_present(inputs: &FlagInputs<'_>) -> bool {
+    inputs.video.exists && inputs.video.stale_reasons.is_empty()
+}
+
+fn needs_derivation(inputs: &FlagInputs<'_>) -> bool {
+    !artifact_exists(inputs.artifacts, "touch_gestures")
+        || !artifact_exists(inputs.artifacts, "dismissal_inferences")
+}
+
+fn insert_bool_flags(flags: &mut Map<String, Value>, values: &[(&str, bool)]) {
+    for &(key, value) in values {
+        flags.insert(String::from(key), json!(value));
+    }
+}
+
+fn required_artifact_flags(summary: &Value) -> RequiredArtifactFlags {
+    let ime_logs_pull_failed =
+        finalization_has_error_code(summary, SessionErrorCode::ImeLogsPullFailed);
+    let ime_logs_staging_failed =
+        finalization_has_error_code(summary, SessionErrorCode::ImeLogsStagingFailed);
+    let ime_validation_failed =
+        finalization_has_error_code(summary, SessionErrorCode::ImeValidationFailed);
+    let getevent_normalization_failed =
+        finalization_has_error_code(summary, SessionErrorCode::GeteventNormalizationFailed);
+    let getevent_content_missing =
+        finalization_has_error_code(summary, SessionErrorCode::GeteventContentMissing);
+    let mut failure_codes = Vec::new();
+    if ime_logs_pull_failed {
+        failure_codes.push(String::from("ime_logs_pull_failed"));
+    }
+    if ime_logs_staging_failed {
+        failure_codes.push(String::from("ime_logs_staging_failed"));
+    }
+    if ime_validation_failed {
+        failure_codes.push(String::from("ime_validation_failed"));
+    }
+    if getevent_normalization_failed {
+        failure_codes.push(String::from("getevent_normalization_failed"));
+    }
+    if getevent_content_missing {
+        failure_codes.push(String::from("getevent_content_missing"));
+    }
+    RequiredArtifactFlags { failure_codes }
 }
 
 fn incomplete_or_superseded(inputs: &FlagInputs<'_>) -> bool {
@@ -2553,7 +2794,7 @@ fn next_actions(
 ) -> CliResult<Value> {
     let mut actions = Vec::new();
     add_lifecycle_next_action(&mut actions, session, external_run_id, flags);
-    if bool_at(flags, "/needs_validation") {
+    if bool_at(flags, "/needs_validation") && !bool_at(flags, "/required_artifact_failed") {
         let mut command = format!("input-dynamics validate {}", shellish(&dir.join("ime"))?);
         if let Some(run_id) = external_run_id {
             command.push_str(" --run-id ");
@@ -2801,6 +3042,21 @@ fn session_refresh_reason(flags: &Value, evidence: EvidenceRefresh) -> &'static 
     }
     if bool_at(flags, "/required_process_stop_failed") {
         return "rerun because a required capture process did not stop cleanly";
+    }
+    if bool_at(flags, "/ime_logs_pull_failed") {
+        return "rerun because IME logs could not be pulled";
+    }
+    if bool_at(flags, "/ime_logs_staging_failed") {
+        return "rerun because IME logs could not be staged";
+    }
+    if bool_at(flags, "/ime_validation_failed") {
+        return "rerun because IME logs failed validation";
+    }
+    if bool_at(flags, "/getevent_normalization_failed") {
+        return "rerun because getevent normalization failed";
+    }
+    if bool_at(flags, "/getevent_content_missing") {
+        return "rerun because required getevent content is missing";
     }
     match (evidence, bool_at(flags, "/needs_video")) {
         (EvidenceRefresh::Include, true) => {

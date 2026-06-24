@@ -94,6 +94,11 @@ pub(crate) enum SessionErrorCode {
     RequiredProcessEndedEarly,
     RequiredProcessUnverifiable,
     RequiredProcessStopFailed,
+    ImeLogsPullFailed,
+    ImeLogsStagingFailed,
+    ImeValidationFailed,
+    GeteventNormalizationFailed,
+    GeteventContentMissing,
     NoActiveSession,
     SequenceMismatch,
 }

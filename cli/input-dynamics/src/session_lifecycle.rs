@@ -852,6 +852,11 @@ fn required_process_status_message(name: &str, error_code: SessionErrorCode) -> 
         | SessionErrorCode::RepairRequired
         | SessionErrorCode::FinalizationInProgress
         | SessionErrorCode::ControllerNotEnabled
+        | SessionErrorCode::ImeLogsPullFailed
+        | SessionErrorCode::ImeLogsStagingFailed
+        | SessionErrorCode::ImeValidationFailed
+        | SessionErrorCode::GeteventNormalizationFailed
+        | SessionErrorCode::GeteventContentMissing
         | SessionErrorCode::NoActiveSession
         | SessionErrorCode::SequenceMismatch => format!("required {name} process failed"),
     }
@@ -2157,14 +2162,30 @@ fn finalize_ime_logs(
         let _remove = fs::remove_dir_all(&pull_dir);
     }
     let pull = effects.pull_logs(&pull_dir);
-    record_step(ledger, "pull_ime_logs", Requirement::Required, &pull);
-    outcomes.insert(String::from("pull_ime_logs"), result_value(&pull));
-    let stage = pull
-        .as_ref()
-        .map(|_| stage_ime_logs(&pull_dir, &identity.output_dir.join("ime")));
-    let stage_value = stage
-        .as_ref()
-        .map_or_else(|_| json!({"ok": false, "skipped": true}), result_value);
+    let mut pull_value = result_value(&pull);
+    annotate_artifact_failure_result(
+        &mut pull_value,
+        SessionErrorCode::ImeLogsPullFailed,
+        "IME logs could not be pulled",
+    );
+    record_step_value(ledger, "pull_ime_logs", Requirement::Required, &pull_value);
+    outcomes.insert(String::from("pull_ime_logs"), pull_value);
+    let stage = pull.as_ref().map_or_else(
+        |_| Err(CliError::new("IME pull did not run successfully")),
+        |_| stage_ime_logs(&pull_dir, &identity.output_dir.join("ime")),
+    );
+    let mut stage_value = result_value(&stage);
+    annotate_artifact_failure_result(
+        &mut stage_value,
+        SessionErrorCode::ImeLogsStagingFailed,
+        "IME logs could not be staged",
+    );
+    if pull.is_err() {
+        stage_value = skipped_dependency_result(
+            "pull_ime_logs",
+            "IME log staging skipped because IME log pull failed",
+        );
+    }
     record_step_value(
         ledger,
         "stage_ime_logs",
@@ -2172,11 +2193,23 @@ fn finalize_ime_logs(
         &stage_value,
     );
     outcomes.insert(String::from("stage_ime_logs"), stage_value.clone());
-    let validation = stage.as_ref().map_or_else(
-        |_| Err(CliError::new("IME staging did not run")),
-        |_| validate_logs(&identity.output_dir.join("ime"), Some(&identity.run_id)),
+    let validation = if stage_value.get("ok").and_then(Value::as_bool) == Some(true) {
+        validate_logs(&identity.output_dir.join("ime"), Some(&identity.run_id))
+    } else {
+        Err(CliError::new("IME staging did not complete successfully"))
+    };
+    let mut validation_value = result_value(&validation);
+    annotate_artifact_failure_result(
+        &mut validation_value,
+        SessionErrorCode::ImeValidationFailed,
+        "IME logs failed validation",
     );
-    let validation_value = result_value(&validation);
+    if stage_value.get("ok").and_then(Value::as_bool) != Some(true) {
+        validation_value = skipped_dependency_result(
+            "stage_ime_logs",
+            "IME log validation skipped because IME log staging failed",
+        );
+    }
     record_step_value(
         ledger,
         "validate_ime_logs",
@@ -2236,7 +2269,18 @@ fn finalize_getevent(
     outcomes: &mut BTreeMap<String, Value>,
 ) {
     let normalize = normalize_getevent(identity);
-    let normalize_value = result_value(&normalize);
+    let mut normalize_value = result_value(&normalize);
+    let normalize_error_code =
+        if normalize.is_ok() && normalize_value.get("ok").and_then(Value::as_bool) == Some(false) {
+            SessionErrorCode::GeteventContentMissing
+        } else {
+            SessionErrorCode::GeteventNormalizationFailed
+        };
+    annotate_artifact_failure_result(
+        &mut normalize_value,
+        normalize_error_code,
+        "getevent normalization did not produce required content",
+    );
     record_step_value(
         ledger,
         "normalize_getevent",
@@ -2276,6 +2320,34 @@ fn finalize_getevent(
         // remain unsatisfied because there is no trustworthy normalized output.
     }
     outcomes.insert(String::from("normalize_getevent"), normalize_value.clone());
+}
+
+fn annotate_artifact_failure_result(
+    value: &mut Value,
+    error_code: SessionErrorCode,
+    message: &str,
+) {
+    if value.get("ok").and_then(Value::as_bool) == Some(true) {
+        return;
+    }
+    if value.get("skipped").and_then(Value::as_bool) == Some(true) {
+        return;
+    }
+    set_json_object_field(value, "error_code", json!(error_code));
+    set_json_object_field(value, "category", json!("required_artifact_failure"));
+    if value.get("message").is_none() {
+        set_json_object_field(value, "message", json!(message));
+    }
+}
+
+fn skipped_dependency_result(dependency_step: &str, message: &str) -> Value {
+    json!({
+        "ok": false,
+        "skipped": true,
+        "category": "dependency_skip",
+        "dependency_step": dependency_step,
+        "message": message,
+    })
 }
 
 fn finalize_manifest(
@@ -2388,15 +2460,15 @@ fn record_step_value(
     value: &Value,
 ) {
     let ok = value.get("ok").and_then(Value::as_bool).unwrap_or(false);
-    let mut step = FinalizationStep::new(
-        name,
-        requirement,
-        if ok {
-            StepStatus::Ok
-        } else {
-            StepStatus::Failed
-        },
-    );
+    let skipped = value.get("skipped").and_then(Value::as_bool) == Some(true);
+    let status = if ok {
+        StepStatus::Ok
+    } else if skipped {
+        StepStatus::Skipped
+    } else {
+        StepStatus::Failed
+    };
+    let mut step = FinalizationStep::new(name, requirement, status);
     let wall_ms = host_wall_millis().unwrap_or(0_u64);
     step.attempt_count = 1_u64;
     step.started_wall_ms = Some(wall_ms);
@@ -2404,11 +2476,14 @@ fn record_step_value(
     step.message = Some(value.to_string());
     if ok {
         ledger.last_completed_step = Some(String::from(name));
-    } else {
+    } else if !skipped {
         ledger.failure_reasons.push(format!("{name}: {value}"));
         if ledger.failure_stage.is_none() {
             ledger.failure_stage = Some(String::from(name));
         }
+    } else {
+        // Dependency skips are represented in the step message but are not root
+        // failure reasons.
     }
     step.error_code = value
         .get("error_code")
@@ -2552,7 +2627,7 @@ fn normalize_getevent(identity: &SessionIdentity) -> CliResult<Value> {
     let jsonl = identity.output_dir.join("adb").join("getevent.jsonl");
     let stats = normalize_file(&raw, &jsonl)?;
     let raw_byte_count = fs::metadata(&raw)?.len();
-    let ok = raw_byte_count > 0_u64 && stats.records > 0_u64;
+    let ok = raw_byte_count > 0_u64 && stats.touch_frames > 0_u64;
     Ok(json!({
         "ok": ok,
         "schema": GETEVENT_SCHEMA,
@@ -2560,7 +2635,7 @@ fn normalize_getevent(identity: &SessionIdentity) -> CliResult<Value> {
         "output": path_string(&jsonl)?,
         "raw_byte_count": raw_byte_count,
         "stats": normalize_stats_json(&stats),
-        "failure_reason": (!ok).then_some("getevent raw output or normalized records are empty"),
+        "failure_reason": (!ok).then_some("getevent raw output has no reconstructed touch frames"),
     }))
 }
 
@@ -4017,6 +4092,204 @@ mod tests {
     }
 
     #[test]
+    fn stop_reports_ime_logs_pull_failure() {
+        let root = unique_temp_dir("session-lifecycle-ime-pull-failed");
+        let mut effects = FakeEffects::new("serial-ime-pull-failed");
+        effects.set_ime_pull_behavior(ImePullBehavior::PullError);
+        start_fake_session(&root, &mut effects, "run-ime-pull-failed");
+
+        let Some(stop) = assert_ok(
+            stop_session_with_effects(
+                &mut effects,
+                &SessionStopRequest {
+                    run_id: Some(String::from("run-ime-pull-failed")),
+                },
+            ),
+            "fake IME pull failure stop",
+        ) else {
+            return;
+        };
+
+        assert_required_artifact_stop_result(&stop, "pull_ime_logs", "ime_logs_pull_failed");
+        let Some(inspection) = assert_ok(
+            crate::recording::inspect_recording(&root),
+            "inspect IME pull failure",
+        ) else {
+            return;
+        };
+        assert_required_artifact_inspection(
+            &inspection,
+            "pull_ime_logs",
+            &ArtifactFailureExpectation::ime_logs(
+                "ime_logs_pull_failed",
+                "rerun because IME logs could not be pulled",
+            ),
+        );
+        let runtime = runtime_paths(effects.package_name(), &effects.serial);
+        cleanup_paths(&root, &runtime);
+    }
+
+    #[test]
+    fn stop_reports_ime_logs_staging_failure() {
+        let root = unique_temp_dir("session-lifecycle-ime-staging-failed");
+        let mut effects = FakeEffects::new("serial-ime-staging-failed");
+        effects.set_ime_pull_behavior(ImePullBehavior::NoStageableFiles);
+        start_fake_session(&root, &mut effects, "run-ime-staging-failed");
+
+        let Some(stop) = assert_ok(
+            stop_session_with_effects(
+                &mut effects,
+                &SessionStopRequest {
+                    run_id: Some(String::from("run-ime-staging-failed")),
+                },
+            ),
+            "fake IME staging failure stop",
+        ) else {
+            return;
+        };
+
+        assert_required_artifact_stop_result(&stop, "stage_ime_logs", "ime_logs_staging_failed");
+        let Some(inspection) = assert_ok(
+            crate::recording::inspect_recording(&root),
+            "inspect IME staging failure",
+        ) else {
+            return;
+        };
+        assert_required_artifact_inspection(
+            &inspection,
+            "stage_ime_logs",
+            &ArtifactFailureExpectation::ime_logs(
+                "ime_logs_staging_failed",
+                "rerun because IME logs could not be staged",
+            ),
+        );
+        let runtime = runtime_paths(effects.package_name(), &effects.serial);
+        cleanup_paths(&root, &runtime);
+    }
+
+    #[test]
+    fn stop_reports_ime_validation_failure() {
+        let root = unique_temp_dir("session-lifecycle-ime-validation-failed");
+        let mut effects = FakeEffects::new("serial-ime-validation-failed");
+        effects.set_ime_pull_behavior(ImePullBehavior::WrongRunId);
+        start_fake_session(&root, &mut effects, "run-ime-validation-failed");
+
+        let Some(stop) = assert_ok(
+            stop_session_with_effects(
+                &mut effects,
+                &SessionStopRequest {
+                    run_id: Some(String::from("run-ime-validation-failed")),
+                },
+            ),
+            "fake IME validation failure stop",
+        ) else {
+            return;
+        };
+
+        assert_required_artifact_stop_result(&stop, "validate_ime_logs", "ime_validation_failed");
+        let Some(inspection) = assert_ok(
+            crate::recording::inspect_recording(&root),
+            "inspect IME validation failure",
+        ) else {
+            return;
+        };
+        assert_required_artifact_inspection(
+            &inspection,
+            "validate_ime_logs",
+            &ArtifactFailureExpectation::ime_logs(
+                "ime_validation_failed",
+                "rerun because IME logs failed validation",
+            ),
+        );
+        let runtime = runtime_paths(effects.package_name(), &effects.serial);
+        cleanup_paths(&root, &runtime);
+    }
+
+    #[test]
+    fn stop_reports_getevent_normalization_failure() {
+        let root = unique_temp_dir("session-lifecycle-getevent-normalize-failed");
+        let mut effects = FakeEffects::new("serial-getevent-normalize-failed");
+        effects.set_getevent_raw_behavior(GeteventRawBehavior::Missing);
+        start_fake_session(&root, &mut effects, "run-getevent-normalize-failed");
+
+        let Some(stop) = assert_ok(
+            stop_session_with_effects(
+                &mut effects,
+                &SessionStopRequest {
+                    run_id: Some(String::from("run-getevent-normalize-failed")),
+                },
+            ),
+            "fake getevent normalization failure stop",
+        ) else {
+            return;
+        };
+
+        assert_required_artifact_stop_result(
+            &stop,
+            "normalize_getevent",
+            "getevent_normalization_failed",
+        );
+        let Some(inspection) = assert_ok(
+            crate::recording::inspect_recording(&root),
+            "inspect getevent normalization failure",
+        ) else {
+            return;
+        };
+        assert_required_artifact_inspection(
+            &inspection,
+            "normalize_getevent",
+            &ArtifactFailureExpectation::getevent(
+                "getevent_normalization_failed",
+                "rerun because getevent normalization failed",
+            ),
+        );
+        let runtime = runtime_paths(effects.package_name(), &effects.serial);
+        cleanup_paths(&root, &runtime);
+    }
+
+    #[test]
+    fn stop_reports_getevent_content_missing() {
+        let root = unique_temp_dir("session-lifecycle-getevent-content-missing");
+        let mut effects = FakeEffects::new("serial-getevent-content-missing");
+        effects.set_getevent_raw_behavior(GeteventRawBehavior::UnparsedOnly);
+        start_fake_session(&root, &mut effects, "run-getevent-content-missing");
+
+        let Some(stop) = assert_ok(
+            stop_session_with_effects(
+                &mut effects,
+                &SessionStopRequest {
+                    run_id: Some(String::from("run-getevent-content-missing")),
+                },
+            ),
+            "fake getevent content missing stop",
+        ) else {
+            return;
+        };
+
+        assert_required_artifact_stop_result(
+            &stop,
+            "normalize_getevent",
+            "getevent_content_missing",
+        );
+        let Some(inspection) = assert_ok(
+            crate::recording::inspect_recording(&root),
+            "inspect getevent content missing",
+        ) else {
+            return;
+        };
+        assert_required_artifact_inspection(
+            &inspection,
+            "normalize_getevent",
+            &ArtifactFailureExpectation::getevent(
+                "getevent_content_missing",
+                "rerun because required getevent content is missing",
+            ),
+        );
+        let runtime = runtime_paths(effects.package_name(), &effects.serial);
+        cleanup_paths(&root, &runtime);
+    }
+
+    #[test]
     fn stop_does_not_label_probe_failure_as_video_ended_early() {
         let root = unique_temp_dir("session-lifecycle-video-probe-failed");
         let mut effects = FakeEffects::new("serial-video-probe-failed");
@@ -4296,6 +4569,194 @@ mod tests {
         );
     }
 
+    fn assert_required_artifact_stop_result(stop: &Value, step_name: &str, error_code: &str) {
+        let outcome_path = format!("/outcomes/artifacts/outcomes/{step_name}");
+        assert_eq!(
+            stop.get("ok").and_then(Value::as_bool),
+            Some(false),
+            "required artifact failure should make the run incomplete"
+        );
+        assert_eq!(
+            stop.get("lifecycle_state").and_then(Value::as_str),
+            Some("incomplete")
+        );
+        assert_eq!(
+            stop.pointer(&format!("{outcome_path}/category"))
+                .and_then(Value::as_str),
+            Some("required_artifact_failure")
+        );
+        assert_eq!(
+            stop.pointer(&format!("{outcome_path}/error_code"))
+                .and_then(Value::as_str),
+            Some(error_code)
+        );
+        assert_eq!(
+            stop.pointer("/outcomes/artifacts/ok")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            stop.pointer("/finalization/run_state")
+                .and_then(Value::as_str),
+            Some("incomplete")
+        );
+        assert!(
+            finalization_has_step_error(stop, step_name, error_code),
+            "finalization step should carry stable artifact code: {stop}"
+        );
+    }
+
+    fn assert_required_artifact_inspection(
+        inspection: &Value,
+        step_name: &str,
+        expectation: &ArtifactFailureExpectation,
+    ) {
+        assert_eq!(
+            inspection
+                .pointer("/session/classification")
+                .and_then(Value::as_str),
+            Some("incomplete")
+        );
+        assert_eq!(
+            inspection
+                .pointer(&format!(
+                    "/session/finalization/summary/failed_step_error_codes/{step_name}"
+                ))
+                .and_then(Value::as_str),
+            Some(expectation.code)
+        );
+        assert_eq!(
+            inspection
+                .pointer("/flags/required_artifact_failed")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_artifact_failure_matrix(inspection, expectation);
+        assert_eq!(
+            inspection
+                .pointer("/flags/video_ended_early")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            inspection
+                .pointer("/flags/required_process_failed")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            inspection
+                .pointer("/flags/needs_session_rerun")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(
+            inspection
+                .pointer("/flags/required_artifact_failure_codes")
+                .and_then(Value::as_array)
+                .is_some_and(|codes| artifact_code_set_equals(codes, &[expectation.code])),
+            "inspection should expose exact required-artifact failure code {}: {inspection}",
+            expectation.code
+        );
+        assert_session_rerun_reason(inspection, expectation.rerun_reason);
+        assert!(
+            next_actions_has_kind(inspection, "session_rerun"),
+            "artifact failure should expose a canonical rerun action: {inspection}"
+        );
+        assert!(
+            !next_actions_has_kind(inspection, "validate"),
+            "artifact failure should not suggest a lower-level validation repair: {inspection}"
+        );
+    }
+
+    struct ArtifactFailureExpectation {
+        code: &'static str,
+        rerun_reason: &'static str,
+        ime_logs_failed: bool,
+        getevent_failed: bool,
+    }
+
+    impl ArtifactFailureExpectation {
+        const fn ime_logs(code: &'static str, rerun_reason: &'static str) -> Self {
+            Self {
+                code,
+                rerun_reason,
+                ime_logs_failed: true,
+                getevent_failed: false,
+            }
+        }
+
+        const fn getevent(code: &'static str, rerun_reason: &'static str) -> Self {
+            Self {
+                code,
+                rerun_reason,
+                ime_logs_failed: false,
+                getevent_failed: true,
+            }
+        }
+    }
+
+    fn assert_artifact_failure_matrix(
+        inspection: &Value,
+        expectation: &ArtifactFailureExpectation,
+    ) {
+        for code in [
+            "ime_logs_pull_failed",
+            "ime_logs_staging_failed",
+            "ime_validation_failed",
+            "getevent_normalization_failed",
+            "getevent_content_missing",
+        ] {
+            assert_eq!(
+                inspection
+                    .pointer(&format!("/flags/{code}"))
+                    .and_then(Value::as_bool),
+                Some(code == expectation.code),
+                "unexpected artifact failure flag {code}: {inspection}"
+            );
+        }
+        assert_eq!(
+            inspection
+                .pointer("/flags/ime_logs_failed")
+                .and_then(Value::as_bool),
+            Some(expectation.ime_logs_failed),
+            "unexpected IME aggregate flag: {inspection}"
+        );
+        assert_eq!(
+            inspection
+                .pointer("/flags/getevent_failed")
+                .and_then(Value::as_bool),
+            Some(expectation.getevent_failed),
+            "unexpected getevent aggregate flag: {inspection}"
+        );
+    }
+
+    fn artifact_code_set_equals(codes: &[Value], expected: &[&str]) -> bool {
+        codes.len() == expected.len()
+            && expected.iter().all(|expected_code| {
+                codes
+                    .iter()
+                    .any(|code| code.as_str() == Some(*expected_code))
+            })
+    }
+
+    fn assert_session_rerun_reason(inspection: &Value, expected_reason: &str) {
+        assert!(
+            inspection
+                .get("next_actions")
+                .and_then(Value::as_array)
+                .and_then(|actions| {
+                    actions.iter().find(|action| {
+                        action.get("kind").and_then(Value::as_str) == Some("session_rerun")
+                    })
+                })
+                .and_then(|action| action.get("reason"))
+                .and_then(Value::as_str)
+                == Some(expected_reason),
+            "session_rerun should expose reason {expected_reason}: {inspection}"
+        );
+    }
+
     fn next_actions_has_kind(inspection: &Value, kind: &str) -> bool {
         inspection
             .get("next_actions")
@@ -4494,6 +4955,35 @@ mod tests {
             Some(false),
             "bounded run should satisfy required video presence: {inspection}"
         );
+        assert_no_artifact_failure_flags(&inspection);
+    }
+
+    fn assert_no_artifact_failure_flags(inspection: &Value) {
+        for flag in [
+            "required_artifact_failed",
+            "ime_logs_failed",
+            "ime_logs_pull_failed",
+            "ime_logs_staging_failed",
+            "ime_validation_failed",
+            "getevent_failed",
+            "getevent_normalization_failed",
+            "getevent_content_missing",
+        ] {
+            assert_eq!(
+                inspection
+                    .pointer(&format!("/flags/{flag}"))
+                    .and_then(Value::as_bool),
+                Some(false),
+                "complete run should not expose artifact failure flag {flag}: {inspection}"
+            );
+        }
+        assert!(
+            inspection
+                .pointer("/flags/required_artifact_failure_codes")
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty),
+            "complete run should expose an empty artifact failure code set: {inspection}"
+        );
     }
 
     fn assert_complete_stop_result(stop: &Value) {
@@ -4624,6 +5114,21 @@ mod tests {
         );
     }
 
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum ImePullBehavior {
+        Valid,
+        PullError,
+        NoStageableFiles,
+        WrongRunId,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum GeteventRawBehavior {
+        Valid,
+        Missing,
+        UnparsedOnly,
+    }
+
     struct FakeEffects {
         package: String,
         adb: String,
@@ -4632,6 +5137,8 @@ mod tests {
         screenrecord_probe_status: Cell<ProcessLivenessStatus>,
         getevent_probe_status: Cell<ProcessLivenessStatus>,
         getevent_stop_failure: Cell<bool>,
+        ime_pull_behavior: Cell<ImePullBehavior>,
+        getevent_raw_behavior: Cell<GeteventRawBehavior>,
     }
 
     impl FakeEffects {
@@ -4645,6 +5152,8 @@ mod tests {
                 screenrecord_probe_status: Cell::new(ProcessLivenessStatus::Running),
                 getevent_probe_status: Cell::new(ProcessLivenessStatus::Running),
                 getevent_stop_failure: Cell::new(false),
+                ime_pull_behavior: Cell::new(ImePullBehavior::Valid),
+                getevent_raw_behavior: Cell::new(GeteventRawBehavior::Valid),
             }
         }
 
@@ -4658,6 +5167,14 @@ mod tests {
 
         fn set_getevent_stop_failure(&self) {
             self.getevent_stop_failure.set(true);
+        }
+
+        fn set_ime_pull_behavior(&self, behavior: ImePullBehavior) {
+            self.ime_pull_behavior.set(behavior);
+        }
+
+        fn set_getevent_raw_behavior(&self, behavior: GeteventRawBehavior) {
+            self.getevent_raw_behavior.set(behavior);
         }
     }
 
@@ -4702,10 +5219,27 @@ mod tests {
         }
 
         fn pull_logs(&self, out: &Path) -> CliResult<Value> {
+            if self.ime_pull_behavior.get() == ImePullBehavior::PullError {
+                return Err(CliError::new("forced IME log pull failure"));
+            }
             let log_dir = out.join(LOG_DIR);
             fs::create_dir_all(&log_dir)?;
             let run_id = fake_run_id_for_pull(out).unwrap_or_else(|| String::from("run"));
-            fs::write(log_dir.join("session-run.jsonl"), fake_ime_jsonl(&run_id)?)?;
+            match self.ime_pull_behavior.get() {
+                ImePullBehavior::Valid => {
+                    fs::write(log_dir.join("session-run.jsonl"), fake_ime_jsonl(&run_id)?)?;
+                }
+                ImePullBehavior::NoStageableFiles => {
+                    fs::write(log_dir.join("not-stageable.txt"), "not a stageable log")?;
+                }
+                ImePullBehavior::WrongRunId => {
+                    fs::write(
+                        log_dir.join("session-run.jsonl"),
+                        fake_ime_jsonl("wrong-run-id")?,
+                    )?;
+                }
+                ImePullBehavior::PullError => {}
+            }
             Ok(json!({"ok": true}))
         }
 
@@ -4807,7 +5341,15 @@ mod tests {
                 fs::create_dir_all(parent)?;
             }
             if spec.name == GETEVENT_PROCESS {
-                fs::write(stdout_path, fake_getevent_raw_log())?;
+                match self.getevent_raw_behavior.get() {
+                    GeteventRawBehavior::Valid => {
+                        fs::write(stdout_path, fake_getevent_raw_log())?;
+                    }
+                    GeteventRawBehavior::Missing => {}
+                    GeteventRawBehavior::UnparsedOnly => {
+                        fs::write(stdout_path, "not getevent output\n")?;
+                    }
+                }
             } else {
                 fs::write(stdout_path, "")?;
             }
