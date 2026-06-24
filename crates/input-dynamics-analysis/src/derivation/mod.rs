@@ -52,6 +52,12 @@ pub const VIDEO_MAP_INDEX_SCHEMA: &str = "input_dynamics_video_map_index.v1";
 /// Schema written to video-frame JSONL records.
 pub const VIDEO_FRAME_SCHEMA: &str = "input_dynamics_video_frame.v1";
 
+/// Schema written to video-alignment JSON files.
+pub const VIDEO_ALIGNMENT_SCHEMA: &str = "input_dynamics_video_alignment.v1";
+
+/// Schema written to event-video-frame map JSONL records.
+pub const EVENT_VIDEO_FRAME_MAP_SCHEMA: &str = "input_dynamics_event_video_frame_map.v1";
+
 /// Schema for derivation policy JSON files.
 pub const DERIVATION_POLICY_SCHEMA: &str = "input_dynamics_derivation_policy.v1";
 

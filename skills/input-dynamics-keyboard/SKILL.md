@@ -27,8 +27,7 @@ instrumentation surface. Keep workflows app-neutral, offline, and ADB-driven.
 - `record` captures screen video by default. Treat `video/screen.mp4` and
   `video/timing.json` as sensitive local run artifacts. Use `--no-video` only
   for explicit diagnostics or CI, not for normal bounded capture.
-- Treat `derived/video_map/index.json` and
-  `derived/video_map/frames.jsonl` as sensitive local run artifacts.
+- Treat everything under `derived/video_map/` as sensitive local run artifacts.
 - Use the CLI's AOSP uinput-backed touch path for scripted key presses,
   absolute taps, and gestures. Do not use `adb shell input tap` for normal
   agent-driven input.
@@ -260,8 +259,8 @@ Use `flags.valid_for_analysis`, `flags.needs_validation`,
 `flags.has_legacy_timing`, `flags.needs_canonical_recording`,
 `flags.needs_press_summaries`, `flags.needs_run_summary`,
 `flags.needs_derivation`, `flags.needs_timeline`,
-`flags.has_video_frame_index`, and `flags.needs_video_frame_index` to decide
-the next step.
+`flags.has_video_frame_index`, `flags.needs_video_frame_index`,
+`flags.has_video_map`, and `flags.needs_video_map` to decide the next step.
 Required missing or stale video makes `valid_for_analysis` false. The `clock`
 object classifies saved video/evidence anchors as `bracketed`,
 `legacy_wall_clock_bracketed`, `missing_source`, `stale_inputs`,
@@ -271,6 +270,9 @@ non-empty, prefer those CLI commands over ad hoc file inspection. Each
 Current action kinds are `validate`, `record_with_video`,
 `record_with_canonical_clocks`, `derive_presses`, `derive_summary`,
 `derive_dismissals`, `derive_timeline`, and `derive_video_map`.
+Use `has_video_frame_index` only for encoded frame metadata readiness. Use
+`has_video_map` for event-frame windows. Canonical timing confidence is
+reported separately by `canonical_clock_ready` and `needs_canonical_recording`.
 
 Read `validation.current.clock_validation` from the same inspect output when
 diagnosing timestamp metadata. Stable keys are
@@ -374,18 +376,21 @@ domains and source references when reasoning from it. Use
 `mixed_clock_domain_without_alignment_count`,
 `normalized_claim_without_domain_count`, and `unit_mismatch_count`.
 
-To build encoded video frame metadata:
+To build timestamped event-frame windows:
 
 ```bash
 idk derive video-map --recording-dir "runs/$RUN_ID"
 ```
 
-This requires `ffprobe` from FFmpeg and writes
-`derived/video_map/index.json` plus `derived/video_map/frames.jsonl`.
-Rows use schema `input_dynamics_video_frame.v1` and the `media_pts_ns` clock
-domain. This is only a frame index; event-to-frame mapping remains
-`not_estimated`, and agents must not treat it as synchronized event evidence.
-Keep both outputs with the same care as raw JSONL, screen video, screenshots,
+This requires `ffprobe` from FFmpeg and a fresh `derived/timeline/` bundle. It
+writes `derived/video_map/index.json`, `frames.jsonl`, `alignment.json`, and
+`event_frames.jsonl`. Frame rows use schema `input_dynamics_video_frame.v1` in
+the `media_pts_ns` clock domain. Event-frame rows use schema
+`input_dynamics_event_video_frame_map.v1` and carry per-event
+`mapping_status`, uncertainty, and candidate frame windows when mapping is
+supported. Agents must not treat frame windows as visual interpretation; branch
+on per-row status and uncertainty. Keep the whole `derived/video_map/`
+directory with the same care as raw JSONL, screen video, screenshots,
 accessibility dumps, and timeline artifacts.
 
 After deriving, inspect again if freshness matters:
@@ -395,8 +400,8 @@ idk recording inspect --dir "runs/$RUN_ID"
 ```
 
 The inspection output fingerprints source artifacts and reports stale video,
-summaries, timelines, video frame indexes, and clock-anchor readiness, but it
-does not rewrite validation or derived files.
+summaries, timelines, video frame indexes, full video-map readiness, and
+clock-anchor readiness, but it does not rewrite validation or derived files.
 
 Do not treat `valid_for_analysis: true` as enough for clock-dependent claims.
 For video/evidence anchors, cross-source timeline claims, or ordering claims

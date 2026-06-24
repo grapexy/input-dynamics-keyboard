@@ -356,7 +356,7 @@ pub(crate) enum DeriveCommand {
         #[arg(long)]
         output_dir: Option<PathBuf>,
     },
-    /// Derive an encoded video frame index.
+    /// Derive encoded video frame metadata and event-frame windows.
     VideoMap {
         /// Recording directory created by `input-dynamics record`.
         #[arg(long)]

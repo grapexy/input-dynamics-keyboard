@@ -83,6 +83,7 @@ struct VideoMapInspection {
     event_mapping: Value,
     exists: bool,
     frame_index_exists: bool,
+    event_map_exists: bool,
 }
 
 struct ClockInspection {
@@ -104,6 +105,13 @@ struct FlagInputs<'a> {
     clock: &'a ClockInspection,
     artifacts: &'a Value,
     note_flags: &'a Value,
+}
+
+struct VideoMapOutputCheck<'a> {
+    expected_path: &'a Path,
+    output_pointer: &'a str,
+    expected_schema: &'a str,
+    description: &'a str,
 }
 
 /// Inspect a recording directory without modifying it.
@@ -214,6 +222,7 @@ fn inspection_json(input: &InspectionJson<'_>) -> Value {
         "video_map": {
             "exists": input.video_map.exists,
             "frame_index_exists": input.video_map.frame_index_exists,
+            "event_map_exists": input.video_map.event_map_exists,
             "stage": input.video_map.stage.clone(),
             "frame_count": input.video_map.frame_count.clone(),
             "probe_status": input.video_map.probe_status.clone(),
@@ -423,15 +432,22 @@ fn inspect_video(
     })
 }
 
+#[allow(clippy::too_many_lines)]
 fn inspect_video_map(dir: &Path) -> CliResult<VideoMapInspection> {
     let index_path = dir.join("derived").join("video_map").join("index.json");
     let frames_path = dir.join("derived").join("video_map").join("frames.jsonl");
+    let alignment_path = dir.join("derived").join("video_map").join("alignment.json");
+    let event_frames_path = dir
+        .join("derived")
+        .join("video_map")
+        .join("event_frames.jsonl");
     let index_exists = index_path.exists();
     let frames_exists = frames_path.exists();
     if !index_exists && !frames_exists {
         return Ok(VideoMapInspection {
             exists: false,
             frame_index_exists: false,
+            event_map_exists: false,
             stale_reasons: vec![String::from("video frame index is missing")],
             ..VideoMapInspection::default()
         });
@@ -449,26 +465,125 @@ fn inspect_video_map(dir: &Path) -> CliResult<VideoMapInspection> {
             stale_reasons,
             exists: index_exists && frames_exists,
             frame_index_exists: false,
+            event_map_exists: false,
             ..VideoMapInspection::default()
         });
     };
+    let mut frame_index_reasons = Vec::new();
+    let mut event_map_reasons = Vec::new();
     if index.get("schema").and_then(Value::as_str) != Some("input_dynamics_video_map_index.v1") {
-        stale_reasons.push(String::from("video map index schema is unsupported"));
+        let reason = String::from("video map index schema is unsupported");
+        stale_reasons.push(reason.clone());
+        frame_index_reasons.push(reason.clone());
+        event_map_reasons.push(reason);
     }
-    if index.get("artifact_stage").and_then(Value::as_str) != Some("frame_index") {
-        stale_reasons.push(String::from(
-            "video map index artifact stage is not frame_index",
-        ));
+    let stage = index.get("artifact_stage").and_then(Value::as_str);
+    let stage_is_frame_index = stage == Some("frame_index");
+    let stage_is_event_frame_map = stage == Some("event_frame_map");
+    if !stage_is_frame_index && !stage_is_event_frame_map {
+        let reason = String::from("video map index artifact stage is unsupported");
+        stale_reasons.push(reason.clone());
+        frame_index_reasons.push(reason.clone());
+        event_map_reasons.push(reason);
     }
     if let Some(sources) = index.get("sources").and_then(Value::as_array) {
         for source in sources {
-            stale_reasons.extend(video_map_source_stale_reasons(dir, source)?);
+            let source_reasons = video_map_source_stale_reasons(dir, source)?;
+            let kind = source
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown_source");
+            if matches!(kind, "manifest" | "video_screen" | "video_timing") {
+                frame_index_reasons.extend(source_reasons.clone());
+            }
+            event_map_reasons.extend(source_reasons.clone());
+            stale_reasons.extend(source_reasons);
         }
     } else {
-        stale_reasons.push(String::from("video map index has no sources array"));
+        let reason = String::from("video map index has no sources array");
+        stale_reasons.push(reason.clone());
+        frame_index_reasons.push(reason.clone());
+        event_map_reasons.push(reason);
     }
-    stale_reasons.extend(video_map_output_stale_reasons(dir, &index, &frames_path)?);
-    let frame_index_exists = index_exists && frames_exists && stale_reasons.is_empty();
+    let index_output_reasons = video_map_index_output_stale_reasons(dir, &index, &index_path);
+    frame_index_reasons.extend(index_output_reasons.clone());
+    event_map_reasons.extend(index_output_reasons.clone());
+    stale_reasons.extend(index_output_reasons);
+    let frame_source_reasons = required_video_map_source_reasons(
+        &index,
+        &[
+            ("manifest", "manifest.json"),
+            ("video_screen", "video/screen.mp4"),
+            ("video_timing", "video/timing.json"),
+        ],
+    );
+    frame_index_reasons.extend(frame_source_reasons.clone());
+    event_map_reasons.extend(frame_source_reasons.clone());
+    stale_reasons.extend(frame_source_reasons);
+    if stage_is_event_frame_map {
+        let event_source_reasons = required_video_map_source_reasons(
+            &index,
+            &[
+                ("timeline_index", "derived/timeline/index.json"),
+                ("timeline_events", "derived/timeline/events.jsonl"),
+            ],
+        );
+        event_map_reasons.extend(event_source_reasons.clone());
+        stale_reasons.extend(event_source_reasons);
+    }
+    if stage_is_frame_index {
+        event_map_reasons.push(String::from("video event-frame map is missing"));
+    }
+    let frames_reasons = video_map_output_stale_reasons(
+        dir,
+        &index,
+        &VideoMapOutputCheck {
+            expected_path: &frames_path,
+            output_pointer: "/outputs/video_map_frames",
+            expected_schema: "input_dynamics_video_frame.v1",
+            description: "video map frames",
+        },
+    )?;
+    frame_index_reasons.extend(frames_reasons.clone());
+    event_map_reasons.extend(frames_reasons.clone());
+    stale_reasons.extend(frames_reasons);
+    if stage_is_event_frame_map {
+        let alignment_reasons = video_map_output_stale_reasons(
+            dir,
+            &index,
+            &VideoMapOutputCheck {
+                expected_path: &alignment_path,
+                output_pointer: "/outputs/video_map_alignment",
+                expected_schema: "input_dynamics_video_alignment.v1",
+                description: "video map alignment",
+            },
+        )?;
+        event_map_reasons.extend(alignment_reasons.clone());
+        stale_reasons.extend(alignment_reasons);
+        let event_frame_reasons = video_map_output_stale_reasons(
+            dir,
+            &index,
+            &VideoMapOutputCheck {
+                expected_path: &event_frames_path,
+                output_pointer: "/outputs/video_map_event_frames",
+                expected_schema: "input_dynamics_event_video_frame_map.v1",
+                description: "video map event frames",
+            },
+        )?;
+        event_map_reasons.extend(event_frame_reasons.clone());
+        stale_reasons.extend(event_frame_reasons);
+    }
+    let frame_index_exists = index_exists
+        && frames_exists
+        && (stage_is_frame_index || stage_is_event_frame_map)
+        && frame_index_reasons.is_empty();
+    let event_map_exists = index_exists
+        && frames_exists
+        && alignment_path.exists()
+        && event_frames_path.exists()
+        && stage_is_event_frame_map
+        && frame_index_reasons.is_empty()
+        && event_map_reasons.is_empty();
     Ok(VideoMapInspection {
         stage: index.get("artifact_stage").cloned().unwrap_or(Value::Null),
         frame_count: index.get("frame_count").cloned().unwrap_or(Value::Null),
@@ -477,58 +592,149 @@ fn inspect_video_map(dir: &Path) -> CliResult<VideoMapInspection> {
         stale_reasons,
         exists: index_exists && frames_exists,
         frame_index_exists,
+        event_map_exists,
     })
 }
 
 fn video_map_output_stale_reasons(
     dir: &Path,
     index: &Value,
-    frames_path: &Path,
+    check: &VideoMapOutputCheck<'_>,
 ) -> CliResult<Vec<String>> {
     let mut reasons = Vec::new();
-    let Some(output) = index.pointer("/outputs/video_map_frames") else {
-        reasons.push(String::from(
-            "video map index has no frames output metadata",
+    let Some(output) = index.pointer(check.output_pointer) else {
+        reasons.push(format!(
+            "video map index has no {} output metadata",
+            check.description
         ));
         return Ok(reasons);
     };
-    if output.get("schema").and_then(Value::as_str) != Some("input_dynamics_video_frame.v1") {
-        reasons.push(String::from(
-            "video map frames output schema is unsupported",
+    if output.get("schema").and_then(Value::as_str) != Some(check.expected_schema) {
+        reasons.push(format!(
+            "{} output schema is unsupported",
+            check.description
         ));
     }
     let Some(path_text_value) = output.get("path").and_then(Value::as_str) else {
-        reasons.push(String::from("video map frames output has no path"));
+        reasons.push(format!("{} output has no path", check.description));
         return Ok(reasons);
     };
     let recorded_output_path = source_path(dir, path_text_value);
-    if recorded_output_path != frames_path {
-        reasons.push(String::from("video map frames output path changed"));
+    if recorded_output_path != check.expected_path {
+        reasons.push(format!("{} output path changed", check.description));
     }
     let Some(recorded_count) = output.get("record_count").and_then(Value::as_u64) else {
-        reasons.push(String::from("video map frames output has no record count"));
+        reasons.push(format!("{} output has no record count", check.description));
         return Ok(reasons);
     };
     let Some(recorded_sha) = output
         .pointer("/fingerprint/sha256")
         .and_then(Value::as_str)
     else {
-        reasons.push(String::from("video map frames output has no fingerprint"));
+        reasons.push(format!("{} output has no fingerprint", check.description));
         return Ok(reasons);
     };
-    if !frames_path.exists() {
+    if !check.expected_path.exists() {
+        reasons.push(format!("{} output is missing", check.description));
         return Ok(reasons);
     }
-    let current = file_fingerprint(frames_path)?;
+    let current = file_fingerprint(check.expected_path)?;
     let current_sha = current.get("sha256").and_then(Value::as_str);
     if Some(recorded_sha) != current_sha {
-        reasons.push(String::from("video map frames fingerprint changed"));
+        reasons.push(format!("{} fingerprint changed", check.description));
     }
-    let current_count = count_nonempty_lines(frames_path)?;
+    let current_count = if check
+        .expected_path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+    {
+        1_u64
+    } else {
+        count_nonempty_lines(check.expected_path)?
+    };
     if recorded_count != current_count {
-        reasons.push(String::from("video map frames record count changed"));
+        reasons.push(format!("{} record count changed", check.description));
     }
     Ok(reasons)
+}
+
+fn video_map_index_output_stale_reasons(
+    dir: &Path,
+    index: &Value,
+    index_path: &Path,
+) -> Vec<String> {
+    let mut reasons = Vec::new();
+    let Some(output) = index.pointer("/outputs/video_map_index") else {
+        reasons.push(String::from(
+            "video map index has no video map index output metadata",
+        ));
+        return reasons;
+    };
+    if output.get("schema").and_then(Value::as_str) != Some("input_dynamics_video_map_index.v1") {
+        reasons.push(String::from("video map index output schema is unsupported"));
+    }
+    let Some(path_text_value) = output.get("path").and_then(Value::as_str) else {
+        reasons.push(String::from("video map index output has no path"));
+        return reasons;
+    };
+    if source_path(dir, path_text_value) != index_path {
+        reasons.push(String::from("video map index output path changed"));
+    }
+    if !output.get("record_count").is_some_and(Value::is_null) {
+        reasons.push(String::from(
+            "video map index output record count must be null",
+        ));
+    }
+    if !output
+        .get("sensitive")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        reasons.push(String::from(
+            "video map index output is not marked sensitive",
+        ));
+    }
+    if !output.get("fingerprint").is_some_and(Value::is_null) {
+        reasons.push(String::from(
+            "video map index output fingerprint must be null",
+        ));
+    }
+    if output.get("fingerprint_status").and_then(Value::as_str)
+        != Some("not_embedded_self_reference")
+    {
+        reasons.push(String::from(
+            "video map index output fingerprint status is unsupported",
+        ));
+    }
+    reasons
+}
+
+fn required_video_map_source_reasons(index: &Value, required: &[(&str, &str)]) -> Vec<String> {
+    let Some(sources) = index.get("sources").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut reasons = Vec::new();
+    for &(kind, expected_path) in required {
+        let matches = sources
+            .iter()
+            .filter(|source| source.get("kind").and_then(Value::as_str) == Some(kind))
+            .collect::<Vec<_>>();
+        if matches.is_empty() {
+            reasons.push(format!("video map index is missing required {kind} source"));
+            continue;
+        }
+        if matches.len() > 1_usize {
+            reasons.push(format!(
+                "video map index has duplicate required {kind} sources"
+            ));
+        }
+        for source in matches {
+            if source.get("path").and_then(Value::as_str) != Some(expected_path) {
+                reasons.push(format!("video map {kind} source path changed"));
+            }
+        }
+    }
+    reasons
 }
 
 fn video_map_source_stale_reasons(dir: &Path, source: &Value) -> CliResult<Vec<String>> {
@@ -561,6 +767,14 @@ fn video_map_source_stale_reasons(dir: &Path, source: &Value) -> CliResult<Vec<S
         reasons.push(format!(
             "{kind} source fingerprint changed: {path_text_value}"
         ));
+    }
+    if let Some(recorded_count) = source.get("record_count").and_then(Value::as_u64) {
+        let current_count = count_nonempty_lines(&path)?;
+        if recorded_count != current_count {
+            reasons.push(format!(
+                "{kind} source record count changed: {path_text_value}"
+            ));
+        }
     }
     Ok(reasons)
 }
@@ -1318,7 +1532,7 @@ fn adb_artifact_specs(dir: &Path) -> [ArtifactSpec; 3] {
     ]
 }
 
-fn derived_artifact_specs(dir: &Path) -> [ArtifactSpec; 8] {
+fn derived_artifact_specs(dir: &Path) -> [ArtifactSpec; 10] {
     [
         artifact(
             "press_summaries",
@@ -1365,6 +1579,20 @@ fn derived_artifact_specs(dir: &Path) -> [ArtifactSpec; 8] {
         artifact(
             "video_map_frames",
             dir.join("derived").join("video_map").join("frames.jsonl"),
+            ArtifactRequirement::Optional,
+            ArtifactSensitivity::Sensitive,
+        ),
+        artifact(
+            "video_map_alignment",
+            dir.join("derived").join("video_map").join("alignment.json"),
+            ArtifactRequirement::Optional,
+            ArtifactSensitivity::Sensitive,
+        ),
+        artifact(
+            "video_map_event_frames",
+            dir.join("derived")
+                .join("video_map")
+                .join("event_frames.jsonl"),
             ArtifactRequirement::Optional,
             ArtifactSensitivity::Sensitive,
         ),
@@ -1521,16 +1749,17 @@ fn flags_json(inputs: &FlagInputs<'_>) -> Value {
     let has_dismissals = artifact_exists(inputs.artifacts, "dismissal_inferences");
     let has_video = inputs.video.exists && inputs.video.stale_reasons.is_empty();
     let needs_video = inputs.video.required && !has_video;
-    let video_frame_index_ready =
-        has_video && inputs.clock.canonical_clock_ready && !inputs.clock.needs_canonical_recording;
-    let has_video_frame_index = video_frame_index_ready && inputs.video_map.frame_index_exists;
-    let needs_video_frame_index = video_frame_index_ready && !inputs.video_map.frame_index_exists;
+    let needs_timeline = !inputs.timeline.exists || !inputs.timeline.stale_reasons.is_empty();
+    let timeline_ready = !needs_timeline;
+    let has_video_frame_index = has_video && inputs.video_map.frame_index_exists;
+    let needs_video_frame_index = has_video && !inputs.video_map.frame_index_exists;
+    let has_video_map = has_video && timeline_ready && inputs.video_map.event_map_exists;
+    let needs_video_map = has_video && timeline_ready && !inputs.video_map.event_map_exists;
     let has_evidence = artifact_exists(inputs.artifacts, "evidence_start_index")
         || artifact_exists(inputs.artifacts, "evidence_end_index");
     let needs_derivation = !has_touch_gestures || !has_dismissals;
     let needs_run_summary =
         !inputs.run_summary.exists || !inputs.run_summary.stale_reasons.is_empty();
-    let needs_timeline = !inputs.timeline.exists || !inputs.timeline.stale_reasons.is_empty();
     let needs_canonical_video = bool_at(&inputs.clock.value, "/video/required")
         && !bool_at(&inputs.clock.value, "/video/canonical");
     let needs_canonical_evidence = bool_at(&inputs.clock.value, "/evidence/requested")
@@ -1567,7 +1796,8 @@ fn flags_json(inputs: &FlagInputs<'_>) -> Value {
         "needs_timeline": needs_timeline,
         "has_video_frame_index": has_video_frame_index,
         "needs_video_frame_index": needs_video_frame_index,
-        "has_video_map": false,
+        "has_video_map": has_video_map,
+        "needs_video_map": needs_video_map,
         "has_sensitive_evidence": has_evidence || has_video,
         "incomplete_or_superseded": incomplete_or_superseded,
         "needs_cleanup": needs_cleanup(inputs.manifest),
@@ -1671,14 +1901,14 @@ fn add_derivation_next_actions(
             "reason": "derive or refresh the cross-source recording timeline",
         }));
     }
-    if bool_at(flags, "/needs_video_frame_index") {
+    if bool_at(flags, "/needs_video_map") {
         actions.push(json!({
             "kind": "derive_video_map",
             "command": format!(
                 "input-dynamics derive video-map --recording-dir {}",
                 shellish(dir)?
             ),
-            "reason": "derive or refresh the encoded video frame index",
+            "reason": "derive or refresh the video event-frame map",
         }));
     }
     Ok(())

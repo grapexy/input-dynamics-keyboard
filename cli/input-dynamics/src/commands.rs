@@ -317,7 +317,12 @@ fn derive_video_map_command(
                 "status_code": probe_output.status_code,
                 "stderr": probe_output.stderr().trim(),
                 "video_path": path_string(&video_path)?,
-                "suggested_action": "inspect_video_artifacts",
+                "suggested_action": "recording_inspect",
+                "suggested_kind": "recording_inspect",
+                "suggested_command": format!(
+                    "input-dynamics recording inspect --dir {}",
+                    shellish_path(recording_dir)?
+                ),
             }),
         ));
     }
@@ -337,16 +342,59 @@ fn derive_video_map_command(
 }
 
 fn preflight_video_map_sources(recording_dir: &Path, video_path: &Path) -> CliResult<()> {
-    require_local_file(&recording_dir.join("manifest.json"), "manifest")?;
-    require_local_file(video_path, "video file")?;
+    let inspect_command = format!(
+        "input-dynamics recording inspect --dir {}",
+        shellish_path(recording_dir)?
+    );
+    let derive_timeline_command = format!(
+        "input-dynamics derive timeline --recording-dir {}",
+        shellish_path(recording_dir)?
+    );
+    require_local_file(
+        &recording_dir.join("manifest.json"),
+        "manifest",
+        "recording_inspect",
+        &inspect_command,
+    )?;
+    require_local_file(
+        video_path,
+        "video file",
+        "recording_inspect",
+        &inspect_command,
+    )?;
     require_local_file(
         &recording_dir.join("video").join("timing.json"),
         "video timing metadata",
+        "recording_inspect",
+        &inspect_command,
+    )?;
+    require_local_file(
+        &recording_dir
+            .join("derived")
+            .join("timeline")
+            .join("index.json"),
+        "timeline index",
+        "derive_timeline",
+        &derive_timeline_command,
+    )?;
+    require_local_file(
+        &recording_dir
+            .join("derived")
+            .join("timeline")
+            .join("events.jsonl"),
+        "timeline events",
+        "derive_timeline",
+        &derive_timeline_command,
     )?;
     Ok(())
 }
 
-fn require_local_file(path: &Path, description: &str) -> CliResult<()> {
+fn require_local_file(
+    path: &Path,
+    description: &str,
+    suggested_action: &str,
+    suggested_command: &str,
+) -> CliResult<()> {
     if path.is_file() {
         Ok(())
     } else {
@@ -359,7 +407,9 @@ fn require_local_file(path: &Path, description: &str) -> CliResult<()> {
                 "error_kind": "video_map_missing_source",
                 "source_description": description,
                 "path": path_string(path).unwrap_or_else(|_error| path.display().to_string()),
-                "suggested_action": "inspect_recording",
+                "suggested_action": suggested_action,
+                "suggested_kind": suggested_action,
+                "suggested_command": suggested_command,
             }),
         ))
     }
@@ -399,6 +449,21 @@ fn ffprobe_error(ffprobe: &str, args: &[String], error: &CliError) -> CliError {
             "suggested_action": "install_ffmpeg_or_enter_nix_shell",
         }),
     )
+}
+
+fn shellish_path(path: &Path) -> CliResult<String> {
+    let text = path_string(path)?;
+    Ok(shellish_text(&text))
+}
+
+fn shellish_text(text: &str) -> String {
+    if text
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || "-_./:".contains(character))
+    {
+        return text.to_owned();
+    }
+    format!("'{}'", text.replace('\'', "'\\''"))
 }
 
 fn first_line(text: &str) -> String {
@@ -2040,6 +2105,7 @@ mod tests {
     use proptest::strategy::Strategy;
     use serde_json::Value;
     use serde_json::json;
+    use sha2::{Digest, Sha256};
 
     use crate::args::PressKey;
     use crate::commands::{
@@ -2352,7 +2418,13 @@ mod tests {
     }
 
     fn create_video_map_command_fixture(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        fs::create_dir_all(root.join("ime"))?;
         fs::create_dir_all(root.join("video"))?;
+        let ime_path = root.join("ime").join("session-test.jsonl");
+        fs::write(
+            &ime_path,
+            "{\"schema\":\"input_dynamics_event.v1\",\"event\":\"session_start\"}\n",
+        )?;
         fs::write(
             root.join("manifest.json"),
             r#"{"schema":"input_dynamics_record_manifest.v1","external_run_id":"run-test"}"#,
@@ -2360,7 +2432,39 @@ mod tests {
         fs::write(root.join("video").join("screen.mp4"), b"synthetic-video")?;
         fs::write(
             root.join("video").join("timing.json"),
-            r#"{"schema":"input_dynamics_video_capture.v1"}"#,
+            r#"{
+                "schema":"input_dynamics_video_capture.v1",
+                "start":{
+                    "before":{"t_elapsed_realtime_ns":1000000000,"t_uptime_ns":100000000,"device_wall_ms":10000},
+                    "after":{"t_elapsed_realtime_ns":1000000000,"t_uptime_ns":100000000,"device_wall_ms":10000}
+                },
+                "stop":{
+                    "before":{"t_elapsed_realtime_ns":1100000000,"t_uptime_ns":200000000,"device_wall_ms":10100},
+                    "after":{"t_elapsed_realtime_ns":1100000000,"t_uptime_ns":200000000,"device_wall_ms":10100}
+                }
+            }"#,
+        )?;
+        fs::create_dir_all(root.join("derived").join("timeline"))?;
+        fs::write(
+            root.join("derived").join("timeline").join("index.json"),
+            serde_json::to_string(&json!({
+                "schema": "input_dynamics_timeline_index.v1",
+                "event_count": 1_u64,
+                "sources": [
+                    {
+                        "kind": "ime_jsonl",
+                        "path": "ime/session-test.jsonl",
+                        "exists": true,
+                        "required": true,
+                        "record_count": 1_u64,
+                        "fingerprint": test_file_fingerprint(&ime_path)?,
+                    }
+                ]
+            }))?,
+        )?;
+        fs::write(
+            root.join("derived").join("timeline").join("events.jsonl"),
+            "{\"schema\":\"input_dynamics_timeline_event.v1\",\"timeline_event_id\":\"timeline:000001\",\"event\":\"key_down\",\"record_kind\":\"ime_event\",\"clock_domain\":\"android_uptime_ms\",\"source_time\":{\"source_clock_domain\":\"android_uptime_ms\",\"source_time_status\":\"canonical_event_time_metadata\",\"source_time_ms\":150}}\n",
         )?;
         Ok(())
     }
@@ -2369,6 +2473,7 @@ mod tests {
     fn create_fake_ffprobe(root: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
         let script = root.join("fake-ffprobe");
         let log = root.join("ffprobe-args.log");
+        let video_path = root.join("video").join("screen.mp4");
         fs::write(
             &script,
             format!(
@@ -2378,11 +2483,17 @@ if [ "$1" = "-version" ]; then
   echo "ffprobe version fake"
   exit 0
 fi
+expected='-v error -select_streams v:0 -show_streams -show_frames -show_entries stream=index,codec_type,codec_name,width,height,duration,nb_frames,avg_frame_rate,r_frame_rate,time_base:frame=media_type,key_frame,pts,pts_time,best_effort_timestamp,best_effort_timestamp_time,duration,duration_time,pkt_size,width,height,pict_type -of json {}'
+if [ "$*" != "$expected" ]; then
+  echo "unexpected ffprobe args: $*" >&2
+  exit 64
+fi
 cat <<'JSON'
 {}
 JSON
 "#,
                 log.display(),
+                video_path.display(),
                 fake_ffprobe_json()
             ),
         )?;
@@ -2423,6 +2534,17 @@ JSON
                 }
             ]
         }"#
+    }
+
+    fn test_file_fingerprint(path: &Path) -> Result<Value, Box<dyn std::error::Error>> {
+        let bytes = fs::read(path)?;
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        let digest = hasher.finalize();
+        Ok(json!({
+            "algorithm": "sha256",
+            "sha256": format!("sha256:{digest:x}"),
+        }))
     }
 
     fn read_json(path: &Path) -> Result<Value, Box<dyn std::error::Error>> {

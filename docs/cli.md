@@ -351,9 +351,10 @@ scraping human-oriented text.
   timeline bundle under `derived/timeline/`. Timeline rows reference source
   records and evidence artifacts; raw streams remain canonical.
 - `derive video-map --recording-dir <dir>`: runs `ffprobe` on
-  `video/screen.mp4` and writes an encoded frame index under
-  `derived/video_map/`. This is a media-clock frame index only; event-to-frame
-  mapping remains `not_estimated`.
+  `video/screen.mp4`, reads the derived timeline, and writes a video map under
+  `derived/video_map/`. The map includes encoded frame metadata, an explicit
+  clock-transform contract, and one event-frame row per timeline event with
+  status and uncertainty.
 - `recording inspect --dir <dir>`: inspects a local recording directory without
   modifying it. Output includes artifact metadata, current validation state,
   derived timeline staleness, analysis-readiness flags, and suggested next CLI
@@ -492,7 +493,7 @@ flags such as `valid_for_analysis`, `has_video`, `needs_video`,
 `canonical_clock_ready`, `has_legacy_timing`, `needs_canonical_recording`,
 `needs_validation`, `needs_press_summaries`, `needs_run_summary`,
 `needs_derivation`, `needs_timeline`, `has_video_frame_index`, and
-`needs_video_frame_index`.
+`needs_video_frame_index`, `has_video_map`, and `needs_video_map`.
 
 `validation.current.clock_validation` splits timestamp metadata diagnostics into
 specific counters. Stable keys are
@@ -632,7 +633,7 @@ remains readable as legacy `host_wall_ms` provenance.
 output paths, warnings, clock-domain counts, normalized-status counts, artifact
 clock diagnostics, and the clock-alignment status.
 
-To create an encoded video frame index:
+To create a video event-frame map:
 
 ```bash
 input-dynamics derive video-map --recording-dir "runs/$RUN_ID"
@@ -645,23 +646,38 @@ derived/
   video_map/
     index.json
     frames.jsonl
+    alignment.json
+    event_frames.jsonl
 ```
 
 `derive video-map` reads `manifest.json`, `video/screen.mp4`, and
-`video/timing.json`, then invokes `ffprobe`. It stores the executable, version
-line, arguments, status code, and stderr in `index.json`. `frames.jsonl`
-contains one `input_dynamics_video_frame.v1` row per encoded frame with
-integer `media_time.pts_ns` in the `media_pts_ns` clock domain, source PTS
-tick/time-base provenance, keyframe flag, frame dimensions, encoded packet
-size when available, and source-video fingerprint metadata. The frame count
-comes from parsed frame rows, not nominal FPS or stream `nb_frames`.
+`video/timing.json`, requires `derived/timeline/index.json` and
+`derived/timeline/events.jsonl`, then invokes `ffprobe`. If the timeline bundle
+is missing, run `derive timeline` first.
 
-This artifact does not map IME, getevent, timeline, or evidence events to video
-frames. `index.json` declares `artifact_stage: "frame_index"`,
-`alignment_status: "not_estimated"`, and
-`event_mapping.status: "not_estimated"`. Treat `flags.has_video_frame_index`
-as readiness for frame metadata only; reserve `has_video_map` for a later full
-event-to-frame map.
+`frames.jsonl` contains one `input_dynamics_video_frame.v1` row per encoded
+frame with integer `media_time.pts_ns` in the `media_pts_ns` clock domain,
+source PTS tick/time-base provenance, keyframe flag, frame dimensions, encoded
+packet size when available, and source-video fingerprint metadata. The frame
+count comes from parsed frame rows, not nominal FPS or stream `nb_frames`.
+
+`alignment.json` uses schema `input_dynamics_video_alignment.v1` and records
+the transform from device timing anchors to media PTS as an interval with
+reasons and uncertainty. Current canonical runs use
+`device_elapsed_realtime_ns`; older readable runs may produce explicitly
+`legacy_wall_clock_bracketed` mappings.
+
+`event_frames.jsonl` uses schema `input_dynamics_event_video_frame_map.v1` and
+emits one row per timeline event. Mapped rows contain a media PTS interval and
+candidate frame window selected by interval overlap. Unsupported, legacy, or
+outside-video rows are kept as rows with explicit `mapping_status`; agents must
+branch on per-row status and uncertainty.
+
+Treat `flags.has_video_frame_index` as readiness for frame metadata and
+`flags.has_video_map` as readiness for event-frame windows. Neither flag means
+the visual content has been interpreted. Canonical timing confidence is reported
+separately through `flags.canonical_clock_ready` and
+`flags.needs_canonical_recording`.
 
 To use a local classifier-threshold policy:
 
@@ -673,9 +689,9 @@ input-dynamics derive dismissals \
 
 Input profiles and derivation policies are separate. `--input-profile` controls
 controller-generated input. `--policy` controls recording interpretation.
-Derived artifacts, including timeline bundles and video frame indexes, are
-sensitive local recording data; keep them with the same care as raw JSONL,
-screen video, screenshots, and accessibility dumps.
+Derived artifacts, including timeline bundles and everything under
+`derived/video_map/`, are sensitive local recording data; keep them with the
+same care as raw JSONL, screen video, screenshots, and accessibility dumps.
 
 Use [adb-control.md](adb-control.md) when debugging the lower-level broadcast
 surface directly.

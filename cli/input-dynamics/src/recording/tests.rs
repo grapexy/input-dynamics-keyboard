@@ -297,6 +297,7 @@ fn inspect_requires_declared_video_artifacts() {
     let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
 }
 
+#[allow(clippy::too_many_lines)]
 #[test]
 fn inspect_accepts_declared_canonical_video_artifacts() {
     let root = unique_temp_dir("recording-inspect-required-video-canonical");
@@ -377,8 +378,12 @@ fn inspect_accepts_declared_canonical_video_artifacts() {
         "fresh video without a frame index should request video-map derivation"
     );
     assert!(
-        action_command(&result, "derive_video_map").is_some(),
-        "inspect should suggest the canonical video-map derivation command"
+        action_command(&result, "derive_video_map").is_none(),
+        "inspect should not suggest video-map derivation before timeline is ready"
+    );
+    assert!(
+        action_command(&result, "derive_timeline").is_some(),
+        "inspect should suggest timeline derivation before video-map derivation"
     );
     let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
 }
@@ -427,6 +432,115 @@ fn inspect_accepts_fresh_video_frame_index() {
     assert!(
         action_command(&result, "derive_video_map").is_none(),
         "fresh frame index should not produce a video-map next action"
+    );
+    let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
+}
+
+#[test]
+fn inspect_accepts_fresh_event_video_map() {
+    let root = unique_temp_dir("recording-inspect-video-map-event-ready");
+    let Some(()) = assert_ok(create_fixture(&root, FixtureShape::WithTimeline), "fixture") else {
+        return;
+    };
+    let Some(video) = assert_ok(create_current_video_fixture(&root), "create video fixture") else {
+        return;
+    };
+    let Some(()) = assert_ok(write_manifest(&root, Some(video)), "write manifest") else {
+        return;
+    };
+    let Some(()) = assert_ok(
+        create_event_video_map_fixture(&root),
+        "create event video map fixture",
+    ) else {
+        return;
+    };
+
+    let Some(result) = assert_ok(inspect_recording(&root), "inspect") else {
+        let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
+        return;
+    };
+
+    assert_eq!(
+        result
+            .pointer("/flags/has_video_frame_index")
+            .and_then(Value::as_bool),
+        Some(true),
+        "full event map should still satisfy frame-index readiness"
+    );
+    assert_eq!(
+        result
+            .pointer("/flags/has_video_map")
+            .and_then(Value::as_bool),
+        Some(true),
+        "fresh event-frame map should be ready"
+    );
+    assert_eq!(
+        result
+            .pointer("/flags/needs_video_map")
+            .and_then(Value::as_bool),
+        Some(false),
+        "fresh event-frame map should not need derivation"
+    );
+    assert!(
+        action_command(&result, "derive_video_map").is_none(),
+        "fresh event-frame map should not request derivation"
+    );
+    let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
+}
+
+#[test]
+fn inspect_rejects_event_video_map_without_timeline_source_lineage() {
+    let root = unique_temp_dir("recording-inspect-video-map-missing-source");
+    let Some(()) = assert_ok(create_fixture(&root, FixtureShape::WithTimeline), "fixture") else {
+        return;
+    };
+    let Some(video) = assert_ok(create_current_video_fixture(&root), "create video fixture") else {
+        return;
+    };
+    let Some(()) = assert_ok(write_manifest(&root, Some(video)), "write manifest") else {
+        return;
+    };
+    let Some(()) = assert_ok(
+        create_event_video_map_fixture(&root),
+        "create event video map fixture",
+    ) else {
+        return;
+    };
+    let index_path = root.join("derived").join("video_map").join("index.json");
+    let Some(mut index) = assert_ok(read_json(&index_path), "read video map index") else {
+        return;
+    };
+    if let Some(sources) = index.get_mut("sources").and_then(Value::as_array_mut) {
+        sources
+            .retain(|source| source.get("kind").and_then(Value::as_str) != Some("timeline_events"));
+    }
+    let Some(()) = assert_ok(
+        write_json(&index_path, &index),
+        "write stale video map index",
+    ) else {
+        return;
+    };
+
+    let Some(result) = assert_ok(inspect_recording(&root), "inspect") else {
+        let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
+        return;
+    };
+
+    assert_eq!(
+        result
+            .pointer("/flags/has_video_map")
+            .and_then(Value::as_bool),
+        Some(false),
+        "event map without timeline_events source lineage must not be ready"
+    );
+    assert!(
+        result
+            .pointer("/video_map/stale_reasons")
+            .and_then(Value::as_array)
+            .is_some_and(|reasons| reasons.iter().any(|reason| reason
+                .as_str()
+                .is_some_and(|text| text.contains("timeline_events")))),
+        "stale reasons should name the missing timeline_events source"
     );
     let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
 }
@@ -1338,6 +1452,114 @@ fn create_video_map_fixture(root: &Path) -> TestResult<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
+fn create_event_video_map_fixture(root: &Path) -> TestResult<()> {
+    let video_map_dir = root.join("derived").join("video_map");
+    fs::create_dir_all(&video_map_dir)?;
+    let frames_path = video_map_dir.join("frames.jsonl");
+    let alignment_path = video_map_dir.join("alignment.json");
+    let event_frames_path = video_map_dir.join("event_frames.jsonl");
+    write_jsonl(
+        &frames_path,
+        &[json!({
+            "schema": "input_dynamics_video_frame.v1",
+            "event": "video_frame",
+            "artifact_stage": "frame_index",
+            "frame_id": "frame:00000001",
+            "frame_sequence": 1_u64,
+            "clock_domain": "media_pts_ns",
+            "media_time": {
+                "clock_domain": "media_pts_ns",
+                "timestamp_source": "media_probe",
+                "timestamp_precision": "nanoseconds",
+                "field": "pts_ns",
+                "pts_ns": 0_i64,
+                "pts_tick": 0_i64
+            },
+            "duration_ns": 33_333_333_i64,
+            "pts_interval_ns": 33_333_333_i64,
+            "is_key_frame": true,
+            "width": 1080_i64,
+            "height": 2400_i64,
+            "encoded_size_bytes": 123_i64,
+        })],
+    )?;
+    write_json(
+        &alignment_path,
+        &json!({
+            "schema": "input_dynamics_video_alignment.v1",
+            "alignment_id": "video_alignment:device_elapsed_realtime_ns_to_media_pts_ns:v1",
+            "status": "bracketed"
+        }),
+    )?;
+    write_jsonl(
+        &event_frames_path,
+        &[json!({
+            "schema": "input_dynamics_event_video_frame_map.v1",
+            "timeline_event_id": "timeline:000001",
+            "timeline_ref": {
+                "path": "derived/timeline/events.jsonl",
+                "line_index": 1_u64
+            },
+            "event": "key_down",
+            "record_kind": "ime_event",
+            "source_ref": {
+                "path": "ime/session-test.jsonl",
+                "line_index": 1_u64
+            },
+            "mapping_status": "bracketed",
+            "mapping_input_time": {
+                "clock_domain": "device_elapsed_realtime_ns",
+                "timestamp_source": "derived_transform",
+                "timestamp_precision": "nanoseconds",
+                "time_interval_ns": [1_000_i64, 2_000_i64],
+                "source_time_status": "timeline_normalized_time",
+                "transform_id": "timeline_normalized_time"
+            },
+            "video_time": {
+                "clock_domain": "media_pts_ns",
+                "timestamp_source": "derived_transform",
+                "timestamp_precision": "nanoseconds",
+                "time_interval_ns": [1_000_i64, 2_000_i64],
+                "unclipped_time_interval_ns": [1_000_i64, 2_000_i64],
+                "transform_id": "video_alignment:device_elapsed_realtime_ns_to_media_pts_ns:v1",
+                "uncertainty_ns": 1_000_i64
+            },
+            "frame_window": {
+                "start_frame_id": "frame:00000001",
+                "end_frame_id": "frame:00000001",
+                "nominal_frame_id": "frame:00000001",
+                "start_frame_sequence": 1_u64,
+                "end_frame_sequence": 1_u64,
+                "nominal_frame_sequence": 1_u64,
+                "selection_policy": "interval_overlap_with_midpoint_nominal"
+            },
+            "reasons": ["timeline_normalized_device_elapsed_time"],
+            "warnings": []
+        })],
+    )?;
+    write_json(
+        &video_map_dir.join("index.json"),
+        &json!({
+            "schema": "input_dynamics_video_map_index.v1",
+            "artifact_stage": "event_frame_map",
+            "sources": event_video_map_sources_json(root)?,
+            "outputs": event_video_map_outputs_json(&frames_path, &alignment_path, &event_frames_path)?,
+            "frame_count": 1_u64,
+            "probe_status": "ok",
+            "alignment_status": "bracketed",
+            "event_mapping": {
+                "status": "bracketed",
+                "source_event_count": 1_u64,
+                "row_count": 1_u64,
+                "mapped_event_count": 1_u64,
+                "unmapped_event_count": 0_u64
+            }
+        }),
+    )?;
+    Ok(())
+}
+
 fn video_map_sources_json(root: &Path) -> TestResult<Value> {
     Ok(json!([
         {
@@ -1364,14 +1586,86 @@ fn video_map_sources_json(root: &Path) -> TestResult<Value> {
     ]))
 }
 
+fn event_video_map_sources_json(root: &Path) -> TestResult<Value> {
+    let Some(mut sources) = video_map_sources_json(root)?.as_array().cloned() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "video map sources fixture should be an array",
+        )
+        .into());
+    };
+    sources.push(json!({
+        "kind": "timeline_index",
+        "path": "derived/timeline/index.json",
+        "exists": true,
+        "required": true,
+        "fingerprint": file_fingerprint(&root.join("derived").join("timeline").join("index.json"))?
+    }));
+    sources.push(json!({
+        "kind": "timeline_events",
+        "path": "derived/timeline/events.jsonl",
+        "exists": true,
+        "required": true,
+        "record_count": 1_u64,
+        "fingerprint": file_fingerprint(&root.join("derived").join("timeline").join("events.jsonl"))?
+    }));
+    Ok(Value::Array(sources))
+}
+
 fn video_map_outputs_json(frames_path: &Path) -> TestResult<Value> {
     Ok(json!({
+        "video_map_index": {
+            "path": "derived/video_map/index.json",
+            "schema": "input_dynamics_video_map_index.v1",
+            "record_count": null,
+            "sensitive": true,
+            "fingerprint": null,
+            "fingerprint_status": "not_embedded_self_reference"
+        },
         "video_map_frames": {
             "path": "derived/video_map/frames.jsonl",
             "schema": "input_dynamics_video_frame.v1",
             "record_count": 1_u64,
             "sensitive": true,
             "fingerprint": file_fingerprint(frames_path)?
+        }
+    }))
+}
+
+fn event_video_map_outputs_json(
+    frames_path: &Path,
+    alignment_path: &Path,
+    event_frames_path: &Path,
+) -> TestResult<Value> {
+    Ok(json!({
+        "video_map_index": {
+            "path": "derived/video_map/index.json",
+            "schema": "input_dynamics_video_map_index.v1",
+            "record_count": null,
+            "sensitive": true,
+            "fingerprint": null,
+            "fingerprint_status": "not_embedded_self_reference"
+        },
+        "video_map_frames": {
+            "path": "derived/video_map/frames.jsonl",
+            "schema": "input_dynamics_video_frame.v1",
+            "record_count": 1_u64,
+            "sensitive": true,
+            "fingerprint": file_fingerprint(frames_path)?
+        },
+        "video_map_alignment": {
+            "path": "derived/video_map/alignment.json",
+            "schema": "input_dynamics_video_alignment.v1",
+            "record_count": 1_u64,
+            "sensitive": true,
+            "fingerprint": file_fingerprint(alignment_path)?
+        },
+        "video_map_event_frames": {
+            "path": "derived/video_map/event_frames.jsonl",
+            "schema": "input_dynamics_event_video_frame_map.v1",
+            "record_count": 1_u64,
+            "sensitive": true,
+            "fingerprint": file_fingerprint(event_frames_path)?
         }
     }))
 }
@@ -1421,6 +1715,11 @@ fn write_json(path: &Path, value: &Value) -> TestResult<()> {
     let text = serde_json::to_string(value)?;
     fs::write(path, text)?;
     Ok(())
+}
+
+fn read_json(path: &Path) -> TestResult<Value> {
+    let text = fs::read_to_string(path)?;
+    Ok(serde_json::from_str(&text)?)
 }
 
 fn write_jsonl(path: &Path, values: &[Value]) -> TestResult<()> {

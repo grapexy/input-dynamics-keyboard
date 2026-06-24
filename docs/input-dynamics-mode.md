@@ -70,7 +70,7 @@ uncertainty used for that comparison.
 | `android_uptime_ms` / `android_uptime_ns` | Android uptime clock used by `MotionEvent` and `KeyEvent`; source-event time, excluding deep sleep. | Key/touch hold and flight timing. |
 | `device_elapsed_realtime_ns` | Android elapsed realtime clock, including deep sleep. | App status/control timestamps and future recording/video/evidence anchors. |
 | `kernel_getevent_us` | Raw `getevent -lt` timestamp domain. | Device-level touch streams before explicit alignment. |
-| `media_pts_ns` | Encoded video media presentation timestamp. | Video frame indexes before explicit event mapping. |
+| `media_pts_ns` | Encoded video media presentation timestamp. | Video frame indexes and derived event-frame windows after an explicit alignment transform. |
 | `host_process_monotonic_ns` | Host CLI process-relative monotonic clock. | ADB latency diagnostics. |
 | `host_wall_ms` | Host wall clock. | Human-readable provenance only. |
 | `device_wall_ms` | Device wall clock. | Legacy diagnostics only; not ordering truth. |

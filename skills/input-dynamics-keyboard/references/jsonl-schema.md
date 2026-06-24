@@ -90,9 +90,19 @@ Use this reference when validating logs or changing event fields.
   source PTS tick/time-base provenance, optional `duration_ns`,
   `pts_interval_ns`, keyframe flag, frame dimensions, encoded packet size when
   available, and source-video fingerprint metadata. They are sensitive local
-  recording artifacts and media-clock facts only. Do not compare them to IME,
-  getevent, timeline, evidence, or wall-clock times unless a later derived
-  artifact supplies an explicit transform and alignment status.
+  recording artifacts and media-clock facts only.
+- Video alignment files use schema `input_dynamics_video_alignment.v1` under
+  `derived/video_map/alignment.json`. They describe the explicit transform from
+  recorded timing anchors to `media_pts_ns`, including status, reasons, and
+  uncertainty. Canonical mappings use `device_elapsed_realtime_ns`; older
+  readable mappings may be labeled `legacy_wall_clock_bracketed`.
+- Event-frame rows use schema `input_dynamics_event_video_frame_map.v1` under
+  `derived/video_map/event_frames.jsonl`. The derivation emits one row per
+  timeline event. Mapped rows include a media PTS interval and candidate frame
+  window; unsupported, legacy, or outside-video rows keep explicit
+  `mapping_status` and null frame windows where appropriate. Treat these as
+  sensitive local recording artifacts and branch on per-row status and
+  uncertainty. Do not treat frame windows as visual interpretation.
 - `target_package` identifies the active editor package reported to the IME.
 - `field_episode_id` groups field-scoped records that appear to belong to one
   visible editing episode. It is a logger heuristic, not app-provided truth.
