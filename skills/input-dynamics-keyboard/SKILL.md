@@ -244,6 +244,9 @@ Use `flags.valid_for_analysis`, `flags.needs_validation`,
 `flags.ime_logs_pull_failed`, `flags.ime_logs_staging_failed`,
 `flags.ime_validation_failed`, `flags.getevent_failed`,
 `flags.getevent_normalization_failed`, `flags.getevent_content_missing`,
+`flags.video_artifact_failed`, `flags.video_timing_failed`,
+`flags.video_pull_failed`, `flags.video_content_missing`,
+`flags.video_remote_cleanup_failed`,
 `flags.required_artifact_failure_codes`, and `flags.needs_session_rerun` to
 decide the next step. Branch on
 `session_classification` first: `complete` may continue to artifact/timing gates;
@@ -254,9 +257,10 @@ If `video_ended_early`, `required_process_failed`, or
 `required_artifact_failed` is true, preserve the failed run for diagnostics and
 run a new capture through `session start`, `session status`, `session stop`, and
 `recording inspect`. Required artifact failures mean post-stop finalization did
-not produce usable IME logs, validation output, or normalized ADB touchscreen
-events; do not use lower-level validation or derivation commands as the normal
-repair path for that run.
+not produce usable IME logs, validation output, normalized ADB touchscreen
+events, or required screen video timing, pull, content, or remote cleanup
+finalization; do not use lower-level ADB pull, remote cleanup, validation,
+timing repair, or derivation commands as the normal repair path for that run.
 Required missing or stale video makes `valid_for_analysis` false. The `clock`
 object classifies saved video/evidence anchors as `bracketed`,
 `legacy_wall_clock_bracketed`, `missing_source`, `stale_inputs`,

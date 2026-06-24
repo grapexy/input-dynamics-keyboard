@@ -91,8 +91,9 @@ package and device serial.
 
 The `session` workflow starts IME logging, captures an ADB touchscreen event
 stream, records screen video, writes normalized `adb/getevent.jsonl`, pulls
-logs, writes `manifest.json`, and writes `validation.json`. Screen video is
-sensitive local recording data.
+logs, pulls and fingerprints screen video, records video timing and remote
+cleanup status, writes `manifest.json`, and writes `validation.json`. Screen
+video is sensitive local recording data.
 
 For a bounded smoke capture that uses the same lifecycle and finalization path:
 

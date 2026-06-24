@@ -857,6 +857,10 @@ fn required_process_status_message(name: &str, error_code: SessionErrorCode) -> 
         | SessionErrorCode::ImeValidationFailed
         | SessionErrorCode::GeteventNormalizationFailed
         | SessionErrorCode::GeteventContentMissing
+        | SessionErrorCode::VideoTimingFailed
+        | SessionErrorCode::VideoPullFailed
+        | SessionErrorCode::VideoContentMissing
+        | SessionErrorCode::VideoRemoteCleanupFailed
         | SessionErrorCode::NoActiveSession
         | SessionErrorCode::SequenceMismatch => format!("required {name} process failed"),
     }
@@ -2510,6 +2514,7 @@ fn pull_video_if_needed(
     identity: &SessionIdentity,
     state: &mut CaptureSessionState,
 ) -> CliResult<Value> {
+    let paths = VideoFinalizationPaths::new(identity);
     let Some(descriptor) = state.processes.get(SCREENRECORD_PROCESS) else {
         return Ok(json!({
             "ok": true,
@@ -2517,77 +2522,329 @@ fn pull_video_if_needed(
             "reason": "video_disabled",
         }));
     };
-    let remote_path = descriptor
-        .remote_command
-        .get(1)
-        .ok_or_else(|| CliError::new("screenrecord descriptor missing remote path"))?;
-    let start_timing = required_start_config_ok(state, "video_start_timing")?;
-    let stop_timing = required_start_config_ok(state, "video_stop_timing")?;
-    validate_video_timing_order(&start_timing, &stop_timing)?;
-    let local_path = identity.output_dir.join("video").join("screen.mp4");
-    let pull = effects.pull_file(remote_path, &local_path)?;
-    let pull_ok = pull.get("ok").and_then(Value::as_bool) == Some(true);
+    let remote_path = match video_remote_path(descriptor, &paths) {
+        Ok(value) => value,
+        Err(failure) => {
+            return Ok(finish_failed_video(
+                state,
+                &paths,
+                failure,
+                "video pull failed",
+            ));
+        }
+    };
+    let (start_timing, stop_timing) = match video_timing_result(state, &remote_path, &paths) {
+        Ok(value) => value,
+        Err(failure) => {
+            return Ok(finish_failed_video(
+                state,
+                &paths,
+                failure,
+                "video timing failed",
+            ));
+        }
+    };
+    let pull = match pull_video_file(effects, &remote_path, &paths, &start_timing, &stop_timing) {
+        Ok(value) => value,
+        Err(failure) => {
+            return Ok(finish_failed_video(
+                state,
+                &paths,
+                failure,
+                "video pull failed",
+            ));
+        }
+    };
+    let file = match video_file_result(&remote_path, &paths, &pull, &start_timing, &stop_timing) {
+        Ok(value) => value,
+        Err(failure) => {
+            return Ok(finish_failed_video(
+                state,
+                &paths,
+                failure,
+                "video content missing or unusable",
+            ));
+        }
+    };
+    let content = VideoFinalizationContent {
+        remote_path,
+        start_timing,
+        stop_timing,
+        pull,
+        file,
+    };
+    finish_pulled_video(effects, state, &paths, &content)
+}
+
+fn finish_pulled_video(
+    effects: &dyn LifecycleEffects,
+    state: &mut CaptureSessionState,
+    paths: &VideoFinalizationPaths,
+    content: &VideoFinalizationContent,
+) -> CliResult<Value> {
     let cleanup = effects
         .adb_shell(
-            vec![String::from("rm"), String::from("-f"), remote_path.clone()],
+            vec![
+                String::from("rm"),
+                String::from("-f"),
+                content.remote_path.clone(),
+            ],
             FailureMode::AllowFailure,
         )
         .unwrap_or_else(|error| json!({"ok": false, "error": error.to_string()}));
-    let timing_path = identity.output_dir.join("video").join("timing.json");
-    let file = if pull_ok {
-        file_fingerprint(&local_path).unwrap_or_else(|error| {
-            json!({
-                "ok": false,
-                "error": error.to_string(),
-            })
+    let cleanup_ok = cleanup.get("ok").and_then(Value::as_bool) == Some(true);
+    let mut video_json = json!({
+        "schema": VIDEO_CAPTURE_SCHEMA,
+        "ok": cleanup_ok,
+        "enabled": true,
+        "required": true,
+        "remote_path": content.remote_path.clone(),
+        "local_path": paths.local_path.to_string_lossy(),
+        "start": content.start_timing.clone(),
+        "stop": content.stop_timing.clone(),
+        "pull": content.pull.clone(),
+        "remote_cleanup": cleanup,
+        "file": content.file.clone(),
+        "failure_reason": (!cleanup_ok).then_some("screenrecord remote cleanup failed"),
+    });
+    if !cleanup_ok {
+        annotate_artifact_failure_result(
+            &mut video_json,
+            SessionErrorCode::VideoRemoteCleanupFailed,
+            "screenrecord remote cleanup failed",
+        );
+    }
+    write_json_atomic(&paths.timing_path, &video_json)?;
+    mark_artifact(
+        state,
+        "video_screen",
+        &paths.local_path,
+        VIDEO_CAPTURE_SCHEMA,
+    );
+    mark_artifact(
+        state,
+        "video_timing",
+        &paths.timing_path,
+        VIDEO_CAPTURE_SCHEMA,
+    );
+    Ok(video_json)
+}
+
+struct VideoFinalizationContent {
+    remote_path: String,
+    start_timing: Value,
+    stop_timing: Value,
+    pull: Value,
+    file: Value,
+}
+
+struct VideoFinalizationPaths {
+    local_path: PathBuf,
+    timing_path: PathBuf,
+}
+
+impl VideoFinalizationPaths {
+    fn new(identity: &SessionIdentity) -> Self {
+        Self {
+            local_path: identity.output_dir.join("video").join("screen.mp4"),
+            timing_path: identity.output_dir.join("video").join("timing.json"),
+        }
+    }
+}
+
+struct VideoFailure {
+    error_code: SessionErrorCode,
+    message: &'static str,
+    remote_path: Value,
+    pull: Value,
+    file: Value,
+    start_timing: Value,
+    stop_timing: Value,
+    remote_cleanup: Value,
+}
+
+fn video_remote_path(
+    descriptor: &ProcessDescriptor,
+    paths: &VideoFinalizationPaths,
+) -> Result<String, Value> {
+    descriptor.remote_command.get(1).cloned().ok_or_else(|| {
+        video_failure_result(
+            paths,
+            &VideoFailure {
+                error_code: SessionErrorCode::VideoPullFailed,
+                message: "screenrecord remote video path is missing",
+                remote_path: Value::Null,
+                pull: json!({"ok": false, "error": "screenrecord descriptor missing remote path"}),
+                file: Value::Null,
+                start_timing: Value::Null,
+                stop_timing: Value::Null,
+                remote_cleanup: Value::Null,
+            },
+        )
+    })
+}
+
+fn video_timing_result(
+    state: &CaptureSessionState,
+    remote_path: &str,
+    paths: &VideoFinalizationPaths,
+) -> Result<(Value, Value), Value> {
+    let timing = (|| -> CliResult<(Value, Value)> {
+        let start_timing = required_start_config_ok(state, "video_start_timing")?;
+        let stop_timing = required_start_config_ok(state, "video_stop_timing")?;
+        validate_video_timing_order(&start_timing, &stop_timing)?;
+        Ok((start_timing, stop_timing))
+    })();
+    timing.map_err(|error| {
+        video_failure_result(
+            paths,
+            &VideoFailure {
+                error_code: SessionErrorCode::VideoTimingFailed,
+                message: "screenrecord timing metadata could not be finalized",
+                remote_path: json!(remote_path),
+                pull: json!({"ok": false, "error": error.to_string()}),
+                file: Value::Null,
+                start_timing: Value::Null,
+                stop_timing: Value::Null,
+                remote_cleanup: Value::Null,
+            },
+        )
+    })
+}
+
+fn pull_video_file(
+    effects: &dyn LifecycleEffects,
+    remote_path: &str,
+    paths: &VideoFinalizationPaths,
+    start_timing: &Value,
+    stop_timing: &Value,
+) -> Result<Value, Value> {
+    match effects.pull_file(remote_path, &paths.local_path) {
+        Ok(value) if value.get("ok").and_then(Value::as_bool) == Some(true) => Ok(value),
+        Ok(value) => Err(video_pull_failure(
+            paths,
+            remote_path,
+            value,
+            start_timing,
+            stop_timing,
+        )),
+        Err(error) => Err(video_pull_failure(
+            paths,
+            remote_path,
+            json!({"ok": false, "error": error.to_string()}),
+            start_timing,
+            stop_timing,
+        )),
+    }
+}
+
+fn video_pull_failure(
+    paths: &VideoFinalizationPaths,
+    remote_path: &str,
+    pull: Value,
+    start_timing: &Value,
+    stop_timing: &Value,
+) -> Value {
+    video_failure_result(
+        paths,
+        &VideoFailure {
+            error_code: SessionErrorCode::VideoPullFailed,
+            message: "screenrecord video could not be pulled",
+            remote_path: json!(remote_path),
+            pull,
+            file: Value::Null,
+            start_timing: start_timing.clone(),
+            stop_timing: stop_timing.clone(),
+            remote_cleanup: Value::Null,
+        },
+    )
+}
+
+fn video_file_result(
+    remote_path: &str,
+    paths: &VideoFinalizationPaths,
+    pull: &Value,
+    start_timing: &Value,
+    stop_timing: &Value,
+) -> Result<Value, Value> {
+    let file = file_fingerprint(&paths.local_path).unwrap_or_else(|error| {
+        json!({
+            "ok": false,
+            "error": error.to_string(),
         })
-    } else {
-        Value::Null
-    };
+    });
     let byte_count = file
         .get("byte_count")
         .and_then(Value::as_u64)
         .unwrap_or(0_u64);
-    let video_ok =
-        pull_ok && byte_count > 0_u64 && cleanup.get("ok").and_then(Value::as_bool) == Some(true);
-    let video_json = json!({
+    if byte_count > 0_u64 {
+        return Ok(file);
+    }
+    Err(video_failure_result(
+        paths,
+        &VideoFailure {
+            error_code: SessionErrorCode::VideoContentMissing,
+            message: "screenrecord video content is missing or unusable",
+            remote_path: json!(remote_path),
+            pull: pull.clone(),
+            file,
+            start_timing: start_timing.clone(),
+            stop_timing: stop_timing.clone(),
+            remote_cleanup: Value::Null,
+        },
+    ))
+}
+
+fn video_failure_result(paths: &VideoFinalizationPaths, failure: &VideoFailure) -> Value {
+    let mut value = json!({
         "schema": VIDEO_CAPTURE_SCHEMA,
-        "ok": video_ok,
+        "ok": false,
         "enabled": true,
         "required": true,
-        "remote_path": remote_path,
-        "local_path": local_path.to_string_lossy(),
-        "start": start_timing,
-        "stop": stop_timing,
-        "pull": pull,
-        "remote_cleanup": cleanup,
-        "file": file,
-        "failure_reason": (!video_ok).then_some("video pull, fingerprint, byte count, or remote cleanup failed"),
+        "remote_path": failure.remote_path.clone(),
+        "local_path": paths.local_path.to_string_lossy(),
+        "timing_path": paths.timing_path.to_string_lossy(),
+        "start": failure.start_timing.clone(),
+        "stop": failure.stop_timing.clone(),
+        "pull": failure.pull.clone(),
+        "remote_cleanup": failure.remote_cleanup.clone(),
+        "file": failure.file.clone(),
+        "failure_reason": failure.message,
     });
-    write_json_atomic(&timing_path, &video_json)?;
-    if video_ok {
-        mark_artifact(state, "video_screen", &local_path, VIDEO_CAPTURE_SCHEMA);
-        mark_artifact(state, "video_timing", &timing_path, VIDEO_CAPTURE_SCHEMA);
-        Ok(video_json)
-    } else {
-        mark_failed_artifact(
-            state,
-            "video_screen",
-            &local_path,
-            VIDEO_CAPTURE_SCHEMA,
-            "video finalization returned ok:false",
-        );
-        mark_failed_artifact(
-            state,
-            "video_timing",
-            &timing_path,
-            VIDEO_CAPTURE_SCHEMA,
-            "video finalization returned ok:false",
-        );
-        Err(CliError::new(format!(
-            "failed to pull screenrecord video: {video_json}"
-        )))
-    }
+    annotate_artifact_failure_result(&mut value, failure.error_code, failure.message);
+    value
+}
+
+fn finish_failed_video(
+    state: &mut CaptureSessionState,
+    paths: &VideoFinalizationPaths,
+    failure: Value,
+    reason: &str,
+) -> Value {
+    let _write = write_json_atomic(&paths.timing_path, &failure);
+    mark_failed_video_artifacts(state, paths, reason);
+    failure
+}
+
+fn mark_failed_video_artifacts(
+    state: &mut CaptureSessionState,
+    paths: &VideoFinalizationPaths,
+    reason: &str,
+) {
+    mark_failed_artifact(
+        state,
+        "video_screen",
+        &paths.local_path,
+        VIDEO_CAPTURE_SCHEMA,
+        reason,
+    );
+    mark_failed_artifact(
+        state,
+        "video_timing",
+        &paths.timing_path,
+        VIDEO_CAPTURE_SCHEMA,
+        reason,
+    );
 }
 
 fn required_start_config_ok(state: &CaptureSessionState, key: &str) -> CliResult<Value> {
@@ -3239,7 +3496,7 @@ fn hash_prefix(text: &str, length: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use crate::session_process::{HostSignal, ProcessLivenessStatus, SignalAttempt};
@@ -4290,6 +4547,254 @@ mod tests {
     }
 
     #[test]
+    fn stop_reports_video_timing_failure() {
+        let root = unique_temp_dir("session-lifecycle-video-timing-failed");
+        let mut effects = FakeEffects::new("serial-video-timing-failed");
+        effects.set_video_stop_timing_behavior(VideoStopTimingBehavior::ProbeError);
+        start_fake_video_session(&root, &mut effects, "run-video-timing-failed");
+
+        let Some(stop) = assert_ok(
+            stop_session_with_effects(
+                &mut effects,
+                &SessionStopRequest {
+                    run_id: Some(String::from("run-video-timing-failed")),
+                },
+            ),
+            "fake video timing failure stop",
+        ) else {
+            return;
+        };
+
+        assert_required_artifact_stop_result(&stop, "pull_video", "video_timing_failed");
+        let Some(inspection) = assert_ok(
+            crate::recording::inspect_recording(&root),
+            "inspect video timing failure",
+        ) else {
+            return;
+        };
+        assert_required_artifact_inspection(
+            &inspection,
+            "pull_video",
+            &ArtifactFailureExpectation::video(
+                "video_timing_failed",
+                "rerun because screen recording timing metadata is invalid",
+            ),
+        );
+        let runtime = runtime_paths(effects.package_name(), &effects.serial);
+        cleanup_paths(&root, &runtime);
+    }
+
+    #[test]
+    fn stop_reports_video_pull_failure() {
+        let root = unique_temp_dir("session-lifecycle-video-pull-failed");
+        let mut effects = FakeEffects::new("serial-video-pull-failed");
+        effects.set_video_pull_behavior(VideoPullBehavior::PullError);
+        start_fake_video_session(&root, &mut effects, "run-video-pull-failed");
+
+        let Some(stop) = assert_ok(
+            stop_session_with_effects(
+                &mut effects,
+                &SessionStopRequest {
+                    run_id: Some(String::from("run-video-pull-failed")),
+                },
+            ),
+            "fake video pull failure stop",
+        ) else {
+            return;
+        };
+
+        assert_required_artifact_stop_result(&stop, "pull_video", "video_pull_failed");
+        assert_video_pull_remote_path(&effects, "run-video-pull-failed");
+        let timing = read_video_timing(&root);
+        assert_eq!(
+            timing.get("error_code").and_then(Value::as_str),
+            Some("video_pull_failed"),
+            "durable video timing payload should expose pull failure code: {timing}"
+        );
+        assert_eq!(
+            timing.pointer("/pull/ok").and_then(Value::as_bool),
+            Some(false),
+            "durable video timing payload should preserve pull failure details: {timing}"
+        );
+        let Some(inspection) = assert_ok(
+            crate::recording::inspect_recording(&root),
+            "inspect video pull failure",
+        ) else {
+            return;
+        };
+        assert_required_artifact_inspection(
+            &inspection,
+            "pull_video",
+            &ArtifactFailureExpectation::video(
+                "video_pull_failed",
+                "rerun because screen recording could not be pulled",
+            ),
+        );
+        let runtime = runtime_paths(effects.package_name(), &effects.serial);
+        cleanup_paths(&root, &runtime);
+    }
+
+    #[test]
+    fn stop_reports_video_pull_returned_false() {
+        let root = unique_temp_dir("session-lifecycle-video-pull-false");
+        let mut effects = FakeEffects::new("serial-video-pull-false");
+        effects.set_video_pull_behavior(VideoPullBehavior::ReturnedFalse);
+        start_fake_video_session(&root, &mut effects, "run-video-pull-false");
+
+        let Some(stop) = assert_ok(
+            stop_session_with_effects(
+                &mut effects,
+                &SessionStopRequest {
+                    run_id: Some(String::from("run-video-pull-false")),
+                },
+            ),
+            "fake video pull returned false stop",
+        ) else {
+            return;
+        };
+
+        assert_required_artifact_stop_result(&stop, "pull_video", "video_pull_failed");
+        let runtime = runtime_paths(effects.package_name(), &effects.serial);
+        cleanup_paths(&root, &runtime);
+    }
+
+    #[test]
+    fn stop_reports_video_content_missing() {
+        let root = unique_temp_dir("session-lifecycle-video-content-missing");
+        let mut effects = FakeEffects::new("serial-video-content-missing");
+        effects.set_video_pull_behavior(VideoPullBehavior::EmptyFile);
+        start_fake_video_session(&root, &mut effects, "run-video-content-missing");
+
+        let Some(stop) = assert_ok(
+            stop_session_with_effects(
+                &mut effects,
+                &SessionStopRequest {
+                    run_id: Some(String::from("run-video-content-missing")),
+                },
+            ),
+            "fake video content missing stop",
+        ) else {
+            return;
+        };
+
+        assert_required_artifact_stop_result(&stop, "pull_video", "video_content_missing");
+        let timing = read_video_timing(&root);
+        assert_eq!(
+            timing.get("error_code").and_then(Value::as_str),
+            Some("video_content_missing"),
+            "durable video timing payload should expose content failure code: {timing}"
+        );
+        assert_eq!(
+            timing.pointer("/file/byte_count").and_then(Value::as_u64),
+            Some(0_u64),
+            "durable video timing payload should preserve empty-file fingerprint: {timing}"
+        );
+        let Some(inspection) = assert_ok(
+            crate::recording::inspect_recording(&root),
+            "inspect video content missing",
+        ) else {
+            return;
+        };
+        assert_required_artifact_inspection(
+            &inspection,
+            "pull_video",
+            &ArtifactFailureExpectation::video(
+                "video_content_missing",
+                "rerun because screen recording content is missing",
+            ),
+        );
+        assert_eq!(
+            inspection
+                .pointer("/flags/has_video")
+                .and_then(Value::as_bool),
+            Some(false),
+            "empty video content should not satisfy video readiness: {inspection}"
+        );
+        assert_eq!(
+            inspection
+                .pointer("/flags/needs_video")
+                .and_then(Value::as_bool),
+            Some(true),
+            "empty video content should keep the required video gate open: {inspection}"
+        );
+        let runtime = runtime_paths(effects.package_name(), &effects.serial);
+        cleanup_paths(&root, &runtime);
+    }
+
+    #[test]
+    fn stop_reports_video_remote_cleanup_failure() {
+        let root = unique_temp_dir("session-lifecycle-video-cleanup-failed");
+        let mut effects = FakeEffects::new("serial-video-cleanup-failed");
+        effects.set_video_cleanup_behavior(VideoCleanupBehavior::ReturnedFalse);
+        start_fake_video_session(&root, &mut effects, "run-video-cleanup-failed");
+
+        let Some(stop) = assert_ok(
+            stop_session_with_effects(
+                &mut effects,
+                &SessionStopRequest {
+                    run_id: Some(String::from("run-video-cleanup-failed")),
+                },
+            ),
+            "fake video cleanup failure stop",
+        ) else {
+            return;
+        };
+
+        assert_required_artifact_stop_result(&stop, "pull_video", "video_remote_cleanup_failed");
+        assert_video_cleanup_args(&effects, "run-video-cleanup-failed");
+        let timing = read_video_timing(&root);
+        assert_eq!(
+            timing.get("error_code").and_then(Value::as_str),
+            Some("video_remote_cleanup_failed"),
+            "durable video timing payload should expose cleanup failure code: {timing}"
+        );
+        assert_eq!(
+            timing
+                .pointer("/remote_cleanup/ok")
+                .and_then(Value::as_bool),
+            Some(false),
+            "durable video timing payload should preserve cleanup failure details: {timing}"
+        );
+        assert!(
+            timing
+                .pointer("/file/byte_count")
+                .and_then(Value::as_u64)
+                .is_some_and(|byte_count| byte_count > 0_u64),
+            "cleanup failure should preserve non-empty local video fingerprint: {timing}"
+        );
+        let Some(inspection) = assert_ok(
+            crate::recording::inspect_recording(&root),
+            "inspect video cleanup failure",
+        ) else {
+            return;
+        };
+        assert_required_artifact_inspection(
+            &inspection,
+            "pull_video",
+            &ArtifactFailureExpectation::video(
+                "video_remote_cleanup_failed",
+                "rerun because remote screen recording cleanup failed",
+            ),
+        );
+        assert_eq!(
+            inspection
+                .pointer("/flags/has_video")
+                .and_then(Value::as_bool),
+            Some(true),
+            "remote cleanup failure should preserve valid local video artifacts: {inspection}"
+        );
+        assert_eq!(
+            inspection
+                .pointer("/flags/needs_video")
+                .and_then(Value::as_bool),
+            Some(false),
+            "remote cleanup failure should not request a lower-level video refresh: {inspection}"
+        );
+        let runtime = runtime_paths(effects.package_name(), &effects.serial);
+        cleanup_paths(&root, &runtime);
+    }
+
+    #[test]
     fn stop_does_not_label_probe_failure_as_video_ended_early() {
         let root = unique_temp_dir("session-lifecycle-video-probe-failed");
         let mut effects = FakeEffects::new("serial-video-probe-failed");
@@ -4525,6 +5030,45 @@ mod tests {
         );
     }
 
+    fn read_video_timing(root: &Path) -> Value {
+        let path = root.join("video").join("timing.json");
+        let Some(text) = assert_ok(
+            fs::read_to_string(&path).map_err(CliError::from),
+            "read video timing JSON",
+        ) else {
+            return Value::Null;
+        };
+        let Some(value) = assert_ok(
+            serde_json::from_str::<Value>(&text).map_err(CliError::from),
+            "parse video timing JSON",
+        ) else {
+            return Value::Null;
+        };
+        value
+    }
+
+    fn assert_video_pull_remote_path(effects: &FakeEffects, run_id: &str) {
+        let expected = remote_video_path(run_id);
+        assert_eq!(
+            effects.last_video_pull_remote.borrow().as_deref(),
+            Some(expected.as_str()),
+            "video pull should use the session remote screenrecord path"
+        );
+    }
+
+    fn assert_video_cleanup_args(effects: &FakeEffects, run_id: &str) {
+        let expected = vec![
+            String::from("rm"),
+            String::from("-f"),
+            remote_video_path(run_id),
+        ];
+        assert_eq!(
+            effects.last_video_cleanup_args.borrow().as_ref(),
+            Some(&expected),
+            "video cleanup should remove the same remote screenrecord path"
+        );
+    }
+
     fn assert_required_process_inspection(inspection: &Value, error_code: &str, flag_code: &str) {
         assert_eq!(
             inspection
@@ -4674,6 +5218,7 @@ mod tests {
         rerun_reason: &'static str,
         ime_logs_failed: bool,
         getevent_failed: bool,
+        video_failed: bool,
     }
 
     impl ArtifactFailureExpectation {
@@ -4683,6 +5228,7 @@ mod tests {
                 rerun_reason,
                 ime_logs_failed: true,
                 getevent_failed: false,
+                video_failed: false,
             }
         }
 
@@ -4692,6 +5238,17 @@ mod tests {
                 rerun_reason,
                 ime_logs_failed: false,
                 getevent_failed: true,
+                video_failed: false,
+            }
+        }
+
+        const fn video(code: &'static str, rerun_reason: &'static str) -> Self {
+            Self {
+                code,
+                rerun_reason,
+                ime_logs_failed: false,
+                getevent_failed: false,
+                video_failed: true,
             }
         }
     }
@@ -4706,6 +5263,10 @@ mod tests {
             "ime_validation_failed",
             "getevent_normalization_failed",
             "getevent_content_missing",
+            "video_timing_failed",
+            "video_pull_failed",
+            "video_content_missing",
+            "video_remote_cleanup_failed",
         ] {
             assert_eq!(
                 inspection
@@ -4728,6 +5289,13 @@ mod tests {
                 .and_then(Value::as_bool),
             Some(expectation.getevent_failed),
             "unexpected getevent aggregate flag: {inspection}"
+        );
+        assert_eq!(
+            inspection
+                .pointer("/flags/video_artifact_failed")
+                .and_then(Value::as_bool),
+            Some(expectation.video_failed),
+            "unexpected video aggregate flag: {inspection}"
         );
     }
 
@@ -4968,6 +5536,11 @@ mod tests {
             "getevent_failed",
             "getevent_normalization_failed",
             "getevent_content_missing",
+            "video_artifact_failed",
+            "video_timing_failed",
+            "video_pull_failed",
+            "video_content_missing",
+            "video_remote_cleanup_failed",
         ] {
             assert_eq!(
                 inspection
@@ -5129,6 +5702,26 @@ mod tests {
         UnparsedOnly,
     }
 
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum VideoPullBehavior {
+        Valid,
+        PullError,
+        ReturnedFalse,
+        EmptyFile,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum VideoCleanupBehavior {
+        Valid,
+        ReturnedFalse,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum VideoStopTimingBehavior {
+        Valid,
+        ProbeError,
+    }
+
     struct FakeEffects {
         package: String,
         adb: String,
@@ -5139,6 +5732,12 @@ mod tests {
         getevent_stop_failure: Cell<bool>,
         ime_pull_behavior: Cell<ImePullBehavior>,
         getevent_raw_behavior: Cell<GeteventRawBehavior>,
+        video_pull_behavior: Cell<VideoPullBehavior>,
+        video_cleanup_behavior: Cell<VideoCleanupBehavior>,
+        video_stop_timing_behavior: Cell<VideoStopTimingBehavior>,
+        video_pull_attempted: Cell<bool>,
+        last_video_pull_remote: RefCell<Option<String>>,
+        last_video_cleanup_args: RefCell<Option<Vec<String>>>,
     }
 
     impl FakeEffects {
@@ -5154,6 +5753,12 @@ mod tests {
                 getevent_stop_failure: Cell::new(false),
                 ime_pull_behavior: Cell::new(ImePullBehavior::Valid),
                 getevent_raw_behavior: Cell::new(GeteventRawBehavior::Valid),
+                video_pull_behavior: Cell::new(VideoPullBehavior::Valid),
+                video_cleanup_behavior: Cell::new(VideoCleanupBehavior::Valid),
+                video_stop_timing_behavior: Cell::new(VideoStopTimingBehavior::Valid),
+                video_pull_attempted: Cell::new(false),
+                last_video_pull_remote: RefCell::new(None),
+                last_video_cleanup_args: RefCell::new(None),
             }
         }
 
@@ -5175,6 +5780,18 @@ mod tests {
 
         fn set_getevent_raw_behavior(&self, behavior: GeteventRawBehavior) {
             self.getevent_raw_behavior.set(behavior);
+        }
+
+        fn set_video_pull_behavior(&self, behavior: VideoPullBehavior) {
+            self.video_pull_behavior.set(behavior);
+        }
+
+        fn set_video_cleanup_behavior(&self, behavior: VideoCleanupBehavior) {
+            self.video_cleanup_behavior.set(behavior);
+        }
+
+        fn set_video_stop_timing_behavior(&self, behavior: VideoStopTimingBehavior) {
+            self.video_stop_timing_behavior.set(behavior);
         }
     }
 
@@ -5206,16 +5823,45 @@ mod tests {
             }))
         }
 
-        fn adb_shell(&self, _args: Vec<String>, _failure_mode: FailureMode) -> CliResult<Value> {
+        fn adb_shell(&self, args: Vec<String>, _failure_mode: FailureMode) -> CliResult<Value> {
+            if self.video_pull_attempted.get()
+                && args.first().is_some_and(|arg| arg == "rm")
+                && self.video_cleanup_behavior.get() == VideoCleanupBehavior::ReturnedFalse
+            {
+                self.last_video_cleanup_args.replace(Some(args));
+                return Ok(json!({
+                    "ok": false,
+                    "error": "forced screenrecord remote cleanup failure",
+                }));
+            }
             Ok(json!({"ok": true}))
         }
 
-        fn pull_file(&self, _remote: &str, local: &Path) -> CliResult<Value> {
+        fn pull_file(&self, remote: &str, local: &Path) -> CliResult<Value> {
+            self.video_pull_attempted.set(true);
+            self.last_video_pull_remote
+                .replace(Some(String::from(remote)));
+            if self.video_pull_behavior.get() == VideoPullBehavior::PullError {
+                return Err(CliError::new("forced screenrecord pull failure"));
+            }
             if let Some(parent) = local.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::write(local, b"fake-video")?;
-            Ok(json!({"ok": true}))
+            match self.video_pull_behavior.get() {
+                VideoPullBehavior::Valid => {
+                    fs::write(local, b"fake-video")?;
+                    Ok(json!({"ok": true}))
+                }
+                VideoPullBehavior::ReturnedFalse => Ok(json!({
+                    "ok": false,
+                    "error": "forced screenrecord pull returned false",
+                })),
+                VideoPullBehavior::EmptyFile => {
+                    fs::write(local, b"")?;
+                    Ok(json!({"ok": true}))
+                }
+                VideoPullBehavior::PullError => unreachable!("handled before local file setup"),
+            }
         }
 
         fn pull_logs(&self, out: &Path) -> CliResult<Value> {
@@ -5244,6 +5890,11 @@ mod tests {
         }
 
         fn capture_clock_probe(&self, phase: &str) -> CliResult<Value> {
+            if phase == "after_screenrecord_stop"
+                && self.video_stop_timing_behavior.get() == VideoStopTimingBehavior::ProbeError
+            {
+                return Err(CliError::new("forced screenrecord stop timing failure"));
+            }
             let raw_tick = self.next_pid.get();
             self.next_pid.set(raw_tick.saturating_add(1_u32));
             let tick = i64::from(raw_tick);

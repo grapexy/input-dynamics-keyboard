@@ -99,6 +99,10 @@ pub(crate) enum SessionErrorCode {
     ImeValidationFailed,
     GeteventNormalizationFailed,
     GeteventContentMissing,
+    VideoTimingFailed,
+    VideoPullFailed,
+    VideoContentMissing,
+    VideoRemoteCleanupFailed,
     NoActiveSession,
     SequenceMismatch,
 }

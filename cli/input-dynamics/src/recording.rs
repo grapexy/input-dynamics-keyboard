@@ -257,6 +257,22 @@ impl RequiredArtifactFlags {
         self.has_code("getevent_content_missing")
     }
 
+    fn video_timing_failed(&self) -> bool {
+        self.has_code("video_timing_failed")
+    }
+
+    fn video_pull_failed(&self) -> bool {
+        self.has_code("video_pull_failed")
+    }
+
+    fn video_content_missing(&self) -> bool {
+        self.has_code("video_content_missing")
+    }
+
+    fn video_remote_cleanup_failed(&self) -> bool {
+        self.has_code("video_remote_cleanup_failed")
+    }
+
     fn ime_logs_failed(&self) -> bool {
         self.ime_logs_pull_failed()
             || self.ime_logs_staging_failed()
@@ -265,6 +281,13 @@ impl RequiredArtifactFlags {
 
     fn getevent_failed(&self) -> bool {
         self.getevent_normalization_failed() || self.getevent_content_missing()
+    }
+
+    fn video_artifact_failed(&self) -> bool {
+        self.video_timing_failed()
+            || self.video_pull_failed()
+            || self.video_content_missing()
+            || self.video_remote_cleanup_failed()
     }
 
     fn has_code(&self, expected: &str) -> bool {
@@ -1027,6 +1050,14 @@ fn inspect_video(
     }
     if screen_exists {
         let current = file_fingerprint(&dir.join("video").join("screen.mp4"))?;
+        if current
+            .get("byte_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0_u64)
+            == 0_u64
+        {
+            stale_reasons.push(String::from("video file is empty"));
+        }
         let recorded_sha = manifest
             .and_then(|value| value.pointer("/video/file/sha256"))
             .and_then(Value::as_str);
@@ -2679,6 +2710,23 @@ fn insert_artifact_failure_flags(
                 "getevent_content_missing",
                 required_artifact.getevent_content_missing(),
             ),
+            (
+                "video_artifact_failed",
+                required_artifact.video_artifact_failed(),
+            ),
+            (
+                "video_timing_failed",
+                required_artifact.video_timing_failed(),
+            ),
+            ("video_pull_failed", required_artifact.video_pull_failed()),
+            (
+                "video_content_missing",
+                required_artifact.video_content_missing(),
+            ),
+            (
+                "video_remote_cleanup_failed",
+                required_artifact.video_remote_cleanup_failed(),
+            ),
         ],
     );
 }
@@ -2725,6 +2773,13 @@ fn required_artifact_flags(summary: &Value) -> RequiredArtifactFlags {
         finalization_has_error_code(summary, SessionErrorCode::GeteventNormalizationFailed);
     let getevent_content_missing =
         finalization_has_error_code(summary, SessionErrorCode::GeteventContentMissing);
+    let video_timing_failed =
+        finalization_has_error_code(summary, SessionErrorCode::VideoTimingFailed);
+    let video_pull_failed = finalization_has_error_code(summary, SessionErrorCode::VideoPullFailed);
+    let video_content_missing =
+        finalization_has_error_code(summary, SessionErrorCode::VideoContentMissing);
+    let video_remote_cleanup_failed =
+        finalization_has_error_code(summary, SessionErrorCode::VideoRemoteCleanupFailed);
     let mut failure_codes = Vec::new();
     if ime_logs_pull_failed {
         failure_codes.push(String::from("ime_logs_pull_failed"));
@@ -2740,6 +2795,18 @@ fn required_artifact_flags(summary: &Value) -> RequiredArtifactFlags {
     }
     if getevent_content_missing {
         failure_codes.push(String::from("getevent_content_missing"));
+    }
+    if video_timing_failed {
+        failure_codes.push(String::from("video_timing_failed"));
+    }
+    if video_pull_failed {
+        failure_codes.push(String::from("video_pull_failed"));
+    }
+    if video_content_missing {
+        failure_codes.push(String::from("video_content_missing"));
+    }
+    if video_remote_cleanup_failed {
+        failure_codes.push(String::from("video_remote_cleanup_failed"));
     }
     RequiredArtifactFlags { failure_codes }
 }
@@ -3057,6 +3124,18 @@ fn session_refresh_reason(flags: &Value, evidence: EvidenceRefresh) -> &'static 
     }
     if bool_at(flags, "/getevent_content_missing") {
         return "rerun because required getevent content is missing";
+    }
+    if bool_at(flags, "/video_timing_failed") {
+        return "rerun because screen recording timing metadata is invalid";
+    }
+    if bool_at(flags, "/video_pull_failed") {
+        return "rerun because screen recording could not be pulled";
+    }
+    if bool_at(flags, "/video_content_missing") {
+        return "rerun because screen recording content is missing";
+    }
+    if bool_at(flags, "/video_remote_cleanup_failed") {
+        return "rerun because remote screen recording cleanup failed";
     }
     match (evidence, bool_at(flags, "/needs_video")) {
         (EvidenceRefresh::Include, true) => {

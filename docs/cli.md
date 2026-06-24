@@ -260,8 +260,10 @@ scraping human-oriented text.
   `error_code`, process, observed status, `recommended_next_action`, and
   `recommended_argv`; stop/finalize the matching run id before analysis.
 - `session stop --run-id <id>`: finalizes the active umbrella session, stops
-  capture processes, pulls IME logs, writes validation, and clears runtime
-  ownership. Omitting `--run-id` is non-mutating and returns the active run id.
+  capture processes, pulls IME logs, pulls and fingerprints screen video, writes
+  video timing metadata, records remote video cleanup status, writes validation,
+  and clears runtime ownership. Omitting `--run-id` is non-mutating and returns
+  the active run id.
 - `ime enable-logging` / `ime disable-logging`: diagnostic raw IME logging
   toggles.
 - `ime start --run-id <id>`: diagnostic raw IME-only logging session. Optional
@@ -516,6 +518,8 @@ flags such as `valid_for_analysis`, `has_video`, `needs_video`,
 `required_artifact_failed`, `ime_logs_failed`, `ime_logs_pull_failed`,
 `ime_logs_staging_failed`, `ime_validation_failed`, `getevent_failed`,
 `getevent_normalization_failed`, `getevent_content_missing`,
+`video_artifact_failed`, `video_timing_failed`, `video_pull_failed`,
+`video_content_missing`, `video_remote_cleanup_failed`,
 `required_artifact_failure_codes`, and `needs_session_rerun`.
 
 For umbrella-session recordings, inspect also reports a summarized `session`
@@ -568,10 +572,11 @@ capture process ended early, could not be verified, or did not stop cleanly;
 preserve the failed run and follow the same canonical session rerun workflow
 from `next_actions`. If `flags.required_artifact_failed` is true, required
 post-stop finalization did not produce a usable IME log, validation result, or
-normalized ADB touchscreen event stream. Preserve the failed run for diagnostics
-and follow the canonical session rerun workflow from `next_actions`; do not
-treat lower-level validation or derivation commands as a normal repair path for
-that run.
+normalized ADB touchscreen event stream, or did not complete required screen
+video timing, pull, content, or remote cleanup finalization. Preserve the failed
+run for diagnostics and follow the canonical session rerun workflow from
+`next_actions`; do not treat lower-level ADB pull, remote cleanup, validation,
+timing repair, or derivation commands as a normal repair path for that run.
 
 Treat `valid_for_analysis` as a base artifact/readability gate. For any
 video/evidence anchor claim, cross-source timeline claim, or ordering claim that
