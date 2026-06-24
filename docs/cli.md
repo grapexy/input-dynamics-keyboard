@@ -38,53 +38,78 @@ multiple connected devices, pass `--serial <adb-serial>` to every command:
 ```bash
 adb devices
 cargo run --quiet -p input-dynamics -- --serial "$SERIAL" doctor
-cargo run --quiet -p input-dynamics -- --serial "$SERIAL" session status
+cargo run --quiet -p input-dynamics -- --serial "$SERIAL" controller status
 ```
 
-Stateful session runtime files are keyed by package and ADB serial, so two
+Stateful controller runtime files are keyed by package and ADB serial, so two
 devices do not share controller sockets, state files, or ownership locks. The
-mutable control files remain stable for current-session lookup, while each
+mutable control files remain stable for current-controller lookup, while each
 controller start also creates a preserved diagnostics invocation under
 `<runtime>/<package>.<serial>.runs/`.
 
 ## Common Workflow
 
-For live agent-driven input, use the stateful session lifecycle. It selects the
-IME, starts IME logging, starts one persistent AOSP uinput controller, and then
-accepts live `type`, `tap`, and `press` commands:
+For bounded experiment capture during the session-workflow migration, use
+`record` with an explicit duration. It starts IME logging, captures a concurrent
+ADB touchscreen event stream with `getevent`, records screen video, normalizes
+the event stream to JSONL, stops the session, pulls IME logs, writes
+`manifest.json`, and writes `validation.json`:
+
+```bash
+RUN_ID=run-YYYYMMDD-HHMMSS-human-android
+
+cargo run --quiet -p input-dynamics -- doctor
+cargo run --quiet -p input-dynamics -- install
+cargo run --quiet -p input-dynamics -- select-ime
+cargo run --quiet -p input-dynamics -- touch doctor
+cargo run --quiet -p input-dynamics -- record \
+  --run-id "$RUN_ID" \
+  --out "runs/$RUN_ID" \
+  --duration-ms 10000
+```
+
+Use a positive `--duration-ms <ms>` for agent-run or scripted captures.
+Open-ended `record` is disabled during the session-workflow migration; omitting
+`--duration-ms` is a hard error. Do not use open-ended `record` for automated or
+agent-driven human-operated runs.
+
+## Diagnostic Live Input
+
+For live agent-driven input outside a full capture run, use the diagnostic
+controller lifecycle. It selects the IME, starts IME logging, starts one
+persistent AOSP uinput controller, and then accepts live `type`, `tap`, and
+`press` commands:
 
 ```bash
 RUN_ID=run-YYYYMMDD-HHMMSS-local-android
 
-cargo run --quiet -p input-dynamics -- doctor
-cargo run --quiet -p input-dynamics -- install
-cargo run --quiet -p input-dynamics -- touch doctor
-cargo run --quiet -p input-dynamics -- session start --run-id "$RUN_ID"
+cargo run --quiet -p input-dynamics -- controller start --run-id "$RUN_ID"
 cargo run --quiet -p input-dynamics -- keyboard ensure-visible
 cargo run --quiet -p input-dynamics -- type "ab a"
 cargo run --quiet -p input-dynamics -- press delete
-cargo run --quiet -p input-dynamics -- session stop
+cargo run --quiet -p input-dynamics -- controller stop
 ```
 
-This is the canonical live-input path. `session start` must report
-`input.ready_for_input: true`, and `keyboard ensure-visible` must report an IME
-status with `input_scope_ready: true` before agents send `type`, `tap`, or
-`press`. These commands fail instead of injecting input when the controller is
-not ready, the IME session is inactive, or the visible keyboard is not attached
-to a known non-password field.
+This is a diagnostic live-input path, not a complete recording workflow.
+`controller start` must report `input.ready_for_input: true`, and
+`keyboard ensure-visible` must report an IME status with
+`input_scope_ready: true` before agents send `type`, `tap`, or `press`.
+These commands fail instead of injecting input when the controller is not ready,
+the IME session is inactive, or the visible keyboard is not attached to a known
+non-password field.
 
-Only one stateful session can be active for a package/device runtime at a time.
-A competing `session start` for the same package and ADB serial returns JSON
-with `ok: false` and `busy: true` before changing IME or logging state. Agents
-should treat that as a hard ownership conflict, inspect `session status`, and
-wait for the active run to stop.
+Only one diagnostic controller can be active for a package/device runtime at a
+time. A competing `controller start` for the same package and ADB serial returns
+JSON with `ok: false` and `busy: true` before changing IME or logging state.
+Agents should treat that as a hard ownership conflict, inspect
+`controller status`, and wait for the active controller to stop.
 
-Stateful sessions use the bundled `profiles/baseline-v1.json` input profile by
-default for controller-driven input. To bind a local profile to the whole
-session:
+Diagnostic controller runs use the bundled `profiles/baseline-v1.json` input
+profile by default for controller-driven input. To bind a local profile to the
+whole controller run:
 
 ```bash
-cargo run --quiet -p input-dynamics -- session start \
+cargo run --quiet -p input-dynamics -- controller start \
   --run-id "$RUN_ID" \
   --input-profile ./profiles/custom.json \
   --input-profile-seed 12345
@@ -94,14 +119,14 @@ The IME JSONL `session_start` record and controller state include
 `input_profile_source`, `input_profile_id`, `input_profile_schema`,
 `input_profile_hash`, and `input_profile_seed`.
 
-Controller diagnostics are automatic. `session start`, `type`, `tap`, `press`,
-and `session stop` write a unified structured event journal at
+Controller diagnostics are automatic. `controller start`, `type`, `tap`,
+`press`, and `controller stop` write a unified structured event journal at
 `controller.events.jsonl` inside the current invocation directory. The journal
 contains client and controller request lifecycle events, including request
 writes, response reads/timeouts, uinput writes, state writes, response delivery,
 and controller exit. Stdout/stderr and final controller state are stored in the
-same invocation directory. No separate snapshot command is required before a
-new session.
+same invocation directory. No separate snapshot command is required before a new
+controller run.
 
 For agent observation, use `observe`. These commands do not start logging and
 do not inject input:
@@ -181,7 +206,7 @@ cargo run --quiet -p input-dynamics -- record \
 ```
 
 Do not use fixed sleeps as the synchronization primitive. In the second
-process, poll `session status` until `input.session_lock.state: "active"` and
+process, poll `controller status` until `input.session_lock.state: "active"` and
 `input.ready_for_input: true`. For text and key
 commands, also require `ime.input_scope_ready: true`; if it is false, establish
 the input scope with the canonical UI step for the run, then poll status again
@@ -245,29 +270,36 @@ scraping human-oriented text.
   null, and `manual`.
 - `stop`: stops the active session.
 - `status`: returns current control status.
-- `session start --run-id <id>`: enables/selects the IME, enables logging,
-  starts an IME session, starts a persistent local uinput controller, and binds
-  an input profile. If another stateful session is active or starting, it
-  returns `busy: true` without changing the active run.
+- `controller start --run-id <id>`: diagnostic live-input lifecycle. It
+  enables/selects the IME, enables logging, starts an IME session, starts a
+  persistent local uinput controller, and binds an input profile. If another
+  diagnostic controller is active or starting, it returns `busy: true` without
+  changing the active run.
   Defaults are `--input-actor agent_adb`,
   `--input-controller input-dynamics-cli`, and
   `--input-cadence-policy input_profile`.
-  - `--input-profile <path>`: local profile JSON for the whole session.
+  - `--input-profile <path>`: local profile JSON for the whole controller run.
   - `--input-profile-seed <u64>`: explicit seed for reproducible sampled input.
-- `session status`: returns IME status plus local input-controller status. When
-  the uinput controller is active, `input.state` includes the physical
+- `controller status`: returns IME status plus local input-controller status.
+  When the uinput controller is active, `input.state` includes the physical
   touchscreen profile hash, input profile summary, mirrored virtual touchscreen
   event path, Event Hub device metadata, Input Reader device metadata when
   Android exposes them, and compact controller command diagnostics:
   `current_command`, `last_command`, `last_error`, and `command_sequence`.
   `input.runtime.current_invocation` points to the active/latest diagnostics
   directory and event journal.
-- `session stop`: stops the local input controller, verifies normal runtime
+- `controller stop`: stops the local input controller, verifies normal runtime
   cleanup, verifies that the mirrored virtual touchscreen event path has
   disappeared when it was detected, then stops IME logging. If a previous
-  controller process was interrupted, `session stop` also removes stale runtime
-  files and reports cleanup from the saved state. Final controller state and
-  final session lock are preserved in the diagnostics invocation directory.
+  controller process was interrupted, `controller stop` also removes stale
+  runtime files and reports cleanup from the saved state. Final controller state
+  and final controller lock are preserved in the diagnostics invocation
+  directory.
+- `session start/status/stop`: transitional moved-command surface during the
+  umbrella session migration. These old controller-only forms parse and return
+  `ok: false`, `error_code: "command_moved"`, command-specific `moved_to`
+  guidance, and `mutated: false`. Use `controller start/status/stop` for the
+  diagnostic controller lifecycle until umbrella `session` commands are wired.
 - `layout`: returns status including `keyboard_layout` when the IME is visible.
   Layout output includes keyboard-view bounds, display size/rotation, and
   screen-space key centers for coordinate calibration.
@@ -276,7 +308,7 @@ scraping human-oriented text.
 - `keyboard ensure-visible`: establishes the single ready state required for
   logged live input. When the keyboard is already visible, it still requires
   `input_scope_ready: true`; a merely visible keyboard is not enough. Otherwise,
-  with an active stateful session, it captures the current accessibility
+  with an active diagnostic controller, it captures the current accessibility
   hierarchy, taps the focused non-password editable field through the uinput
   controller, waits for visible layout state, then waits for
   `input_scope_ready: true`. If no editable field is focused, it may tap the
@@ -300,17 +332,17 @@ scraping human-oriented text.
   gesture and waits for hidden layout state. Options include
   `--method edge-back`, `--side left|right`, and ratio-based geometry overrides.
 - `tap --label <label>` or `tap --code <code>`: taps a key from layout data
-  through the active session controller. Fails unless the controller reports
+  through the active diagnostic controller. Fails unless the controller reports
   `ready_for_input: true` and the IME reports `input_scope_ready: true`.
 - `press delete`, `press enter`, `press space`: taps common keys by semantic
-  name through the active session controller. Uses the same readiness gate as
-  `tap`.
-- `type <text>`: types text through visible layout keys in the active session.
-  The command plans the full string before pressing any key; unsupported
-  characters, inactive controller state, hidden keyboard state, and missing
-  input-scope readiness fail without partial typing. The active input profile
-  can sample key-local landing ratios, hold duration, contact fields, and
-  inter-key delay.
+  name through the active diagnostic controller. Uses the same readiness gate
+  as `tap`.
+- `type <text>`: types text through visible layout keys in the active
+  diagnostic controller. The command plans the full string before pressing any
+  key; unsupported characters, inactive controller state, hidden keyboard state,
+  and missing input-scope readiness fail without partial typing. The active
+  input profile can sample key-local landing ratios, hold duration, contact
+  fields, and inter-key delay.
   `--inter-key-delay-ms`, default `40`, is used when the active controller does
   not provide an inter-key delay sample.
 - `touch doctor`: checks AOSP uinput availability and reports the mirrored
@@ -319,10 +351,10 @@ scraping human-oriented text.
   through AOSP uinput. Use `--hold-ms` for one-shot long presses; there is no
   separate `touch hold` command.
 - `touch swipe --from-x <x> --from-y <y> --to-x <x> --to-y <y>`: sends an
-  absolute swipe through the active session controller.
+  absolute swipe through the active diagnostic controller.
 - `touch path --points-json '<json>'` or `touch path --points-file <path>`:
-  sends an absolute point path through the active session controller. Points may
-  be `[{"x":1,"y":2}]` objects or `[[1,2]]` arrays.
+  sends an absolute point path through the active diagnostic controller. Points
+  may be `[{"x":1,"y":2}]` objects or `[[1,2]]` arrays.
 - `list-logs`: lists log files.
 - `clear-logs`: clears logs when no session is active.
 - `pull --out <dir>`: pulls app-specific external log storage.
@@ -373,12 +405,12 @@ Use `type <text>` for ordinary text entry. Use semantic `press` commands for
 common non-letter keys and corrections. `tap --code=-7` still works for delete,
 and `tap --code -7` is also accepted, but semantic commands are easier for
 agents to generate correctly. `type`, `tap`, `press`, `hide-keyboard`, `touch
-swipe`, and `touch path` require `session start`; `type`, `tap`, and `press`
-also require visible keyboard layout state and IME `input_scope_ready: true`.
-Run `keyboard ensure-visible` to establish that state. Use `touch tap` only for
-low-level diagnostic absolute taps.
+swipe`, and `touch path` require an active diagnostic controller; `type`, `tap`,
+and `press` also require visible keyboard layout state and IME
+`input_scope_ready: true`. Run `keyboard ensure-visible` to establish that
+state. Use `touch tap` only for low-level diagnostic absolute taps.
 
-`session` input and `touch` commands use AOSP `/system/bin/uinput` for
+Controller-backed input and `touch` commands use AOSP `/system/bin/uinput` for
 touchscreen input. They fail if the device does not expose that command instead
 of falling back to a second touch implementation.
 

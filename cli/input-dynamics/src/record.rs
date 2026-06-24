@@ -387,27 +387,32 @@ impl VideoCapture {
 }
 
 impl<'a> InputControllerCapture<'a> {
-    fn start(app: &'a App, config: &RecordConfig) -> CliResult<Self> {
+    fn acquire_start_lock(
+        app: &App,
+        config: &RecordConfig,
+    ) -> CliResult<Option<controller::SessionStartLock>> {
         if !config.with_input_controller {
-            return Ok(Self {
-                app,
-                enabled: false,
-                start: Value::Null,
-                status_after_start: Value::Null,
-                ready: Value::Null,
-                stop: Value::Null,
-                session_lock: None,
-                stopped: true,
-            });
+            return Ok(None);
         }
 
-        let session_lock = match controller::acquire_session_start(app, &config.run_id)? {
-            SessionStartPermit::Acquired(session_lock) => session_lock,
-            SessionStartPermit::Busy(status) => {
-                return Err(CliError::new(format!(
-                    "input controller is busy during record start: {status}"
-                )));
-            }
+        match controller::acquire_session_start(app, &config.run_id)? {
+            SessionStartPermit::Acquired(session_lock) => Ok(Some(session_lock)),
+            SessionStartPermit::Busy(status) => Err(record_input_controller_busy_error(&status)),
+        }
+    }
+
+    fn start(
+        app: &'a App,
+        config: &RecordConfig,
+        session_lock: Option<controller::SessionStartLock>,
+    ) -> CliResult<Self> {
+        if !config.with_input_controller {
+            return Ok(Self::disabled(app));
+        }
+        let Some(acquired_session_lock) = session_lock else {
+            return Err(CliError::new(
+                "record input controller start missing acquired start lock",
+            ));
         };
         let start = controller::start(app, &config.run_id, None)?;
         ensure_command_ok(&start, "start record input controller")?;
@@ -419,9 +424,22 @@ impl<'a> InputControllerCapture<'a> {
             status_after_start,
             ready: Value::Null,
             stop: Value::Null,
-            session_lock: Some(session_lock),
+            session_lock: Some(acquired_session_lock),
             stopped: false,
         })
+    }
+
+    const fn disabled(app: &'a App) -> Self {
+        Self {
+            app,
+            enabled: false,
+            start: Value::Null,
+            status_after_start: Value::Null,
+            ready: Value::Null,
+            stop: Value::Null,
+            session_lock: None,
+            stopped: true,
+        }
     }
 
     fn mark_ready(&mut self) -> CliResult<Value> {
@@ -643,12 +661,13 @@ fn start_record_window<'a>(
     app: &'a App,
     config: &RecordConfig,
 ) -> CliResult<ActiveRecordWindow<'a>> {
+    let session_lock = InputControllerCapture::acquire_start_lock(app, config)?;
     let pre_stop = app.broadcast("STOP", Vec::new())?;
     let clear = app.broadcast("CLEAR_LOGS", Vec::new())?;
     ensure_command_ok(&clear, "clear logs before record")?;
     let start = start_record_session(app, config)?;
     ensure_command_ok(&start, "start record session")?;
-    let input_controller = match InputControllerCapture::start(app, config) {
+    let input_controller = match InputControllerCapture::start(app, config, session_lock) {
         Ok(input_controller) => input_controller,
         Err(error) => {
             let stop_after_input_failure =
@@ -670,6 +689,23 @@ fn start_record_window<'a>(
         start,
         input_controller,
     })
+}
+
+fn record_input_controller_busy_error(status: &Value) -> CliError {
+    CliError::with_details(
+        "input controller is busy during record start; no record side effects were attempted",
+        json!({
+            "error_code": "input_controller_busy",
+            "busy": true,
+            "mutated": false,
+            "controller_status": status,
+            "suggested_next_command": {
+                "argv": ["input-dynamics", "controller", "status"],
+                "reason": "inspect the active diagnostic input controller before starting a controller-backed record",
+            },
+            "diagnostic_only": true,
+        }),
+    )
 }
 
 fn start_getevent_capture_or_cleanup(
@@ -972,7 +1008,9 @@ fn record_stdin_unavailable_error(reason: &str) -> CliError {
             "error_code": "record_stdin_unavailable",
             "reason": reason,
             "safe_current_command": "input-dynamics record --run-id <run-id> --out <run-dir> --duration-ms <positive-ms>",
-            "canonical_workflow": "input-dynamics session start/status/stop",
+            "current_capture_workflow": "input-dynamics record --run-id <run-id> --out <run-dir> --duration-ms <positive-ms>",
+            "future_workflow": "umbrella_session",
+            "future_only": true,
             "migration_note": "record is a transitional foreground capture path and will be removed before release",
         }),
     )
@@ -986,7 +1024,9 @@ fn record_invalid_duration_error(duration_ms: u64) -> CliError {
             "reason": "duration_must_be_positive",
             "duration_ms": duration_ms,
             "safe_current_command": "input-dynamics record --run-id <run-id> --out <run-dir> --duration-ms <positive-ms>",
-            "canonical_workflow": "input-dynamics session start/status/stop",
+            "current_capture_workflow": "input-dynamics record --run-id <run-id> --out <run-dir> --duration-ms <positive-ms>",
+            "future_workflow": "umbrella_session",
+            "future_only": true,
             "migration_note": "record is a transitional foreground capture path and will be removed before release",
         }),
     )
@@ -1447,7 +1487,7 @@ mod tests {
     use crate::record::{
         RecordConfig, VideoMode, ensure_record_stop_mode, input_controller_result_ok,
         input_controller_summary, prepare_record_paths, record_input_controller,
-        should_stage_ime_file, wait_for_stdin_enter,
+        record_input_controller_busy_error, should_stage_ime_file, wait_for_stdin_enter,
     };
 
     #[test]
@@ -1544,6 +1584,7 @@ mod tests {
             Some("duration_required"),
             "error should explain that duration is required"
         );
+        assert_record_error_uses_current_safe_workflow(&error_json);
     }
 
     #[test]
@@ -1566,6 +1607,74 @@ mod tests {
                 .and_then(Value::as_str),
             Some("duration_must_be_positive"),
             "zero duration should explain the positive-duration requirement"
+        );
+        assert_record_error_uses_current_safe_workflow(&error_json);
+    }
+
+    fn assert_record_error_uses_current_safe_workflow(error_json: &Value) {
+        assert_eq!(
+            error_json
+                .pointer("/details/current_capture_workflow")
+                .and_then(Value::as_str),
+            Some(
+                "input-dynamics record --run-id <run-id> --out <run-dir> --duration-ms <positive-ms>"
+            ),
+            "record errors should keep bounded record as current-safe workflow"
+        );
+        assert!(
+            error_json.pointer("/details/canonical_workflow").is_none(),
+            "record errors should not name current session workflow during Checkpoint 3"
+        );
+        assert_eq!(
+            error_json
+                .pointer("/details/future_workflow")
+                .and_then(Value::as_str),
+            Some("umbrella_session"),
+            "future umbrella workflow should be named without command-shaped guidance"
+        );
+        assert_eq!(
+            error_json
+                .pointer("/details/future_only")
+                .and_then(Value::as_bool),
+            Some(true),
+            "future workflow metadata should be explicitly non-current"
+        );
+        assert!(
+            error_json
+                .pointer("/details/future_canonical_workflow")
+                .is_none(),
+            "record errors should not expose future session commands as machine guidance"
+        );
+    }
+
+    #[test]
+    fn record_input_controller_busy_error_is_non_mutating_and_actionable() {
+        let status = json!({
+            "ok": true,
+            "active": true,
+            "ready_for_input": true,
+        });
+
+        let error_json = record_input_controller_busy_error(&status).to_json();
+
+        assert_eq!(
+            error_json.get("error_code").and_then(Value::as_str),
+            Some("input_controller_busy"),
+            "busy record preflight should have a stable error code"
+        );
+        assert_eq!(
+            error_json
+                .pointer("/details/mutated")
+                .and_then(Value::as_bool),
+            Some(false),
+            "busy record preflight must report that no record side effects were attempted"
+        );
+        assert_eq!(
+            error_json
+                .pointer("/details/suggested_next_command/argv/1")
+                .and_then(Value::as_str),
+            Some("controller"),
+            "busy record preflight should send agents to controller diagnostics"
         );
     }
 
@@ -1632,6 +1741,49 @@ mod tests {
                 assert!(
                     !contents.contains(phrase),
                     "{name} should not contain stale open-ended record guidance: {phrase}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn public_docs_do_not_teach_controller_only_session_commands() {
+        let documents = [
+            ("README.md", include_str!("../../../README.md")),
+            ("docs/cli.md", include_str!("../../../docs/cli.md")),
+            (
+                "docs/input-profiles.md",
+                include_str!("../../../docs/input-profiles.md"),
+            ),
+            (
+                "docs/releases.md",
+                include_str!("../../../docs/releases.md"),
+            ),
+            (
+                "skills/input-dynamics-keyboard/SKILL.md",
+                include_str!("../../../skills/input-dynamics-keyboard/SKILL.md"),
+            ),
+        ];
+        let forbidden_phrases = [
+            "idk session start",
+            "idk session status",
+            "idk session stop",
+            "input-dynamics session start --run-id",
+            "cargo run --quiet -p input-dynamics -- session start",
+            "cargo run --quiet -p input-dynamics -- session status",
+            "cargo run --quiet -p input-dynamics -- session stop",
+            "requires `session start`",
+            "poll `session status`",
+            "canonical live-input path",
+            "stateful session lifecycle",
+            "`session start` uses",
+        ];
+
+        for (name, contents) in documents {
+            for phrase in forbidden_phrases {
+                assert!(
+                    !contents.contains(phrase),
+                    "{name} should not contain stale controller-only session guidance: {phrase}"
                 );
             }
         }

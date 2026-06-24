@@ -49,8 +49,8 @@ The helper updates Android version metadata, runs release verification, commits
 the version bump, creates an annotated tag, and can push `main` plus the tag.
 The workflow can also be run manually from GitHub Actions with an existing tag.
 Initial public releases should stay marked as prereleases until a clean-device
-install, session start, keypress, stop, pull, and JSONL validation pass has been
-completed.
+install, diagnostic controller start, keypress, controller stop, pull, and
+JSONL validation pass has been completed.
 
 ## Versioning
 

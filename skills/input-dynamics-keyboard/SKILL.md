@@ -44,10 +44,10 @@ LOG_DIR=input_dynamics_logs
 
 If more than one Android device is connected, choose the target from
 `adb devices` and pass `--serial "$SERIAL"` to every `idk` command. The CLI
-fails rather than guessing when multiple devices are visible. Session runtime
+fails rather than guessing when multiple devices are visible. Controller runtime
 state is keyed by package and ADB serial. Each controller start also creates a
 preserved diagnostics invocation directory under the runtime root, exposed in
-`session status` as `input.runtime.current_invocation`.
+`controller status` as `input.runtime.current_invocation`.
 
 GitHub Release APKs are signed debug-variant APKs, so the default package is
 `org.inputdynamics.ime.debug`. Locally built non-debug APKs use the same
@@ -118,58 +118,63 @@ APK="$(ls -t app/build/outputs/apk/debug/*-debug.apk | head -n 1)"
 idk install --apk "$APK"
 ```
 
-3. For live agent-driven input, start one stateful session:
+3. For diagnostic live agent-driven input, start one controller run:
 
 ```bash
 RUN_ID=run-YYYYMMDD-HHMMSS-local-android
-idk session start --run-id "$RUN_ID"
+idk controller start --run-id "$RUN_ID"
 ```
 
-`session start` uses the bundled `profiles/baseline-v1.json` input profile by
-default for controller-driven sessions. Its default session provenance is
+`controller start` uses the bundled `profiles/baseline-v1.json` input profile
+by default for controller-driven input. Its default provenance is
 `input_actor=agent_adb`, `input_controller=input-dynamics-cli`, and
 `input_cadence_policy=input_profile`. To bind a local profile to the whole
-session, pass `--input-profile <path>` and optionally
+controller run, pass `--input-profile <path>` and optionally
 `--input-profile-seed <u64>` for reproducible sampling:
 
 ```bash
-idk session start \
+idk controller start \
   --run-id "$RUN_ID" \
   --input-profile ./profiles/custom.json \
   --input-profile-seed 12345
 ```
 
-Only one stateful session can be active for a package/device runtime. If
-`session start` returns `ok: false` with `busy: true`, do not retry with
-lower-level commands; inspect `idk session status` and wait for the active run
-to stop.
+Only one diagnostic controller can be active for a package/device runtime. If
+`controller start` returns `ok: false` with `busy: true`, do not retry with
+lower-level commands; inspect `idk controller status` and wait for the active
+controller to stop.
 
-Then use live commands while the session is active:
+Then use live commands while the diagnostic controller is active:
 
 ```bash
 idk keyboard ensure-visible
 idk type "ab a"
 idk press delete
 idk hide-keyboard --method edge-back --side right
-idk session stop
+idk controller stop
 ```
 
-This is the only normal live-input path for agents. `session start` must return
-`input.ready_for_input: true`, and `keyboard ensure-visible` must return an IME
-status with `input_scope_ready: true`, before calling `type`, `tap`, or
-`press`. If those commands fail with `input_scope_state` or
-`session_lock.state` errors, do not inject input through another mechanism;
-repair the session state or stop the session.
+This is a diagnostic live-input path, not a complete recording workflow.
+`controller start` must return `input.ready_for_input: true`, and
+`keyboard ensure-visible` must return an IME status with
+`input_scope_ready: true`, before calling `type`, `tap`, or `press`. If those
+commands fail with `input_scope_state` or `session_lock.state` errors, do not
+inject input through another mechanism; inspect `idk controller status` and
+stop the controller if needed.
 
-If a controller process is interrupted, use `idk session stop` as the repair
+If a controller process is interrupted, use `idk controller stop` as the repair
 path. It removes stale runtime files, stops IME logging, and reports whether
 the saved virtual touchscreen event path is gone. For controller timing or
-socket failures, inspect `idk session status`; `input.state` exposes
+socket failures, inspect `idk controller status`; `input.state` exposes
 `current_command`, `last_command`, `last_error`, and `command_sequence`.
 Also inspect `input.runtime.current_invocation.invocation.events`; it is a
 unified `controller.events.jsonl` journal with client and controller request
 events, response timeouts/write failures, uinput writes, state writes, and
 controller exit. Do not rely on manual `/tmp` snapshots for normal forensics.
+
+If an old hidden session-lifecycle instruction returns
+`error_code: "command_moved"`, follow `moved_to.argv` or
+`suggested_next_command.argv`; do not retry the old namespace.
 
 4. For bounded capture, use `record` with an external run id:
 
@@ -229,7 +234,7 @@ idk record \
 ```
 
 Do not send input after a fixed sleep. In the second CLI process, poll
-`idk session status` until `input.session_lock.state: "active"` and
+`idk controller status` until `input.session_lock.state: "active"` and
 `input.ready_for_input: true`. For `type`, `press`, and keyboard-scoped
 commands, also require `ime.input_scope_ready: true`; if it is false, establish
 the input scope with the canonical UI step for the run, then poll status again.
@@ -438,19 +443,19 @@ diagnostics.
 ## Non-Screenshot Automation
 
 When the keyboard view is visible, use `KEYBOARD_LAYOUT` instead of screenshots.
-With the CLI, start a session, explicitly ensure keyboard visibility when a
-non-password editable field should reopen it, and press common keys by semantic
-name. Use `type <text>` for ordinary text entry:
+With the CLI, start the diagnostic controller, explicitly ensure keyboard
+visibility when a non-password editable field should reopen it, and press common
+keys by semantic name. Use `type <text>` for ordinary text entry:
 
 ```bash
-idk session start --run-id "$RUN_ID"
+idk controller start --run-id "$RUN_ID"
 idk keyboard ensure-visible
 idk touch doctor
 idk type "ab a"
 idk press delete
 idk press enter
 idk hide-keyboard --method edge-back --side right
-idk session stop
+idk controller stop
 ```
 
 `type <text>` plans the full string from visible layout keys before pressing any
@@ -464,10 +469,10 @@ is focused. Use `tap --code=<code>` only when there is no semantic command. Use
 `touch tap --hold-ms <ms>` for one-shot long presses; do not invent a separate
 `touch hold` workflow. Use `touch swipe` and `touch path` only when a protocol
 needs raw absolute gesture control; otherwise prefer semantic commands such as
-`type`, `press`, and `hide-keyboard`. The CLI routes session input and `touch`
-commands through AOSP `/system/bin/uinput` and should fail rather than switch
-to another touch backend. The active input profile can sample key-local landing
-ratios, hold duration, contact fields, and inter-key delay.
+`type`, `press`, and `hide-keyboard`. The CLI routes controller-backed input
+and `touch` commands through AOSP `/system/bin/uinput` and should fail rather
+than switch to another touch backend. The active input profile can sample
+key-local landing ratios, hold duration, contact fields, and inter-key delay.
 
 ## Validation
 

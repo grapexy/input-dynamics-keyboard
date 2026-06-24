@@ -10,7 +10,10 @@ on:
       - 'cli/**'
       - 'clippy.toml'
       - 'crates/**'
+      - 'docs/**'
       - 'flake.nix'
+      - 'README.md'
+      - 'skills/input-dynamics-keyboard/**'
   workflow_dispatch:
 
 jobs:

@@ -37,6 +37,7 @@ const RUN_ID_FRAGMENT_MAX_CHARS: usize = 64;
 const EVENT_SCHEMA: &str = "input_dynamics_controller_event.v1";
 const CURRENT_SCHEMA: &str = "input_dynamics_controller_current.v1";
 const MANIFEST_SCHEMA: &str = "input_dynamics_controller_invocation.v1";
+const DIAGNOSTIC_CONTROLLER_START_HINT: &str = "input-dynamics controller start --run-id <id>";
 
 #[derive(Debug)]
 pub(crate) struct RunConfig {
@@ -238,7 +239,7 @@ pub(crate) fn acquire_session_start(app: &App, run_id: &str) -> CliResult<Sessio
         return Ok(SessionStartPermit::Busy(session_busy(
             app,
             &paths,
-            "input session is already active",
+            "input controller is already active",
             &current_status,
         )));
     }
@@ -248,7 +249,7 @@ pub(crate) fn acquire_session_start(app: &App, run_id: &str) -> CliResult<Sessio
             return Ok(SessionStartPermit::Busy(session_busy(
                 app,
                 &paths,
-                "input session start is already in progress",
+                "input controller start is already in progress",
                 &current_status,
             )));
         }
@@ -675,26 +676,52 @@ fn wait_until_active(app: &App, paths: &RuntimePaths, run_id: &str) -> CliResult
 
 fn ensure_ready_for_input(app: &App, paths: &RuntimePaths) -> CliResult<()> {
     if !paths.socket.exists() {
-        return Err(CliError::new(
-            "no active input session; run `input-dynamics session start --run-id <id>`",
-        ));
+        return Err(controller_not_active_error("missing_controller_socket"));
     }
     let current = status(app)?;
     if !value_bool(&current, "active") {
-        return Err(CliError::new(
-            "no active input session; run `input-dynamics session start --run-id <id>`",
-        ));
+        return Err(controller_not_active_error("inactive_controller_state"));
     }
     if !value_bool(&current, "ready_for_input") {
         let lock_state = current
             .pointer("/session_lock/state")
             .and_then(Value::as_str)
             .unwrap_or("missing");
-        return Err(CliError::new(format!(
-            "input session is not ready for commands; session_lock.state={lock_state}"
-        )));
+        return Err(controller_not_ready_error(lock_state));
     }
     Ok(())
+}
+
+fn controller_not_active_error(context: &str) -> CliError {
+    CliError::with_details(
+        format!("no active diagnostic input controller; run `{DIAGNOSTIC_CONTROLLER_START_HINT}`"),
+        json!({
+            "error_code": "controller_not_active",
+            "context": context,
+            "suggested_next_command": {
+                "argv": ["input-dynamics", "controller", "start", "--run-id", "<id>"],
+                "reason": "diagnostic controller lifecycle is required for live input commands during the session migration",
+            },
+            "diagnostic_only": true,
+            "mutated": false,
+        }),
+    )
+}
+
+fn controller_not_ready_error(lock_state: &str) -> CliError {
+    CliError::with_details(
+        format!("diagnostic input controller is not ready; session_lock.state={lock_state}"),
+        json!({
+            "error_code": "controller_not_ready",
+            "session_lock_state": lock_state,
+            "suggested_next_command": {
+                "argv": ["input-dynamics", "controller", "status"],
+                "reason": "inspect diagnostic controller readiness before issuing live input",
+            },
+            "diagnostic_only": true,
+            "mutated": false,
+        }),
+    )
 }
 
 fn handle_stream(

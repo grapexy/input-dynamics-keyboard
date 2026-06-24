@@ -180,7 +180,8 @@ pub(crate) enum Commands {
         #[arg(long, default_value = "manual")]
         input_cadence_policy: String,
     },
-    /// Manage a stateful input dynamics session.
+    /// Transitional parser for moved controller-only session commands.
+    #[command(hide = true)]
     Session {
         #[command(subcommand)]
         command: SessionCommand,
@@ -217,8 +218,7 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         command: TouchCommand,
     },
-    /// Run the local input controller process.
-    #[command(hide = true)]
+    /// Manage the diagnostic local input controller.
     Controller {
         #[command(subcommand)]
         command: ControllerCommand,
@@ -459,7 +459,39 @@ pub(crate) enum TouchCommand {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum SessionCommand {
-    /// Start IME logging and a persistent uinput controller.
+    /// Moved diagnostic controller start parser; use `controller start`.
+    #[command(hide = true)]
+    Start {
+        /// External run id to preserve in the moved-command recovery argv.
+        #[arg(long)]
+        run_id: String,
+        /// Input actor provenance to preserve in the moved-command recovery argv.
+        #[arg(long, default_value = "agent_adb")]
+        input_actor: String,
+        /// Controller provenance to preserve in the moved-command recovery argv.
+        #[arg(long, default_value = "input-dynamics-cli")]
+        input_controller: String,
+        /// Cadence provenance to preserve in the moved-command recovery argv.
+        #[arg(long, default_value = "input_profile")]
+        input_cadence_policy: String,
+        /// Local input profile JSON file to preserve in the moved-command recovery argv.
+        #[arg(long)]
+        input_profile: Option<PathBuf>,
+        /// Explicit input profile seed for reproducible sampled input.
+        #[arg(long)]
+        input_profile_seed: Option<u64>,
+    },
+    /// Moved diagnostic controller status parser; use `controller status`.
+    #[command(hide = true)]
+    Status,
+    /// Moved diagnostic controller stop parser; use `controller stop`.
+    #[command(hide = true)]
+    Stop,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ControllerCommand {
+    /// Start IME logging and a persistent diagnostic uinput controller.
     Start {
         /// External run id to write into each session record.
         #[arg(long)]
@@ -484,11 +516,8 @@ pub(crate) enum SessionCommand {
     Status,
     /// Stop the persistent input controller and IME logging.
     Stop,
-}
-
-#[derive(Debug, Subcommand)]
-pub(crate) enum ControllerCommand {
     /// Run the local input controller server.
+    #[command(hide = true)]
     Run {
         /// Unix socket path for local command IPC.
         #[arg(long)]
@@ -518,4 +547,216 @@ pub(crate) enum ControllerCommand {
         #[arg(long)]
         input_profile_runtime_json: Option<String>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::{CommandFactory, Parser};
+
+    use super::{Cli, Commands, ControllerCommand, SessionCommand};
+
+    #[test]
+    fn controller_lifecycle_commands_parse() {
+        let start = Cli::try_parse_from([
+            "input-dynamics",
+            "controller",
+            "start",
+            "--run-id",
+            "run-test",
+        ]);
+        let status = Cli::try_parse_from(["input-dynamics", "controller", "status"]);
+        let stop = Cli::try_parse_from(["input-dynamics", "controller", "stop"]);
+
+        assert!(
+            matches!(
+                start,
+                Ok(Cli {
+                    command: Commands::Controller {
+                        command: ControllerCommand::Start { .. }
+                    },
+                    ..
+                })
+            ),
+            "controller start should parse"
+        );
+        assert!(
+            matches!(
+                status,
+                Ok(Cli {
+                    command: Commands::Controller {
+                        command: ControllerCommand::Status
+                    },
+                    ..
+                })
+            ),
+            "controller status should parse"
+        );
+        assert!(
+            matches!(
+                stop,
+                Ok(Cli {
+                    command: Commands::Controller {
+                        command: ControllerCommand::Stop
+                    },
+                    ..
+                })
+            ),
+            "controller stop should parse"
+        );
+    }
+
+    #[test]
+    fn internal_controller_run_still_parses() {
+        let parsed = Cli::try_parse_from([
+            "input-dynamics",
+            "controller",
+            "run",
+            "--socket",
+            "/tmp/input-dynamics.sock",
+            "--state",
+            "/tmp/input-dynamics-state.json",
+            "--uinput-stdout",
+            "/tmp/uinput.stdout.log",
+            "--uinput-stderr",
+            "/tmp/uinput.stderr.log",
+            "--events",
+            "/tmp/controller.events.jsonl",
+            "--final-state",
+            "/tmp/final-state.json",
+            "--controller-invocation-id",
+            "controller-test",
+            "--run-id",
+            "run-test",
+        ]);
+
+        assert!(
+            matches!(
+                parsed,
+                Ok(Cli {
+                    command: Commands::Controller {
+                        command: ControllerCommand::Run { .. }
+                    },
+                    ..
+                })
+            ),
+            "hidden internal controller run should remain parseable"
+        );
+    }
+
+    #[test]
+    fn old_session_commands_still_parse_for_structured_migration_errors() {
+        let start = Cli::try_parse_from([
+            "input-dynamics",
+            "session",
+            "start",
+            "--run-id",
+            "run-test",
+            "--input-profile",
+            "profiles/custom.json",
+            "--input-profile-seed",
+            "7",
+        ]);
+        let status = Cli::try_parse_from(["input-dynamics", "session", "status"]);
+        let stop = Cli::try_parse_from(["input-dynamics", "session", "stop"]);
+
+        assert!(
+            matches!(
+                start,
+                Ok(Cli {
+                    command: Commands::Session {
+                        command: SessionCommand::Start { .. }
+                    },
+                    ..
+                })
+            ),
+            "old session start should parse so command handling can return JSON"
+        );
+        assert!(
+            matches!(
+                status,
+                Ok(Cli {
+                    command: Commands::Session {
+                        command: SessionCommand::Status
+                    },
+                    ..
+                })
+            ),
+            "old session status should parse so command handling can return JSON"
+        );
+        assert!(
+            matches!(
+                stop,
+                Ok(Cli {
+                    command: Commands::Session {
+                        command: SessionCommand::Stop
+                    },
+                    ..
+                })
+            ),
+            "old session stop should parse so command handling can return JSON"
+        );
+    }
+
+    #[test]
+    fn controller_help_is_visible_but_internal_run_is_hidden() {
+        let top_help = Cli::command().render_help().to_string();
+        let controller_help = Cli::command()
+            .find_subcommand_mut("controller")
+            .map(|command| command.render_help().to_string())
+            .unwrap_or_default();
+
+        assert!(
+            top_help.contains("controller"),
+            "top-level help should expose diagnostic controller namespace"
+        );
+        assert!(
+            controller_help.contains("start")
+                && controller_help.contains("status")
+                && controller_help.contains("stop"),
+            "controller help should expose start/status/stop"
+        );
+        assert!(
+            !controller_help.contains("run"),
+            "controller help should hide internal run server command"
+        );
+    }
+
+    #[test]
+    fn session_help_does_not_promote_old_controller_lifecycle() {
+        let session_help = Cli::command()
+            .find_subcommand_mut("session")
+            .map(|command| command.render_help().to_string())
+            .unwrap_or_default();
+        let direct_start_help = session_subcommand_help("start");
+        let direct_status_help = session_subcommand_help("status");
+        let direct_stop_help = session_subcommand_help("stop");
+
+        assert!(
+            !session_help.contains("Start IME logging")
+                && !session_help.contains("Read IME and local input-controller status")
+                && !session_help.contains("Stop the persistent input controller"),
+            "session help should not present old controller-only lifecycle as normal"
+        );
+        for help in [direct_start_help, direct_status_help, direct_stop_help] {
+            assert!(
+                help.contains("Moved diagnostic controller"),
+                "direct hidden session subcommand help should explain migration: {help}"
+            );
+            assert!(
+                !help.contains("Start IME logging")
+                    && !help.contains("Read IME and local input-controller status")
+                    && !help.contains("Stop the persistent input controller"),
+                "direct hidden session subcommand help should not promote old lifecycle: {help}"
+            );
+        }
+    }
+
+    fn session_subcommand_help(name: &str) -> String {
+        let mut command = Cli::command();
+        command
+            .find_subcommand_mut("session")
+            .and_then(|session| session.find_subcommand_mut(name))
+            .map(|subcommand| subcommand.render_help().to_string())
+            .unwrap_or_default()
+    }
 }

@@ -38,6 +38,8 @@ use crate::validate::validate_logs;
 
 const LAYOUT_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const LAYOUT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const COMMAND_MIGRATION_SCHEMA: &str = "input_dynamics_command_migration.v1";
+const DIAGNOSTIC_CONTROLLER_START_HINT: &str = "input-dynamics controller start --run-id <id>";
 
 struct LoggingStartConfig<'a> {
     run_id: &'a str,
@@ -107,7 +109,7 @@ pub(crate) fn run_command(app: &App, cli_command: Commands) -> CliResult<Value> 
         ref record_command @ Commands::Record { .. } => run_record_command(app, record_command),
         Commands::Session {
             command: session_command,
-        } => session(app, session_command),
+        } => Ok(session(app, session_command)),
         Commands::Keyboard {
             command: keyboard_command,
         } => keyboard(app, &keyboard_command),
@@ -655,7 +657,56 @@ fn start(app: &App, config: &LoggingStartConfig<'_>) -> CliResult<Value> {
     app.broadcast("START", extras)
 }
 
-fn session(app: &App, command: SessionCommand) -> CliResult<Value> {
+fn session(_app: &App, command: SessionCommand) -> Value {
+    moved_session_command(command)
+}
+
+struct MovedCommand {
+    deprecated_argv: Vec<String>,
+    moved_argv: Vec<String>,
+    action: &'static str,
+}
+
+struct ControllerStartMigration {
+    run_id: String,
+    input_actor: String,
+    input_controller: String,
+    input_cadence_policy: String,
+    input_profile: Option<PathBuf>,
+    input_profile_seed: Option<u64>,
+}
+
+fn moved_session_command(command: SessionCommand) -> Value {
+    let moved_command = moved_session_argv(command);
+    let message = format!(
+        "controller-only session commands moved to input-dynamics controller {}",
+        moved_command.action
+    );
+    json!({
+        "schema": COMMAND_MIGRATION_SCHEMA,
+        "ok": false,
+        "error_code": "command_moved",
+        "command": moved_command.deprecated_argv,
+        "command_normalized": true,
+        "message": message,
+        "deprecated_command": {
+            "argv": moved_command.deprecated_argv,
+            "normalized": true,
+            "defaults_included": true,
+        },
+        "moved_to": {
+            "argv": moved_command.moved_argv,
+        },
+        "suggested_next_command": {
+            "argv": moved_command.moved_argv,
+            "reason": "diagnostic controller lifecycle moved out of the reserved session namespace",
+        },
+        "diagnostic_only": true,
+        "mutated": false,
+    })
+}
+
+fn moved_session_argv(command: SessionCommand) -> MovedCommand {
     match command {
         SessionCommand::Start {
             run_id,
@@ -664,23 +715,102 @@ fn session(app: &App, command: SessionCommand) -> CliResult<Value> {
             input_cadence_policy,
             input_profile,
             input_profile_seed,
-        } => session_start(
-            app,
-            &SessionStartConfig {
-                run_id: &run_id,
-                input_actor: &input_actor,
-                input_controller: &input_controller,
-                input_cadence_policy: &input_cadence_policy,
-                input_profile_path: input_profile.as_deref(),
-                input_profile_seed,
-            },
-        ),
-        SessionCommand::Status => session_status(app),
-        SessionCommand::Stop => session_stop(app),
+        } => moved_controller_start_argv(&ControllerStartMigration {
+            run_id,
+            input_actor,
+            input_controller,
+            input_cadence_policy,
+            input_profile,
+            input_profile_seed,
+        }),
+        SessionCommand::Status => MovedCommand {
+            deprecated_argv: command_argv("session", "status"),
+            moved_argv: command_argv("controller", "status"),
+            action: "status",
+        },
+        SessionCommand::Stop => MovedCommand {
+            deprecated_argv: command_argv("session", "stop"),
+            moved_argv: command_argv("controller", "stop"),
+            action: "stop",
+        },
     }
 }
 
-fn session_start(app: &App, config: &SessionStartConfig<'_>) -> CliResult<Value> {
+fn moved_controller_start_argv(config: &ControllerStartMigration) -> MovedCommand {
+    MovedCommand {
+        deprecated_argv: controller_start_argv("session", config),
+        moved_argv: controller_start_argv("controller", config),
+        action: "start",
+    }
+}
+
+fn controller_start_argv(namespace: &str, config: &ControllerStartMigration) -> Vec<String> {
+    let mut argv = vec![
+        String::from("input-dynamics"),
+        String::from(namespace),
+        String::from("start"),
+        String::from("--run-id"),
+        config.run_id.clone(),
+        String::from("--input-actor"),
+        config.input_actor.clone(),
+        String::from("--input-controller"),
+        config.input_controller.clone(),
+        String::from("--input-cadence-policy"),
+        config.input_cadence_policy.clone(),
+    ];
+    if let Some(profile) = config.input_profile.as_deref() {
+        argv.extend([
+            String::from("--input-profile"),
+            profile.to_string_lossy().into_owned(),
+        ]);
+    }
+    if let Some(seed) = config.input_profile_seed {
+        argv.extend([String::from("--input-profile-seed"), seed.to_string()]);
+    }
+    argv
+}
+
+fn command_argv(namespace: &str, action: &str) -> Vec<String> {
+    vec![
+        String::from("input-dynamics"),
+        String::from(namespace),
+        String::from(action),
+    ]
+}
+
+fn controller_not_active_error(context: &str) -> CliError {
+    CliError::with_details(
+        format!("no active diagnostic input controller; run `{DIAGNOSTIC_CONTROLLER_START_HINT}`"),
+        json!({
+            "error_code": "controller_not_active",
+            "context": context,
+            "suggested_next_command": {
+                "argv": ["input-dynamics", "controller", "start", "--run-id", "<id>"],
+                "reason": "diagnostic controller lifecycle is required for live input commands during the session migration",
+            },
+            "diagnostic_only": true,
+            "mutated": false,
+        }),
+    )
+}
+
+fn controller_not_ready_error(lock_state: &str) -> CliError {
+    CliError::with_details(
+        format!("diagnostic input controller is not ready; session_lock.state={lock_state}"),
+        json!({
+            "error_code": "controller_not_ready",
+            "session_lock_state": lock_state,
+            "suggested_next_command": {
+                "argv": ["input-dynamics", "controller", "status"],
+                "reason": "inspect diagnostic controller readiness before issuing live input",
+            },
+            "diagnostic_only": true,
+            "mutated": false,
+        }),
+    )
+}
+
+fn controller_start_lifecycle(app: &App, config: &SessionStartConfig<'_>) -> CliResult<Value> {
     let mut session_lock = match controller::acquire_session_start(app, config.run_id)? {
         SessionStartPermit::Acquired(session_lock) => session_lock,
         SessionStartPermit::Busy(status) => return Ok(status),
@@ -748,7 +878,7 @@ fn session_start(app: &App, config: &SessionStartConfig<'_>) -> CliResult<Value>
     }
 }
 
-fn session_status(app: &App) -> CliResult<Value> {
+fn controller_lifecycle_status(app: &App) -> CliResult<Value> {
     let ime = app.broadcast("STATUS", Vec::new())?;
     let input = controller::status(app)?;
     let adb_devices = app.adb_host(&[String::from("devices")], FailureMode::AllowFailure)?;
@@ -762,7 +892,7 @@ fn session_status(app: &App) -> CliResult<Value> {
     }))
 }
 
-fn session_stop(app: &App) -> CliResult<Value> {
+fn controller_lifecycle_stop(app: &App) -> CliResult<Value> {
     let input = controller::stop(app)?;
     let ime = app.broadcast("STOP", Vec::new())?;
     controller::clear_session_lock(app)?;
@@ -800,9 +930,7 @@ fn ensure_keyboard_visible(app: &App) -> CliResult<Value> {
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        return Err(CliError::new(
-            "keyboard is hidden and no active input session is available; run `input-dynamics session start --run-id <id>` before `input-dynamics keyboard ensure-visible`",
-        ));
+        return Err(controller_not_active_error("keyboard_ensure_visible"));
     }
 
     let accessibility =
@@ -855,6 +983,26 @@ fn ensure_keyboard_visible(app: &App) -> CliResult<Value> {
 
 fn run_controller_command(app: &App, command: ControllerCommand) -> CliResult<Value> {
     match command {
+        ControllerCommand::Start {
+            run_id,
+            input_actor,
+            input_controller,
+            input_cadence_policy,
+            input_profile,
+            input_profile_seed,
+        } => controller_start_lifecycle(
+            app,
+            &SessionStartConfig {
+                run_id: &run_id,
+                input_actor: &input_actor,
+                input_controller: &input_controller,
+                input_cadence_policy: &input_cadence_policy,
+                input_profile_path: input_profile.as_deref(),
+                input_profile_seed,
+            },
+        ),
+        ControllerCommand::Status => controller_lifecycle_status(app),
+        ControllerCommand::Stop => controller_lifecycle_stop(app),
         ControllerCommand::Run {
             socket,
             state,
@@ -1157,10 +1305,10 @@ fn wait_for_input_scope_ready(app: &App) -> CliResult<Value> {
             return Ok(status);
         }
         if start.elapsed() >= LAYOUT_WAIT_TIMEOUT {
-            return Err(CliError::new(format!(
-                "keyboard is visible but logging input scope is not ready; input_scope_state={}",
-                input_scope_state(&status)
-            )));
+            return Err(input_scope_not_ready_error(
+                "wait_for_input_scope_ready",
+                &status,
+            ));
         }
         std::thread::sleep(LAYOUT_POLL_INTERVAL);
     }
@@ -1181,10 +1329,10 @@ fn ensure_visible_layout_has_loggable_scope(status: &Value) -> CliResult<()> {
     {
         return Ok(());
     }
-    Err(CliError::new(format!(
-        "keyboard is visible but logging input scope is not ready; input_scope_state={}",
-        input_scope_state(status)
-    )))
+    Err(input_scope_not_ready_error(
+        "visible_layout_has_loggable_scope",
+        status,
+    ))
 }
 
 fn ensure_logged_input_ready(app: &App) -> CliResult<Value> {
@@ -1194,9 +1342,7 @@ fn ensure_logged_input_ready(app: &App) -> CliResult<Value> {
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        return Err(CliError::new(
-            "no active input session; run `input-dynamics session start --run-id <id>`",
-        ));
+        return Err(controller_not_active_error("logged_input"));
     }
     if !input
         .get("ready_for_input")
@@ -1207,14 +1353,12 @@ fn ensure_logged_input_ready(app: &App) -> CliResult<Value> {
             .pointer("/session_lock/state")
             .and_then(Value::as_str)
             .unwrap_or("missing");
-        return Err(CliError::new(format!(
-            "input session is not ready for commands; session_lock.state={lock_state}"
-        )));
+        return Err(controller_not_ready_error(lock_state));
     }
 
     let ime = app.broadcast("STATUS", Vec::new())?;
     if ime.get("active").and_then(Value::as_bool) != Some(true) {
-        return Err(CliError::new("IME logging session is not active"));
+        return Err(input_scope_not_ready_error("ime_logging_inactive", &ime));
     }
     if ime
         .get("input_scope_ready")
@@ -1226,10 +1370,7 @@ fn ensure_logged_input_ready(app: &App) -> CliResult<Value> {
             "input": input,
         }));
     }
-    Err(CliError::new(format!(
-        "logging input scope is not ready; input_scope_state={}",
-        input_scope_state(&ime)
-    )))
+    Err(input_scope_not_ready_error("logged_input_scope", &ime))
 }
 
 fn input_scope_state(status: &Value) -> &str {
@@ -1237,6 +1378,32 @@ fn input_scope_state(status: &Value) -> &str {
         .get("input_scope_state")
         .and_then(Value::as_str)
         .unwrap_or("unknown")
+}
+
+fn input_scope_not_ready_error(context: &str, status: &Value) -> CliError {
+    CliError::with_details(
+        format!(
+            "logging input scope is not ready; input_scope_state={}",
+            input_scope_state(status)
+        ),
+        json!({
+            "error_code": "input_scope_not_ready",
+            "context": context,
+            "ime_active": status.get("active").and_then(Value::as_bool).unwrap_or(false),
+            "input_scope_ready": status
+                .get("input_scope_ready")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            "input_scope_state": input_scope_state(status),
+            "ime_status": status,
+            "suggested_next_command": {
+                "argv": ["input-dynamics", "controller", "status"],
+                "reason": "inspect diagnostic controller and IME readiness before issuing live input",
+            },
+            "diagnostic_only": true,
+            "mutated": false,
+        }),
+    )
 }
 
 fn layout_matches(status: &Value, wait: LayoutWait) -> CliResult<bool> {
@@ -2107,14 +2274,114 @@ mod tests {
     use serde_json::json;
     use sha2::{Digest, Sha256};
 
-    use crate::args::PressKey;
+    use crate::args::{PressKey, SessionCommand};
     use crate::commands::{
-        EditableNode, ScreenBounds, TypeKeyTarget, derive_video_map_command, ime_is_registered,
-        is_debug_apk, keyboard_layout_visible, keyboard_visible_target_node,
-        latest_release_tag_from_json, planned_type_step, press_key_code, type_key_target,
+        EditableNode, ScreenBounds, TypeKeyTarget, controller_not_active_error,
+        controller_not_ready_error, derive_video_map_command, ime_is_registered,
+        input_scope_not_ready_error, is_debug_apk, keyboard_layout_visible,
+        keyboard_visible_target_node, latest_release_tag_from_json, moved_session_command,
+        planned_type_step, press_key_code, type_key_target,
     };
 
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0_u64);
+
+    #[test]
+    fn old_session_start_returns_command_moved_without_mutation() {
+        let result = moved_session_command(SessionCommand::Start {
+            run_id: String::from("run-test"),
+            input_actor: String::from("agent_adb"),
+            input_controller: String::from("input-dynamics-cli"),
+            input_cadence_policy: String::from("input_profile"),
+            input_profile: Some(PathBuf::from("profiles/custom.json")),
+            input_profile_seed: Some(7_u64),
+        });
+
+        assert_command_moved(&result, "start");
+        assert_eq!(
+            result.pointer("/moved_to/argv/1").and_then(Value::as_str),
+            Some("controller"),
+            "old session start should move to controller start"
+        );
+        assert_eq!(
+            result
+                .pointer("/deprecated_command/normalized")
+                .and_then(Value::as_bool),
+            Some(true),
+            "deprecated command argv should be marked as normalized"
+        );
+        assert!(
+            result
+                .pointer("/moved_to/argv")
+                .and_then(Value::as_array)
+                .is_some_and(|argv| argv.iter().any(|value| value == "profiles/custom.json")),
+            "moved command should preserve input profile path"
+        );
+    }
+
+    #[test]
+    fn old_session_status_and_stop_return_command_moved_without_mutation() {
+        let status = moved_session_command(SessionCommand::Status);
+        let stop = moved_session_command(SessionCommand::Stop);
+
+        assert_command_moved(&status, "status");
+        assert_command_moved(&stop, "stop");
+        assert_eq!(
+            status.pointer("/moved_to/argv/2").and_then(Value::as_str),
+            Some("status"),
+            "old session status should move to controller status"
+        );
+        assert_eq!(
+            stop.pointer("/moved_to/argv/2").and_then(Value::as_str),
+            Some("stop"),
+            "old session stop should move to controller stop"
+        );
+    }
+
+    #[test]
+    fn readiness_errors_point_to_diagnostic_controller_namespace() {
+        let inactive = controller_not_active_error("test").to_json();
+        let not_ready = controller_not_ready_error("starting").to_json();
+
+        assert_error_points_to_controller_start(&inactive);
+        assert!(
+            !not_ready.to_string().contains("session start"),
+            "not-ready error should not recommend old session start: {not_ready}"
+        );
+        assert_eq!(
+            not_ready.get("error_code").and_then(Value::as_str),
+            Some("controller_not_ready"),
+            "not-ready error should be branchable"
+        );
+    }
+
+    #[test]
+    fn input_scope_errors_point_to_controller_status() {
+        let status = json!({
+            "active": true,
+            "input_scope_ready": false,
+            "input_scope_state": "none",
+        });
+
+        let error = input_scope_not_ready_error("test_scope", &status).to_json();
+
+        assert_eq!(
+            error.get("error_code").and_then(Value::as_str),
+            Some("input_scope_not_ready"),
+            "input-scope readiness errors should be branchable"
+        );
+        assert_eq!(
+            error
+                .pointer("/details/suggested_next_command/argv/1")
+                .and_then(Value::as_str),
+            Some("controller"),
+            "input-scope readiness errors should send agents to controller diagnostics"
+        );
+        assert_eq!(
+            error.pointer("/details/mutated").and_then(Value::as_bool),
+            Some(false),
+            "readiness inspection failures should be non-mutating"
+        );
+    }
 
     #[test]
     fn ime_registration_requires_exact_component_line() {
@@ -2415,6 +2682,56 @@ mod tests {
             "input-dynamics-{label}-{}-{counter}",
             std::process::id()
         ))
+    }
+
+    fn assert_command_moved(value: &Value, action: &str) {
+        assert_eq!(
+            value.get("ok").and_then(Value::as_bool),
+            Some(false),
+            "moved command should be a handled unsuccessful JSON result"
+        );
+        assert_eq!(
+            value.get("error_code").and_then(Value::as_str),
+            Some("command_moved"),
+            "moved command should have stable error code"
+        );
+        assert_eq!(
+            value.get("mutated").and_then(Value::as_bool),
+            Some(false),
+            "moved command should be non-mutating"
+        );
+        assert_eq!(
+            value
+                .pointer("/deprecated_command/argv/1")
+                .and_then(Value::as_str),
+            Some("session"),
+            "deprecated command should identify old namespace"
+        );
+        assert_eq!(
+            value.pointer("/moved_to/argv/2").and_then(Value::as_str),
+            Some(action),
+            "moved command should identify replacement action"
+        );
+        assert!(
+            value.to_string().contains("controller"),
+            "moved command should point to controller namespace"
+        );
+    }
+
+    fn assert_error_points_to_controller_start(value: &Value) {
+        assert!(
+            value.to_string().contains("controller start"),
+            "error should recommend controller start: {value}"
+        );
+        assert!(
+            !value.to_string().contains("session start"),
+            "error should not recommend old session start: {value}"
+        );
+        assert_eq!(
+            value.get("error_code").and_then(Value::as_str),
+            Some("controller_not_active"),
+            "inactive-controller error should be branchable"
+        );
     }
 
     fn create_video_map_command_fixture(root: &Path) -> Result<(), Box<dyn std::error::Error>> {

@@ -10,11 +10,11 @@ The bundled profile is:
 profiles/baseline-v1.json
 ```
 
-Stateful `session start` uses the bundled baseline profile by default for
-controller-driven sessions. To use a local profile for the whole session:
+Diagnostic `controller start` uses the bundled baseline profile by default for
+controller-driven input. To use a local profile for the whole controller run:
 
 ```bash
-input-dynamics session start \
+input-dynamics controller start \
   --run-id "$RUN_ID" \
   --input-profile ./profiles/custom.json
 ```
@@ -22,15 +22,15 @@ input-dynamics session start \
 For reproducible sampled runs, pass a seed:
 
 ```bash
-input-dynamics session start \
+input-dynamics controller start \
   --run-id "$RUN_ID" \
   --input-profile ./profiles/custom.json \
   --input-profile-seed 12345
 ```
 
 Live commands such as `type`, `tap`, and semantic `press` inherit the active
-session profile. Lower-level absolute touch commands remain explicit coordinate
-commands.
+controller profile. Lower-level absolute touch commands remain explicit
+coordinate commands.
 
 ## Provenance
 
