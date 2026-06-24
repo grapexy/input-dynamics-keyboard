@@ -459,26 +459,47 @@ pub(crate) enum TouchCommand {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum SessionCommand {
-    /// Moved diagnostic controller start parser; use `controller start`.
+    /// Internal session compatibility parser.
     #[command(hide = true)]
     Start {
-        /// External run id to preserve in the moved-command recovery argv.
-        #[arg(long)]
+        /// Internal compatibility field.
+        #[arg(long, hide = true)]
         run_id: String,
-        /// Input actor provenance to preserve in the moved-command recovery argv.
-        #[arg(long, default_value = "agent_adb")]
-        input_actor: String,
-        /// Controller provenance to preserve in the moved-command recovery argv.
-        #[arg(long, default_value = "input-dynamics-cli")]
-        input_controller: String,
-        /// Cadence provenance to preserve in the moved-command recovery argv.
-        #[arg(long, default_value = "input_profile")]
-        input_cadence_policy: String,
-        /// Local input profile JSON file to preserve in the moved-command recovery argv.
-        #[arg(long)]
+        /// Internal compatibility field.
+        #[arg(long, hide = true)]
+        out: Option<PathBuf>,
+        /// Internal compatibility field.
+        #[arg(long, hide = true)]
+        input_actor: Option<String>,
+        /// Internal compatibility field.
+        #[arg(long, hide = true)]
+        mode: Option<String>,
+        /// Internal compatibility field.
+        #[arg(long, hide = true)]
+        with_input_controller: bool,
+        /// Internal compatibility field.
+        #[arg(long, hide = true)]
+        no_input_controller: bool,
+        /// Internal compatibility field.
+        #[arg(long, hide = true)]
+        input_controller: Option<String>,
+        /// Internal compatibility field.
+        #[arg(long, hide = true)]
+        input_cadence_policy: Option<String>,
+        /// Internal compatibility field.
+        #[arg(long, hide = true)]
+        with_evidence: bool,
+        /// Internal compatibility field.
+        #[arg(long, requires = "with_evidence", hide = true)]
+        full_accessibility_evidence: bool,
+        /// Internal compatibility field.
+        #[arg(long, hide = true)]
+        no_video: bool,
+        /// Internal compatibility field.
+        #[arg(long, hide = true)]
         input_profile: Option<PathBuf>,
-        /// Explicit input profile seed for reproducible sampled input.
-        #[arg(long)]
+        /// Internal compatibility field.
+        #[arg(long, hide = true)]
         input_profile_seed: Option<u64>,
     },
     /// Moved diagnostic controller status parser; use `controller status`.
@@ -698,6 +719,62 @@ mod tests {
     }
 
     #[test]
+    fn umbrella_session_start_shapes_parse_for_json_handling() {
+        let human = Cli::try_parse_from([
+            "input-dynamics",
+            "session",
+            "start",
+            "--input-actor",
+            "human",
+            "--run-id",
+            "run-test",
+            "--out",
+            "/tmp/run-test",
+            "--with-evidence",
+        ]);
+        let agent = Cli::try_parse_from([
+            "input-dynamics",
+            "session",
+            "start",
+            "--input-actor",
+            "agent",
+            "--run-id",
+            "run-test",
+            "--out",
+            "/tmp/run-test",
+            "--input-profile-seed",
+            "7",
+        ]);
+        let rejected_flag = Cli::try_parse_from([
+            "input-dynamics",
+            "session",
+            "start",
+            "--input-actor",
+            "agent",
+            "--run-id",
+            "run-test",
+            "--out",
+            "/tmp/run-test",
+            "--with-input-controller",
+        ]);
+
+        for parsed in [human, agent, rejected_flag] {
+            assert!(
+                matches!(
+                    parsed,
+                    Ok(Cli {
+                        command: Commands::Session {
+                            command: SessionCommand::Start { .. }
+                        },
+                        ..
+                    })
+                ),
+                "umbrella session start shape should parse so command handling can return JSON"
+            );
+        }
+    }
+
+    #[test]
     fn controller_help_is_visible_but_internal_run_is_hidden() {
         let top_help = Cli::command().render_help().to_string();
         let controller_help = Cli::command()
@@ -739,14 +816,22 @@ mod tests {
         );
         for help in [direct_start_help, direct_status_help, direct_stop_help] {
             assert!(
-                help.contains("Moved diagnostic controller"),
-                "direct hidden session subcommand help should explain migration: {help}"
+                help.contains("Internal session compatibility")
+                    || help.contains("Moved diagnostic controller"),
+                "direct hidden session subcommand help should explain internal or migrated status: {help}"
             );
             assert!(
                 !help.contains("Start IME logging")
                     && !help.contains("Read IME and local input-controller status")
                     && !help.contains("Stop the persistent input controller"),
                 "direct hidden session subcommand help should not promote old lifecycle: {help}"
+            );
+            assert!(
+                !help.contains("umbrella")
+                    && !help.contains("workflow")
+                    && !help.contains("--out")
+                    && !help.contains("--input-actor"),
+                "direct hidden session subcommand help should not advertise unfinished session start flags: {help}"
             );
         }
     }

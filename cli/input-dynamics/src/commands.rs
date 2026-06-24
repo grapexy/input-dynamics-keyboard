@@ -33,6 +33,7 @@ use crate::profile::{
 use crate::ratio::{RatioPpm, SignedRatioPpm};
 use crate::record::{RecordConfig, VideoMode, record_run};
 use crate::recording::inspect_recording;
+use crate::session_state::schema::{COMMAND_RESULT_SCHEMA, INPUT_CONTROLLER_CLI};
 use crate::uinput::{self, PathSpec, TapSpec, TouchPoint};
 use crate::validate::validate_logs;
 
@@ -658,7 +659,10 @@ fn start(app: &App, config: &LoggingStartConfig<'_>) -> CliResult<Value> {
 }
 
 fn session(_app: &App, command: SessionCommand) -> Value {
-    moved_session_command(command)
+    match command {
+        start @ SessionCommand::Start { .. } => session_start(start),
+        SessionCommand::Status | SessionCommand::Stop => moved_session_command(command),
+    }
 }
 
 struct MovedCommand {
@@ -669,15 +673,251 @@ struct MovedCommand {
 
 struct ControllerStartMigration {
     run_id: String,
-    input_actor: String,
-    input_controller: String,
-    input_cadence_policy: String,
+    input_actor: Option<String>,
+    input_controller: Option<String>,
+    input_cadence_policy: Option<String>,
     input_profile: Option<PathBuf>,
     input_profile_seed: Option<u64>,
 }
 
-fn moved_session_command(command: SessionCommand) -> Value {
-    let moved_command = moved_session_argv(command);
+struct RejectedSessionFlagInputs<'a> {
+    mode: Option<&'a str>,
+    with_input_controller: bool,
+    no_input_controller: bool,
+    input_controller: Option<&'a str>,
+    input_cadence_policy: Option<&'a str>,
+}
+
+struct SessionStartValidation<'a> {
+    rejected: RejectedSessionFlagInputs<'a>,
+    evidence: SessionStartEvidence,
+    profile: SessionStartProfile<'a>,
+}
+
+struct SessionStartEvidence {
+    with_evidence: bool,
+    full_accessibility_evidence: bool,
+    no_video: bool,
+}
+
+struct SessionStartProfile<'a> {
+    input_profile: Option<&'a Path>,
+    input_profile_seed: Option<u64>,
+}
+
+struct SessionWorkflowUnavailableInput<'a> {
+    run_id: &'a str,
+    out: &'a Path,
+    actor: &'a str,
+    with_evidence: bool,
+    full_accessibility_evidence: bool,
+    no_video: bool,
+    input_profile: Option<&'a Path>,
+    input_profile_seed: Option<u64>,
+}
+
+fn input_actor_is_umbrella(input_actor: Option<&str>) -> bool {
+    matches!(input_actor, Some("human" | "agent"))
+}
+
+fn rejected_session_start_flags(inputs: &RejectedSessionFlagInputs<'_>) -> Vec<String> {
+    let mut rejected = Vec::new();
+    if inputs.mode.is_some() {
+        rejected.push(String::from("--mode"));
+    }
+    if inputs.with_input_controller {
+        rejected.push(String::from("--with-input-controller"));
+    }
+    if inputs.no_input_controller {
+        rejected.push(String::from("--no-input-controller"));
+    }
+    if inputs.input_controller.is_some() {
+        rejected.push(String::from("--input-controller"));
+    }
+    if inputs.input_cadence_policy.is_some() {
+        rejected.push(String::from("--input-cadence-policy"));
+    }
+    rejected
+}
+
+fn session_start_out_required(run_id: &str, actor: Option<&str>) -> Value {
+    let details = json!({
+        "run_id": run_id,
+        "input_actor": actor,
+        "suggested_next_command": {
+            "argv": ["input-dynamics", "session", "start", "--input-actor", actor.unwrap_or("<human|agent>"), "--run-id", run_id, "--out", "<run-dir>"],
+            "reason": "--out selects reserved session start handling and prevents routing an intended human/agent run to diagnostic controller start",
+        },
+    });
+    session_command_error(
+        "session start",
+        "session_start_out_required",
+        "session start requires --out when --input-actor is human or agent; controller-era session start moved to controller start",
+        &details,
+    )
+}
+
+fn session_input_actor_required(run_id: &str, out: &Path) -> Value {
+    let details = json!({
+        "run_id": run_id,
+        "out": out.to_string_lossy(),
+        "suggested_next_command": {
+            "argv": ["input-dynamics", "session", "start", "--input-actor", "human", "--run-id", run_id, "--out", out.to_string_lossy().as_ref()],
+            "reason": "choose who is producing input for the recording run",
+        },
+    });
+    session_command_error(
+        "session start",
+        "session_input_actor_required",
+        "session start requires --input-actor human or --input-actor agent",
+        &details,
+    )
+}
+
+fn session_input_actor_invalid(run_id: &str, out: &Path, actor: &str) -> Value {
+    let details = json!({
+        "run_id": run_id,
+        "out": out.to_string_lossy(),
+        "input_actor": actor,
+        "allowed_input_actors": ["human", "agent"],
+    });
+    session_command_error(
+        "session start",
+        "session_input_actor_invalid",
+        "session input actor must be human or agent",
+        &details,
+    )
+}
+
+fn unsupported_session_flags(
+    run_id: &str,
+    out: &Path,
+    actor: &str,
+    rejected_flags: &[String],
+) -> Value {
+    let details = json!({
+        "run_id": run_id,
+        "out": out.to_string_lossy(),
+        "input_actor": actor,
+        "rejected_flags": rejected_flags,
+        "suggested_next_command": {
+            "argv": ["input-dynamics", "session", "start", "--input-actor", actor, "--run-id", run_id, "--out", out.to_string_lossy().as_ref()],
+            "reason": "--input-actor is the single normal control for input provenance",
+        },
+    });
+    session_command_error(
+        "session start",
+        "unsupported_session_flag",
+        "session start derives controller and cadence settings from --input-actor",
+        &details,
+    )
+}
+
+fn session_input_profile_not_allowed(
+    run_id: &str,
+    out: &Path,
+    input_profile: Option<&Path>,
+    input_profile_seed: Option<u64>,
+) -> Value {
+    let details = json!({
+        "run_id": run_id,
+        "out": out.to_string_lossy(),
+        "input_actor": "human",
+        "input_profile": input_profile.map(|path| path.to_string_lossy().to_string()),
+        "input_profile_seed": input_profile_seed,
+        "suggested_next_command": {
+            "argv": ["input-dynamics", "session", "start", "--input-actor", "human", "--run-id", run_id, "--out", out.to_string_lossy().as_ref()],
+            "reason": "human sessions use manual cadence and do not have generated input profile provenance",
+        },
+    });
+    session_command_error(
+        "session start",
+        "session_input_profile_not_allowed",
+        "human sessions cannot use input profiles or profile seeds",
+        &details,
+    )
+}
+
+fn session_workflow_unavailable(input: &SessionWorkflowUnavailableInput<'_>) -> Value {
+    let input_controller = derived_session_input_controller(input.actor);
+    let input_cadence_policy = derived_session_cadence_policy(input.actor);
+    let profile_source = derived_session_profile_source(input.actor, input.input_profile);
+    let input_profile = input
+        .input_profile
+        .map(|path| path.to_string_lossy().to_string());
+    let details = json!({
+        "run_id": input.run_id,
+        "out": input.out.to_string_lossy(),
+        "input_actor": input.actor,
+        "input_controller": input_controller,
+        "input_cadence_policy": input_cadence_policy,
+        "with_evidence": input.with_evidence,
+        "full_accessibility_evidence": input.full_accessibility_evidence,
+        "no_video": input.no_video,
+        "input_profile": input_profile,
+        "input_profile_seed": input.input_profile_seed,
+        "profile_provenance": null,
+        "input_provenance": {
+            "input_actor": input.actor,
+            "input_controller": input_controller,
+            "input_cadence_policy": input_cadence_policy,
+            "profile_source": profile_source,
+            "input_profile": input_profile,
+            "input_profile_seed": input.input_profile_seed,
+        },
+        "availability": "reserved",
+        "reason_code": "not_available",
+        "suggested_next_command": {
+            "argv": ["input-dynamics", "record", "--run-id", input.run_id, "--out", input.out.to_string_lossy().as_ref(), "--duration-ms", "<positive-ms>"],
+            "reason": "use record for bounded capture in this build",
+        },
+    });
+    session_command_error(
+        "session start",
+        "session_workflow_unavailable",
+        "session start is reserved in this build and did not mutate state",
+        &details,
+    )
+}
+
+fn derived_session_input_controller(actor: &str) -> Option<&'static str> {
+    (actor == "agent").then_some(INPUT_CONTROLLER_CLI)
+}
+
+fn derived_session_cadence_policy(actor: &str) -> &'static str {
+    if actor == "agent" {
+        "input_profile"
+    } else {
+        "manual"
+    }
+}
+
+fn derived_session_profile_source(
+    actor: &str,
+    input_profile: Option<&Path>,
+) -> Option<&'static str> {
+    if actor != "agent" {
+        None
+    } else if input_profile.is_some() {
+        Some("local")
+    } else {
+        Some("bundled")
+    }
+}
+
+fn session_command_error(command: &str, error_code: &str, message: &str, details: &Value) -> Value {
+    json!({
+        "schema": COMMAND_RESULT_SCHEMA,
+        "ok": false,
+        "command": command,
+        "error_code": error_code,
+        "message": message,
+        "details": details,
+        "mutated": false,
+    })
+}
+
+fn moved_command_value(moved_command: &MovedCommand) -> Value {
     let message = format!(
         "controller-only session commands moved to input-dynamics controller {}",
         moved_command.action
@@ -706,6 +946,112 @@ fn moved_session_command(command: SessionCommand) -> Value {
     })
 }
 
+fn session_start(command: SessionCommand) -> Value {
+    let SessionCommand::Start {
+        run_id,
+        out,
+        input_actor,
+        mode,
+        with_input_controller,
+        no_input_controller,
+        input_controller,
+        input_cadence_policy,
+        with_evidence,
+        full_accessibility_evidence,
+        no_video,
+        input_profile,
+        input_profile_seed,
+    } = command
+    else {
+        return moved_session_command(command);
+    };
+    let Some(out_path) = out else {
+        return session_start_without_out(&ControllerStartMigration {
+            run_id,
+            input_actor,
+            input_controller,
+            input_cadence_policy,
+            input_profile,
+            input_profile_seed,
+        });
+    };
+    session_start_with_out(
+        &run_id,
+        &out_path,
+        input_actor.as_deref(),
+        &SessionStartValidation {
+            rejected: RejectedSessionFlagInputs {
+                mode: mode.as_deref(),
+                with_input_controller,
+                no_input_controller,
+                input_controller: input_controller.as_deref(),
+                input_cadence_policy: input_cadence_policy.as_deref(),
+            },
+            evidence: SessionStartEvidence {
+                with_evidence,
+                full_accessibility_evidence,
+                no_video,
+            },
+            profile: SessionStartProfile {
+                input_profile: input_profile.as_deref(),
+                input_profile_seed,
+            },
+        },
+    )
+}
+
+fn session_start_without_out(config: &ControllerStartMigration) -> Value {
+    if input_actor_is_umbrella(config.input_actor.as_deref()) {
+        session_start_out_required(&config.run_id, config.input_actor.as_deref())
+    } else {
+        moved_command_value(&moved_controller_start_argv(config))
+    }
+}
+
+fn session_start_with_out(
+    run_id: &str,
+    out_path: &Path,
+    input_actor: Option<&str>,
+    validation: &SessionStartValidation<'_>,
+) -> Value {
+    let Some(actor) = input_actor else {
+        return session_input_actor_required(run_id, out_path);
+    };
+    if !matches!(actor, "human" | "agent") {
+        return session_input_actor_invalid(run_id, out_path, actor);
+    }
+    let rejected_flags = rejected_session_start_flags(&validation.rejected);
+    if !rejected_flags.is_empty() {
+        return unsupported_session_flags(run_id, out_path, actor, &rejected_flags);
+    }
+    if actor == "human"
+        && (validation.profile.input_profile.is_some()
+            || validation.profile.input_profile_seed.is_some())
+    {
+        return session_input_profile_not_allowed(
+            run_id,
+            out_path,
+            validation.profile.input_profile,
+            validation.profile.input_profile_seed,
+        );
+    }
+    session_workflow_unavailable(&SessionWorkflowUnavailableInput {
+        run_id,
+        out: out_path,
+        actor,
+        with_evidence: validation.evidence.with_evidence,
+        full_accessibility_evidence: validation.evidence.full_accessibility_evidence,
+        no_video: validation.evidence.no_video,
+        input_profile: validation.profile.input_profile,
+        input_profile_seed: validation.profile.input_profile_seed,
+    })
+}
+
+fn moved_session_command(command: SessionCommand) -> Value {
+    let moved_command = moved_session_argv(command);
+    moved_command_value(&moved_command)
+}
+
 fn moved_session_argv(command: SessionCommand) -> MovedCommand {
     match command {
         SessionCommand::Start {
@@ -715,6 +1061,7 @@ fn moved_session_argv(command: SessionCommand) -> MovedCommand {
             input_cadence_policy,
             input_profile,
             input_profile_seed,
+            ..
         } => moved_controller_start_argv(&ControllerStartMigration {
             run_id,
             input_actor,
@@ -752,11 +1099,20 @@ fn controller_start_argv(namespace: &str, config: &ControllerStartMigration) -> 
         String::from("--run-id"),
         config.run_id.clone(),
         String::from("--input-actor"),
-        config.input_actor.clone(),
+        config
+            .input_actor
+            .clone()
+            .unwrap_or_else(|| String::from("agent_adb")),
         String::from("--input-controller"),
-        config.input_controller.clone(),
+        config
+            .input_controller
+            .clone()
+            .unwrap_or_else(|| String::from(INPUT_CONTROLLER_CLI)),
         String::from("--input-cadence-policy"),
-        config.input_cadence_policy.clone(),
+        config
+            .input_cadence_policy
+            .clone()
+            .unwrap_or_else(|| String::from("input_profile")),
     ];
     if let Some(profile) = config.input_profile.as_deref() {
         argv.extend([
@@ -2269,18 +2625,20 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use clap::Parser;
     use proptest::strategy::Strategy;
     use serde_json::Value;
     use serde_json::json;
     use sha2::{Digest, Sha256};
 
-    use crate::args::{PressKey, SessionCommand};
+    use crate::app::App;
+    use crate::args::{Cli, Commands, PressKey, SessionCommand};
     use crate::commands::{
         EditableNode, ScreenBounds, TypeKeyTarget, controller_not_active_error,
         controller_not_ready_error, derive_video_map_command, ime_is_registered,
         input_scope_not_ready_error, is_debug_apk, keyboard_layout_visible,
         keyboard_visible_target_node, latest_release_tag_from_json, moved_session_command,
-        planned_type_step, press_key_code, type_key_target,
+        planned_type_step, press_key_code, session, type_key_target,
     };
 
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0_u64);
@@ -2289,9 +2647,16 @@ mod tests {
     fn old_session_start_returns_command_moved_without_mutation() {
         let result = moved_session_command(SessionCommand::Start {
             run_id: String::from("run-test"),
-            input_actor: String::from("agent_adb"),
-            input_controller: String::from("input-dynamics-cli"),
-            input_cadence_policy: String::from("input_profile"),
+            out: None,
+            input_actor: Some(String::from("agent_adb")),
+            mode: None,
+            with_input_controller: false,
+            no_input_controller: false,
+            input_controller: Some(String::from("input-dynamics-cli")),
+            input_cadence_policy: Some(String::from("input_profile")),
+            with_evidence: false,
+            full_accessibility_evidence: false,
+            no_video: false,
             input_profile: Some(PathBuf::from("profiles/custom.json")),
             input_profile_seed: Some(7_u64),
         });
@@ -2315,6 +2680,453 @@ mod tests {
                 .and_then(Value::as_array)
                 .is_some_and(|argv| argv.iter().any(|value| value == "profiles/custom.json")),
             "moved command should preserve input profile path"
+        );
+    }
+
+    #[test]
+    fn umbrella_session_start_returns_unavailable_without_mutation() {
+        let app = test_app();
+        let out = unique_temp_dir("session-parser-unavailable");
+        let result = session(
+            &app,
+            SessionCommand::Start {
+                run_id: String::from("run-test"),
+                out: Some(out.clone()),
+                input_actor: Some(String::from("agent")),
+                mode: None,
+                with_input_controller: false,
+                no_input_controller: false,
+                input_controller: None,
+                input_cadence_policy: None,
+                with_evidence: true,
+                full_accessibility_evidence: false,
+                no_video: false,
+                input_profile: None,
+                input_profile_seed: Some(7_u64),
+            },
+        );
+
+        assert_session_error(&result, "session_workflow_unavailable");
+        assert_eq!(
+            result
+                .pointer("/details/input_actor")
+                .and_then(Value::as_str),
+            Some("agent"),
+            "result should preserve actor"
+        );
+        assert_eq!(
+            result
+                .pointer("/details/input_controller")
+                .and_then(Value::as_str),
+            Some("input-dynamics-cli"),
+            "agent result should expose derived controller provenance"
+        );
+        assert_eq!(
+            result
+                .pointer("/details/input_cadence_policy")
+                .and_then(Value::as_str),
+            Some("input_profile"),
+            "agent result should expose derived cadence provenance"
+        );
+        assert_eq!(
+            result
+                .pointer("/details/input_provenance/profile_source")
+                .and_then(Value::as_str),
+            Some("bundled"),
+            "agent parser-only result should preserve profile source without loading profile files"
+        );
+        assert_eq!(
+            result.pointer("/details/profile_provenance"),
+            Some(&Value::Null),
+            "parser-only unavailable result should not claim loaded profile provenance"
+        );
+        assert!(
+            !out.exists(),
+            "parser-only unavailable result must not create the output directory"
+        );
+    }
+
+    #[test]
+    fn umbrella_session_start_rejects_missing_actor_and_human_profile_without_mutation() {
+        let app = test_app();
+        let missing_actor_out = unique_temp_dir("session-parser-missing-actor");
+        let profile_out = unique_temp_dir("session-parser-human-profile");
+        let missing_actor = session(
+            &app,
+            SessionCommand::Start {
+                run_id: String::from("run-test"),
+                out: Some(missing_actor_out.clone()),
+                input_actor: None,
+                mode: None,
+                with_input_controller: false,
+                no_input_controller: false,
+                input_controller: None,
+                input_cadence_policy: None,
+                with_evidence: false,
+                full_accessibility_evidence: false,
+                no_video: false,
+                input_profile: None,
+                input_profile_seed: None,
+            },
+        );
+        let human_profile = session(
+            &app,
+            SessionCommand::Start {
+                run_id: String::from("run-test"),
+                out: Some(profile_out.clone()),
+                input_actor: Some(String::from("human")),
+                mode: None,
+                with_input_controller: false,
+                no_input_controller: false,
+                input_controller: None,
+                input_cadence_policy: None,
+                with_evidence: false,
+                full_accessibility_evidence: false,
+                no_video: false,
+                input_profile: None,
+                input_profile_seed: Some(7_u64),
+            },
+        );
+
+        assert_session_error(&missing_actor, "session_input_actor_required");
+        assert_session_error(&human_profile, "session_input_profile_not_allowed");
+        for out in [missing_actor_out, profile_out] {
+            assert!(
+                !out.exists(),
+                "validation-only session start must not create output directory"
+            );
+        }
+    }
+
+    #[test]
+    fn umbrella_actor_without_out_does_not_move_to_controller() {
+        let app = test_app();
+        let result = session(
+            &app,
+            SessionCommand::Start {
+                run_id: String::from("run-test"),
+                out: None,
+                input_actor: Some(String::from("human")),
+                mode: None,
+                with_input_controller: false,
+                no_input_controller: false,
+                input_controller: None,
+                input_cadence_policy: None,
+                with_evidence: false,
+                full_accessibility_evidence: false,
+                no_video: false,
+                input_profile: None,
+                input_profile_seed: None,
+            },
+        );
+
+        assert_session_error(&result, "session_start_out_required");
+    }
+
+    #[test]
+    fn umbrella_session_start_rejects_controller_flags_without_mutation() {
+        let app = test_app();
+        let out = unique_temp_dir("session-parser-rejected-flags");
+        let result = session(
+            &app,
+            SessionCommand::Start {
+                run_id: String::from("run-test"),
+                out: Some(out.clone()),
+                input_actor: Some(String::from("agent")),
+                mode: Some(String::from("agent")),
+                with_input_controller: true,
+                no_input_controller: false,
+                input_controller: Some(String::from("input-dynamics-cli")),
+                input_cadence_policy: None,
+                with_evidence: false,
+                full_accessibility_evidence: false,
+                no_video: false,
+                input_profile: None,
+                input_profile_seed: None,
+            },
+        );
+
+        assert_session_error(&result, "unsupported_session_flag");
+        assert!(
+            result
+                .pointer("/details/rejected_flags")
+                .and_then(Value::as_array)
+                .is_some_and(
+                    |flags| flags.iter().any(|flag| flag == "--with-input-controller")
+                        && flags.iter().any(|flag| flag == "--input-controller")
+                ),
+            "result should identify rejected flags"
+        );
+        assert!(
+            !out.exists(),
+            "rejected-flag validation must not create output directory"
+        );
+    }
+
+    #[test]
+    fn umbrella_session_start_rejects_invalid_actors_without_mutation() {
+        for actor in ["agent_adb", "robot"] {
+            let out = unique_temp_dir(&format!("session-parser-invalid-actor-{actor}"));
+            let result = parsed_session_result(vec![
+                String::from("input-dynamics"),
+                String::from("session"),
+                String::from("start"),
+                String::from("--input-actor"),
+                String::from(actor),
+                String::from("--run-id"),
+                String::from("run-test"),
+                String::from("--out"),
+                path_string_lossy(&out),
+            ]);
+
+            assert_session_error(&result, "session_input_actor_invalid");
+            assert_eq!(
+                result.pointer("/details/allowed_input_actors"),
+                Some(&json!(["human", "agent"])),
+                "invalid actor response should expose the allowed vocabulary"
+            );
+            assert!(
+                !out.exists(),
+                "invalid actor validation must not create output directory"
+            );
+        }
+    }
+
+    #[test]
+    fn umbrella_session_start_rejects_all_controller_flags_from_argv() {
+        struct RejectedFlagCase {
+            expected_flag: &'static str,
+            args: &'static [&'static str],
+        }
+
+        let cases = [
+            RejectedFlagCase {
+                expected_flag: "--mode",
+                args: &["--mode", "agent"],
+            },
+            RejectedFlagCase {
+                expected_flag: "--with-input-controller",
+                args: &["--with-input-controller"],
+            },
+            RejectedFlagCase {
+                expected_flag: "--no-input-controller",
+                args: &["--no-input-controller"],
+            },
+            RejectedFlagCase {
+                expected_flag: "--input-controller",
+                args: &["--input-controller", "input-dynamics-cli"],
+            },
+            RejectedFlagCase {
+                expected_flag: "--input-cadence-policy",
+                args: &["--input-cadence-policy", "input_profile"],
+            },
+        ];
+
+        for case in cases {
+            let out = unique_temp_dir(&format!(
+                "session-parser-rejected-{}",
+                case.expected_flag.trim_start_matches("--")
+            ));
+            let mut argv = vec![
+                String::from("input-dynamics"),
+                String::from("session"),
+                String::from("start"),
+                String::from("--input-actor"),
+                String::from("agent"),
+                String::from("--run-id"),
+                String::from("run-test"),
+                String::from("--out"),
+                path_string_lossy(&out),
+            ];
+            argv.extend(case.args.iter().copied().map(String::from));
+
+            let result = parsed_session_result(argv);
+
+            assert_session_error(&result, "unsupported_session_flag");
+            assert!(
+                result
+                    .pointer("/details/rejected_flags")
+                    .and_then(Value::as_array)
+                    .is_some_and(|flags| flags.iter().any(|flag| flag == case.expected_flag)),
+                "result should identify rejected flag {}",
+                case.expected_flag
+            );
+            assert!(
+                !out.exists(),
+                "rejected flag validation must not create output directory"
+            );
+        }
+    }
+
+    #[test]
+    fn umbrella_session_start_human_path_is_profile_free_and_non_mutating() {
+        let out = unique_temp_dir("session-parser-human-unavailable");
+        let result = parsed_session_result(vec![
+            String::from("input-dynamics"),
+            String::from("session"),
+            String::from("start"),
+            String::from("--input-actor"),
+            String::from("human"),
+            String::from("--run-id"),
+            String::from("run-test"),
+            String::from("--out"),
+            path_string_lossy(&out),
+        ]);
+
+        assert_session_error(&result, "session_workflow_unavailable");
+        assert_eq!(
+            result.pointer("/details/input_controller"),
+            Some(&Value::Null),
+            "human result should expose null controller provenance"
+        );
+        assert_eq!(
+            result
+                .pointer("/details/input_cadence_policy")
+                .and_then(Value::as_str),
+            Some("manual"),
+            "human result should expose manual cadence"
+        );
+        assert_eq!(
+            result.pointer("/details/profile_provenance"),
+            Some(&Value::Null),
+            "human result should not have profile provenance"
+        );
+        assert!(
+            !out.exists(),
+            "human unavailable result must not create output directory"
+        );
+    }
+
+    #[test]
+    fn umbrella_session_start_human_profile_path_is_rejected_without_reading() {
+        let out = unique_temp_dir("session-parser-human-profile-path");
+        let profile = unique_temp_dir("missing-human-profile").join("profile.json");
+        let result = parsed_session_result(vec![
+            String::from("input-dynamics"),
+            String::from("session"),
+            String::from("start"),
+            String::from("--input-actor"),
+            String::from("human"),
+            String::from("--run-id"),
+            String::from("run-test"),
+            String::from("--out"),
+            path_string_lossy(&out),
+            String::from("--input-profile"),
+            path_string_lossy(&profile),
+        ]);
+
+        assert_session_error(&result, "session_input_profile_not_allowed");
+        assert_eq!(
+            result
+                .pointer("/details/input_profile")
+                .and_then(Value::as_str),
+            Some(path_string_lossy(&profile).as_str()),
+            "rejection payload should preserve the requested profile path"
+        );
+        assert!(
+            !out.exists() && !profile.exists(),
+            "human profile rejection must not create output or profile paths"
+        );
+    }
+
+    #[test]
+    fn umbrella_session_start_agent_profile_path_is_not_read_while_unavailable() {
+        let out = unique_temp_dir("session-parser-agent-profile-path");
+        let profile = unique_temp_dir("missing-agent-profile").join("profile.json");
+        let result = parsed_session_result(vec![
+            String::from("input-dynamics"),
+            String::from("session"),
+            String::from("start"),
+            String::from("--input-actor"),
+            String::from("agent"),
+            String::from("--run-id"),
+            String::from("run-test"),
+            String::from("--out"),
+            path_string_lossy(&out),
+            String::from("--input-profile"),
+            path_string_lossy(&profile),
+            String::from("--input-profile-seed"),
+            String::from("7"),
+        ]);
+
+        assert_session_error(&result, "session_workflow_unavailable");
+        assert_eq!(
+            result
+                .pointer("/details/input_profile")
+                .and_then(Value::as_str),
+            Some(path_string_lossy(&profile).as_str()),
+            "unavailable result should preserve the requested profile path without reading it"
+        );
+        assert_eq!(
+            result
+                .pointer("/details/input_provenance/profile_source")
+                .and_then(Value::as_str),
+            Some("local"),
+            "agent result should classify explicit profile source without loading it"
+        );
+        assert_eq!(
+            result
+                .pointer("/details/input_profile_seed")
+                .and_then(Value::as_u64),
+            Some(7_u64),
+            "unavailable result should preserve profile seed"
+        );
+        assert!(
+            !out.exists() && !profile.exists(),
+            "agent unavailable result must not create output or read/create profile paths"
+        );
+    }
+
+    #[test]
+    fn old_session_start_through_session_branch_preserves_legacy_defaults() {
+        let result = parsed_session_result(vec![
+            String::from("input-dynamics"),
+            String::from("session"),
+            String::from("start"),
+            String::from("--run-id"),
+            String::from("run-test"),
+        ]);
+
+        assert_command_moved(&result, "start");
+        assert_eq!(
+            result.pointer("/moved_to/argv"),
+            Some(&json!([
+                "input-dynamics",
+                "controller",
+                "start",
+                "--run-id",
+                "run-test",
+                "--input-actor",
+                "agent_adb",
+                "--input-controller",
+                "input-dynamics-cli",
+                "--input-cadence-policy",
+                "input_profile"
+            ])),
+            "legacy no-out session start should normalize moved controller defaults"
+        );
+
+        let agent_adb = parsed_session_result(vec![
+            String::from("input-dynamics"),
+            String::from("session"),
+            String::from("start"),
+            String::from("--run-id"),
+            String::from("run-test"),
+            String::from("--input-actor"),
+            String::from("agent_adb"),
+        ]);
+
+        assert_command_moved(&agent_adb, "start");
+        assert!(
+            agent_adb
+                .pointer("/moved_to/argv")
+                .and_then(Value::as_array)
+                .is_some_and(|argv| argv.windows(2).any(|pair| pair
+                    == [
+                        Value::String(String::from("--input-actor")),
+                        Value::String(String::from("agent_adb"))
+                    ])),
+            "legacy no-out session start should preserve explicit agent_adb actor"
         );
     }
 
@@ -2684,7 +3496,71 @@ mod tests {
         ))
     }
 
+    fn test_app() -> App {
+        App::new(
+            String::from("adb"),
+            String::from("org.inputdynamics.ime.debug"),
+            Some(String::from("test-device")),
+        )
+    }
+
+    fn parsed_session_result(argv: Vec<String>) -> Value {
+        let cli = match Cli::try_parse_from(argv) {
+            Ok(cli) => cli,
+            Err(error) => {
+                return json!({
+                    "test_error": "test argv did not parse",
+                    "message": error.to_string(),
+                });
+            }
+        };
+        if let Commands::Session { command } = cli.command {
+            session(&test_app(), command)
+        } else {
+            json!({
+                "test_error": "test argv did not parse as session command",
+            })
+        }
+    }
+
+    fn path_string_lossy(path: &Path) -> String {
+        path.to_string_lossy().to_string()
+    }
+
+    fn assert_session_error(value: &Value, error_code: &str) {
+        assert_eq!(
+            value.get("schema").and_then(Value::as_str),
+            Some("input_dynamics_session_command_result.v1"),
+            "session command error should use the stable parser-only schema"
+        );
+        assert_eq!(
+            value.get("ok").and_then(Value::as_bool),
+            Some(false),
+            "session command error should not be ok"
+        );
+        assert_eq!(
+            value.get("command").and_then(Value::as_str),
+            Some("session start"),
+            "session command error should identify the command"
+        );
+        assert_eq!(
+            value.get("error_code").and_then(Value::as_str),
+            Some(error_code),
+            "session command error code should match"
+        );
+        assert_eq!(
+            value.get("mutated").and_then(Value::as_bool),
+            Some(false),
+            "parser-only session command errors must be non-mutating"
+        );
+    }
+
     fn assert_command_moved(value: &Value, action: &str) {
+        assert_eq!(
+            value.get("schema").and_then(Value::as_str),
+            Some("input_dynamics_command_migration.v1"),
+            "moved session command should use migration schema"
+        );
         assert_eq!(
             value.get("ok").and_then(Value::as_bool),
             Some(false),
@@ -2711,6 +3587,11 @@ mod tests {
             value.pointer("/moved_to/argv/2").and_then(Value::as_str),
             Some(action),
             "moved command should identify replacement action"
+        );
+        assert_eq!(
+            value.pointer("/suggested_next_command/argv"),
+            value.pointer("/moved_to/argv"),
+            "top-level suggested command should match moved argv"
         );
         assert!(
             value.to_string().contains("controller"),
