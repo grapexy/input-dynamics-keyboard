@@ -1,6 +1,6 @@
 ---
 name: input-dynamics-keyboard
-description: Run and validate local Android Input Dynamics Keyboard sessions over ADB. Use when Codex needs to download or build the Android IME APK, install it on a device, enable or select it, start/status/stop a complete input dynamics session with screen video and an external run_id, inspect keyboard layout, accessibility, or screenshot evidence, avoid screenshot-dependent keyboard automation, pull JSONL logs, or validate the password-field suppression boundary.
+description: Run and validate local Android Input Dynamics Keyboard sessions over ADB. Use when Codex needs to download or build the Android IME APK, install it on a device, enable or select it, start/status/stop a complete input dynamics session with screen video and an external run_id, run bounded session smoke captures, inspect keyboard layout, accessibility, or screenshot evidence, avoid screenshot-dependent keyboard automation, pull JSONL logs, or validate the password-field suppression boundary.
 ---
 
 # Input Dynamics Keyboard
@@ -139,7 +139,26 @@ For start/end screen context, add `--with-evidence` to `session start`. Unless
 request-correlated timing metadata, IME logs, ADB touchscreen capture,
 normalization, validation, and a manifest after stop/finalization.
 
-4. For diagnostic live agent-driven input, start one controller run:
+4. For a bounded smoke capture, use `session run --duration-ms`. This is for
+   explicit smoke tests or externally bounded capture windows; it uses the same
+   umbrella lifecycle and finalization path as `session start/status/stop`.
+   Current complete-session examples use `--input-actor human`; agent-owned
+   complete sessions remain reserved until the agent umbrella lifecycle exists:
+
+```bash
+RUN_ID=run-YYYYMMDD-HHMMSS-smoke
+idk session run \
+  --input-actor human \
+  --run-id "$RUN_ID" \
+  --out "runs/$RUN_ID" \
+  --duration-ms 10000
+idk recording inspect --dir "runs/$RUN_ID"
+```
+
+Do not use bounded `session run` as a semantic refresh for a human interaction
+recording unless the task explicitly asks for a bounded smoke window.
+
+5. For diagnostic live agent-driven input, start one controller run:
 
 ```bash
 RUN_ID=run-YYYYMMDD-HHMMSS-local-android

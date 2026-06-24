@@ -96,7 +96,7 @@ pub struct DismissalDerivationPolicy {
 /// Configuration for deriving dismissal records from a run directory.
 #[derive(Clone, Debug)]
 pub struct DeriveDismissalsConfig {
-    /// Recording directory created by `input-dynamics record`.
+    /// Recording directory created by the complete session workflow.
     pub recording_dir: PathBuf,
     /// Normalized `adb/getevent.jsonl` path. Defaults under `recording_dir`.
     pub getevent_jsonl: Option<PathBuf>,

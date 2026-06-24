@@ -53,6 +53,12 @@ pub(crate) struct HumanSessionStart {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct HumanSessionRun {
+    pub(crate) start: HumanSessionStart,
+    pub(crate) duration_ms: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SessionStatusRequest {
     pub(crate) run_id: Option<String>,
 }
@@ -86,6 +92,7 @@ trait LifecycleEffects {
     ) -> CliResult<ProcessDescriptor>;
     fn probe_process(&self, descriptor: &ProcessDescriptor) -> ProcessLiveness;
     fn stop_process(&mut self, descriptor: &ProcessDescriptor) -> StopOutcome;
+    fn sleep(&self, duration: Duration);
 }
 
 struct RealLifecycleEffects<'a> {
@@ -95,6 +102,11 @@ struct RealLifecycleEffects<'a> {
 pub(crate) fn start_human_session(app: &App, request: &HumanSessionStart) -> CliResult<Value> {
     let mut effects = RealLifecycleEffects { app };
     start_human_session_with_effects(&mut effects, request)
+}
+
+pub(crate) fn run_human_session(app: &App, request: &HumanSessionRun) -> Value {
+    let mut effects = RealLifecycleEffects { app };
+    run_human_session_with_effects(&mut effects, request)
 }
 
 pub(crate) fn session_status(app: &App, request: &SessionStatusRequest) -> CliResult<Value> {
@@ -168,6 +180,172 @@ fn start_human_session_with_effects(
     effects: &mut dyn LifecycleEffects,
     request: &HumanSessionStart,
 ) -> CliResult<Value> {
+    start_human_session_with_metadata(effects, request, StartCommandMetadata::session_start())
+}
+
+fn run_human_session_with_effects(
+    effects: &mut dyn LifecycleEffects,
+    request: &HumanSessionRun,
+) -> Value {
+    let start = match start_human_session_with_metadata(
+        effects,
+        &request.start,
+        StartCommandMetadata::session_run(request.duration_ms),
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            let error_value = error.to_json();
+            return session_run_error_result(
+                effects,
+                request,
+                &SessionRunError {
+                    stage: "start",
+                    error: &error_value,
+                    status: None,
+                    stop: None,
+                },
+            );
+        }
+    };
+
+    let timer_started_wall_ms = host_wall_millis();
+    effects.sleep(Duration::from_millis(request.duration_ms));
+    let timer_finished_wall_ms = host_wall_millis();
+    let wait = bounded_wait_value(
+        request.duration_ms,
+        timer_started_wall_ms,
+        timer_finished_wall_ms,
+    );
+
+    let status_result = session_status_with_effects(
+        effects,
+        &SessionStatusRequest {
+            run_id: Some(request.start.run_id.clone()),
+        },
+    );
+    let status = result_value(&status_result);
+
+    let stop_result = stop_session_with_effects(
+        effects,
+        &SessionStopRequest {
+            run_id: Some(request.start.run_id.clone()),
+        },
+    );
+    let stop = result_value(&stop_result);
+    let ok = wait.get("ok").and_then(Value::as_bool) == Some(true)
+        && status.get("ok").and_then(Value::as_bool) == Some(true)
+        && stop.get("ok").and_then(Value::as_bool) == Some(true);
+
+    json!({
+        "schema": SESSION_LIFECYCLE_RESULT_SCHEMA,
+        "ok": ok,
+        "command": "session run",
+        "mutated": true,
+        "bounded": true,
+        "package_name": effects.package_name(),
+        "device_serial": start.get("device_serial").cloned().unwrap_or(Value::Null),
+        "run_id": request.start.run_id,
+        "output_dir": request.start.out,
+        "duration_ms": request.duration_ms,
+        "timer_policy": "after_active",
+        "stop_trigger": "duration_elapsed",
+        "wait": wait,
+        "start": start,
+        "status": status,
+        "stop": stop,
+        "lifecycle_state": stop.get("lifecycle_state").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn bounded_wait_value(
+    duration_ms: u64,
+    timer_started_wall_ms: CliResult<u64>,
+    timer_finished_wall_ms: CliResult<u64>,
+) -> Value {
+    let mut value = json!({
+        "stop_mode": "duration_ms",
+        "stop_trigger": "duration_elapsed",
+        "timer_policy": "after_active",
+        "duration_ms": duration_ms,
+    });
+    match (timer_started_wall_ms, timer_finished_wall_ms) {
+        (Ok(started), Ok(finished)) => {
+            set_json_object_field(&mut value, "ok", json!(true));
+            set_json_object_field(&mut value, "timer_started_wall_ms", json!(started));
+            set_json_object_field(&mut value, "timer_finished_wall_ms", json!(finished));
+            set_json_object_field(
+                &mut value,
+                "elapsed_host_wall_ms",
+                json!(finished.saturating_sub(started)),
+            );
+        }
+        (started, finished) => {
+            set_json_object_field(&mut value, "ok", json!(false));
+            set_json_object_field(
+                &mut value,
+                "error_code",
+                json!("bounded_wait_timestamp_unavailable"),
+            );
+            if let Err(error) = started {
+                set_json_object_field(&mut value, "timer_started_error", error.to_json());
+            }
+            if let Err(error) = finished {
+                set_json_object_field(&mut value, "timer_finished_error", error.to_json());
+            }
+        }
+    }
+    value
+}
+
+fn set_json_object_field(object: &mut Value, key: &str, value: Value) {
+    if let Some(fields) = object.as_object_mut() {
+        fields.insert(String::from(key), value);
+    }
+}
+
+struct SessionRunError<'a> {
+    stage: &'a str,
+    error: &'a Value,
+    status: Option<&'a Value>,
+    stop: Option<&'a Value>,
+}
+
+fn session_run_error_result(
+    effects: &dyn LifecycleEffects,
+    request: &HumanSessionRun,
+    error: &SessionRunError<'_>,
+) -> Value {
+    let mutated = error.error.get("mutated").and_then(Value::as_bool) == Some(true)
+        || error
+            .error
+            .pointer("/details/mutated")
+            .and_then(Value::as_bool)
+            == Some(true)
+        || error.stop.is_some();
+    json!({
+        "schema": SESSION_LIFECYCLE_RESULT_SCHEMA,
+        "ok": false,
+        "command": "session run",
+        "mutated": mutated,
+        "bounded": true,
+        "package_name": effects.package_name(),
+        "run_id": request.start.run_id,
+        "output_dir": request.start.out,
+        "duration_ms": request.duration_ms,
+        "timer_policy": "after_active",
+        "stop_trigger": "duration_elapsed",
+        "error_stage": error.stage,
+        "error": error.error,
+        "status": error.status.unwrap_or(&Value::Null),
+        "stop": error.stop.unwrap_or(&Value::Null),
+    })
+}
+
+fn start_human_session_with_metadata(
+    effects: &mut dyn LifecycleEffects,
+    request: &HumanSessionStart,
+    metadata: StartCommandMetadata,
+) -> CliResult<Value> {
     let device_serial = effects.selected_device_serial()?;
     let runtime_paths = runtime_paths(effects.package_name(), &device_serial);
     let run_paths = RunSessionPaths::from_run_dir(&request.out);
@@ -182,9 +360,9 @@ fn start_human_session_with_effects(
         },
     );
     let created_wall_ms = host_wall_millis()?;
-    let mut lock = new_lock(&identity, created_wall_ms, LockState::Starting);
+    let mut lock = new_lock(&identity, created_wall_ms, LockState::Starting, metadata);
     acquire_lock_exclusive(&runtime_paths.lock, &serde_json::to_value(&lock)?)?;
-    let mut state = new_state(&identity, request, created_wall_ms);
+    let mut state = new_state(&identity, request, created_wall_ms, metadata);
 
     if let Err(error) = initialize_locked_start(request, &identity, &run_paths, &state) {
         let cleanup = cleanup_failed_start(effects, &identity, &lock, &mut state, &error);
@@ -250,7 +428,21 @@ fn start_human_session_after_lock(
     Ok(json!({
         "schema": SESSION_LIFECYCLE_RESULT_SCHEMA,
         "ok": true,
-        "command": "session start",
+        "command": state
+            .start_config
+            .pointer("/command/name")
+            .cloned()
+            .unwrap_or_else(|| json!("session start")),
+        "bounded": state
+            .start_config
+            .get("bounded")
+            .cloned()
+            .unwrap_or(Value::Bool(false)),
+        "duration_ms": state
+            .start_config
+            .get("bounded_duration_ms")
+            .cloned()
+            .unwrap_or(Value::Null),
         "mutated": true,
         "package_name": identity.package_name,
         "device_serial": identity.device_serial,
@@ -1109,6 +1301,10 @@ impl LifecycleEffects for RealLifecycleEffects<'_> {
             &mut signaler,
         )
     }
+
+    fn sleep(&self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1160,7 +1356,44 @@ fn runtime_paths(package_name: &str, device_serial: &str) -> RuntimeSessionPaths
     )
 }
 
-fn new_lock(identity: &SessionIdentity, wall_ms: u64, lock_state: LockState) -> CaptureSessionLock {
+#[derive(Clone, Copy)]
+struct StartCommandMetadata {
+    name: CaptureSessionCommandName,
+    bounded: bool,
+    duration_ms: Option<u64>,
+}
+
+impl StartCommandMetadata {
+    const fn session_start() -> Self {
+        Self {
+            name: CaptureSessionCommandName::SessionStart,
+            bounded: false,
+            duration_ms: None,
+        }
+    }
+
+    const fn session_run(duration_ms: u64) -> Self {
+        Self {
+            name: CaptureSessionCommandName::SessionRun,
+            bounded: true,
+            duration_ms: Some(duration_ms),
+        }
+    }
+
+    const fn command_name(self) -> &'static str {
+        match self.name {
+            CaptureSessionCommandName::SessionStart => "session start",
+            CaptureSessionCommandName::SessionRun => "session run",
+        }
+    }
+}
+
+fn new_lock(
+    identity: &SessionIdentity,
+    wall_ms: u64,
+    lock_state: LockState,
+    metadata: StartCommandMetadata,
+) -> CaptureSessionLock {
     CaptureSessionLock {
         schema: String::from(LOCK_SCHEMA),
         lock_state,
@@ -1170,8 +1403,9 @@ fn new_lock(identity: &SessionIdentity, wall_ms: u64, lock_state: LockState) -> 
         device_serial: identity.device_serial.clone(),
         run_id: identity.run_id.clone(),
         command: CaptureSessionCommand {
-            name: CaptureSessionCommandName::SessionStart,
-            bounded: false,
+            name: metadata.name,
+            bounded: metadata.bounded,
+            duration_ms: metadata.duration_ms,
         },
         output_dir: identity.output_dir.to_string_lossy().to_string(),
         state_path: identity.state_path.to_string_lossy().to_string(),
@@ -1189,6 +1423,7 @@ fn new_state(
     identity: &SessionIdentity,
     request: &HumanSessionStart,
     wall_ms: u64,
+    metadata: StartCommandMetadata,
 ) -> CaptureSessionState {
     CaptureSessionState {
         schema: String::from(STATE_SCHEMA),
@@ -1209,6 +1444,15 @@ fn new_state(
             "run_id": request.run_id,
             "out": request.out,
             "input_actor": "human",
+            "command": {
+                "name": metadata.command_name(),
+                "bounded": metadata.bounded,
+                "duration_ms": metadata.duration_ms,
+            },
+            "bounded": metadata.bounded,
+            "bounded_duration_ms": metadata.duration_ms,
+            "timer_policy": if metadata.bounded { "after_active" } else { "none" },
+            "stop_trigger": if metadata.bounded { "duration_elapsed" } else { "manual" },
             "with_evidence": request.with_evidence,
             "full_accessibility_evidence": request.full_accessibility_evidence,
             "video_enabled": request.video_enabled,
@@ -1974,7 +2218,7 @@ fn result_value(result: &CliResult<Value>) -> Value {
                 json!({"ok": true, "value": value})
             }
         }
-        Err(error) => json!({"ok": false, "error": error.to_string()}),
+        Err(error) => error.to_json(),
     }
 }
 
@@ -2149,10 +2393,17 @@ fn write_manifest(
             "file": video_timing.get("file").cloned().unwrap_or(Value::Null),
             "capture": video_timing,
         },
+        "session_command": state.start_config.get("command").cloned().unwrap_or(Value::Null),
+        "bounded": state.start_config.get("bounded").cloned().unwrap_or(Value::Bool(false)),
+        "bounded_duration_ms": state.start_config.get("bounded_duration_ms").cloned().unwrap_or(Value::Null),
+        "timer_policy": state.start_config.get("timer_policy").cloned().unwrap_or(Value::Null),
+        "stop_trigger": state.start_config.get("stop_trigger").cloned().unwrap_or(Value::Null),
         "session": {
             "state_path": identity.state_path,
             "finalization_path": identity.finalization_path,
             "lock_snapshot_path": identity.lock_snapshot_path,
+            "command": state.start_config.get("command").cloned().unwrap_or(Value::Null),
+            "start_config": state.start_config,
             "lifecycle": state.lifecycle,
             "processes": state.processes,
             "finalization": state.finalization,
@@ -3086,6 +3337,233 @@ mod tests {
         cleanup_paths(&root, &runtime);
     }
 
+    #[test]
+    fn bounded_session_run_uses_same_finalization_path_and_metadata() {
+        let root = unique_temp_dir("session-lifecycle-run");
+        let mut effects = FakeEffects::new("serial-run");
+        let request = HumanSessionRun {
+            start: HumanSessionStart {
+                run_id: String::from("run-bounded"),
+                out: root.clone(),
+                with_evidence: true,
+                full_accessibility_evidence: false,
+                video_enabled: true,
+            },
+            duration_ms: 25_u64,
+        };
+
+        let result = run_human_session_with_effects(&mut effects, &request);
+
+        assert_bounded_run_result(&result);
+        assert_bounded_run_artifacts(&root);
+        let Some(state) = assert_ok(
+            read_state(&root.join("session").join("state.json")),
+            "read bounded state",
+        ) else {
+            return;
+        };
+        assert_bounded_state(&state);
+        assert_bounded_manifest(&root);
+        assert_bounded_lock_snapshot(&root);
+        assert_bounded_validation(&root);
+        assert_bounded_inspection_ready(&root);
+        let runtime = runtime_paths(effects.package_name(), &effects.serial);
+        assert!(
+            !runtime.current.exists() && !runtime.lock.exists(),
+            "bounded run should clear runtime through normal stop"
+        );
+        cleanup_paths(&root, &runtime);
+    }
+
+    fn assert_bounded_run_result(result: &Value) {
+        assert_eq!(result.get("ok").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            result.get("command").and_then(Value::as_str),
+            Some("session run")
+        );
+        assert_eq!(result.get("bounded").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            result.get("duration_ms").and_then(Value::as_u64),
+            Some(25_u64)
+        );
+        assert_eq!(
+            result.pointer("/status/ok").and_then(Value::as_bool),
+            Some(true),
+            "bounded run should inspect active state before stopping"
+        );
+        assert_eq!(
+            result
+                .pointer("/stop/lifecycle_state")
+                .and_then(Value::as_str),
+            Some("complete"),
+            "bounded run should expose terminal stop lifecycle"
+        );
+    }
+
+    fn assert_bounded_run_artifacts(root: &Path) {
+        for relative in [
+            "manifest.json",
+            "validation.json",
+            "adb/getevent.jsonl",
+            "video/screen.mp4",
+            "session/finalization.json",
+        ] {
+            assert!(
+                root.join(relative).exists(),
+                "bounded run should create {relative}"
+            );
+        }
+    }
+
+    fn assert_bounded_state(state: &CaptureSessionState) {
+        assert_eq!(state.lifecycle.state, LifecycleState::Complete);
+        assert_eq!(
+            state
+                .start_config
+                .pointer("/command/name")
+                .and_then(Value::as_str),
+            Some("session run")
+        );
+        assert_eq!(
+            state
+                .start_config
+                .pointer("/command/bounded")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            state
+                .start_config
+                .pointer("/command/duration_ms")
+                .and_then(Value::as_u64),
+            Some(25_u64)
+        );
+    }
+
+    fn assert_bounded_manifest(root: &Path) {
+        let manifest_value = fs::read_to_string(root.join("manifest.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .unwrap_or(Value::Null);
+        assert_eq!(
+            manifest_value
+                .pointer("/session_command/name")
+                .and_then(Value::as_str),
+            Some("session run"),
+            "manifest should expose bounded command metadata"
+        );
+        assert_eq!(
+            manifest_value
+                .pointer("/session/start_config/timer_policy")
+                .and_then(Value::as_str),
+            Some("after_active"),
+            "manifest should expose bounded timer policy"
+        );
+    }
+
+    fn assert_bounded_lock_snapshot(root: &Path) {
+        let lock_snapshot = read_json_file(&root.join("session").join("lock.snapshot.json"));
+        assert_eq!(
+            lock_snapshot
+                .pointer("/command/name")
+                .and_then(Value::as_str),
+            Some("session run"),
+            "lock snapshot should preserve bounded command identity"
+        );
+        assert_eq!(
+            lock_snapshot
+                .pointer("/command/bounded")
+                .and_then(Value::as_bool),
+            Some(true),
+            "lock snapshot should preserve bounded flag"
+        );
+        assert_eq!(
+            lock_snapshot
+                .pointer("/command/duration_ms")
+                .and_then(Value::as_u64),
+            Some(25_u64),
+            "lock snapshot should preserve requested bounded duration"
+        );
+    }
+
+    fn assert_bounded_validation(root: &Path) {
+        let validation = read_json_file(&root.join("validation.json"));
+        assert_eq!(validation.get("ok").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            validation
+                .get("session_start_count")
+                .and_then(Value::as_u64),
+            Some(1_u64)
+        );
+        assert_eq!(
+            validation.get("session_stop_count").and_then(Value::as_u64),
+            Some(1_u64)
+        );
+        assert_eq!(
+            validation
+                .get("session_start_provenance_count")
+                .and_then(Value::as_u64),
+            Some(1_u64)
+        );
+        assert_eq!(
+            validation
+                .get("password_record_count")
+                .and_then(Value::as_u64),
+            Some(0_u64)
+        );
+        assert!(
+            validation
+                .get("key_record_count")
+                .and_then(Value::as_u64)
+                .is_some_and(|count| count > 0_u64),
+            "fake validation should include a key record"
+        );
+        assert!(
+            validation
+                .get("touch_sequence_record_count")
+                .and_then(Value::as_u64)
+                .is_some_and(|count| count > 0_u64),
+            "fake validation should include touch sequence records"
+        );
+        assert!(
+            validation
+                .get("failure_reasons")
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty),
+            "bounded validation should have no failure reasons: {validation}"
+        );
+    }
+
+    fn assert_bounded_inspection_ready(root: &Path) {
+        let Some(inspection) = assert_ok(
+            crate::recording::inspect_recording(root),
+            "inspect bounded run",
+        ) else {
+            return;
+        };
+        assert_eq!(
+            inspection
+                .pointer("/flags/valid_for_analysis")
+                .and_then(Value::as_bool),
+            Some(true),
+            "bounded run should be analysis-ready through inspect: {inspection}"
+        );
+        assert_eq!(
+            inspection
+                .pointer("/flags/needs_validation")
+                .and_then(Value::as_bool),
+            Some(false),
+            "bounded run should not require validation refresh: {inspection}"
+        );
+        assert_eq!(
+            inspection
+                .pointer("/flags/needs_video")
+                .and_then(Value::as_bool),
+            Some(false),
+            "bounded run should satisfy required video presence: {inspection}"
+        );
+    }
+
     fn assert_complete_stop_result(stop: &Value) {
         assert_eq!(
             stop.get("mutated").and_then(Value::as_bool),
@@ -3266,13 +3744,7 @@ mod tests {
             let log_dir = out.join(LOG_DIR);
             fs::create_dir_all(&log_dir)?;
             let run_id = fake_run_id_for_pull(out).unwrap_or_else(|| String::from("run"));
-            fs::write(
-                log_dir.join("session-run.jsonl"),
-                [
-                    format!("{{\"schema\":\"input_dynamics_event.v1\",\"event\":\"session_start\",\"session_id\":\"s\",\"external_run_id\":\"{run_id}\",\"t_wall_ms\":1,\"t_uptime_ms\":1,\"input_actor\":\"human\",\"input_controller\":null,\"input_cadence_policy\":\"manual\",\"target_package\":\"org.example.input\",\"password_field\":false}}\n"),
-                    format!("{{\"schema\":\"input_dynamics_event.v1\",\"event\":\"session_stop\",\"session_id\":\"s\",\"external_run_id\":\"{run_id}\",\"t_wall_ms\":2,\"t_uptime_ms\":2,\"target_package\":\"org.example.input\",\"password_field\":false}}\n"),
-                ].concat(),
-            )?;
+            fs::write(log_dir.join("session-run.jsonl"), fake_ime_jsonl(&run_id)?)?;
             Ok(json!({"ok": true}))
         }
 
@@ -3423,12 +3895,141 @@ mod tests {
                 recommended_state: ProcessState::Stopped,
             }
         }
+
+        fn sleep(&self, _duration: Duration) {}
     }
 
     fn fake_getevent_raw_log() -> &'static str {
         include_str!(
             "../../../crates/input-dynamics-analysis/tests/fixtures/getevent/simple_tap.raw.log"
         )
+    }
+
+    fn fake_ime_jsonl(run_id: &str) -> CliResult<String> {
+        let records = vec![
+            fake_session_start_record(run_id),
+            fake_field_enter_record(run_id),
+            fake_key_down_record(run_id),
+            fake_pointer_sample_record(run_id),
+            fake_session_stop_record(run_id),
+        ];
+        let mut jsonl = String::new();
+        for record in records {
+            jsonl.push_str(&serde_json::to_string(&record)?);
+            jsonl.push('\n');
+        }
+        Ok(jsonl)
+    }
+
+    fn fake_session_start_record(run_id: &str) -> Value {
+        json!({
+            "schema": "input_dynamics_event.v1",
+            "event": "session_start",
+            "session_id": "s",
+            "external_run_id": run_id,
+            "t_wall_ms": 1_u64,
+            "t_uptime_ms": 1_u64,
+            "input_actor": "human",
+            "input_controller": null,
+            "input_cadence_policy": "manual",
+            "target_package": "org.example.input",
+            "password_field": false
+        })
+    }
+
+    fn fake_field_enter_record(run_id: &str) -> Value {
+        json!({
+            "schema": "input_dynamics_event.v1",
+            "event": "field_enter",
+            "session_id": "s",
+            "external_run_id": run_id,
+            "t_wall_ms": 2_u64,
+            "t_uptime_ms": 2_u64,
+            "target_package": "org.example.input",
+            "password_field": false
+        })
+    }
+
+    fn fake_key_down_record(run_id: &str) -> Value {
+        let mut record = fake_timed_input_record(run_id, "key_down");
+        set_json_field(&mut record, "press_id", json!(1_u64));
+        set_json_field(&mut record, "gesture_id", json!(1_u64));
+        record
+    }
+
+    fn fake_pointer_sample_record(run_id: &str) -> Value {
+        let mut record = fake_timed_input_record(run_id, "pointer_sample");
+        set_json_field(&mut record, "press_id", json!(1_u64));
+        set_json_field(&mut record, "gesture_id", json!(1_u64));
+        set_json_field(&mut record, "t_down_uptime_ms", json!(3_u64));
+        set_json_field(&mut record, "t_down_uptime_ns", json!(3_000_000_u64));
+        set_json_field(
+            &mut record,
+            "down_time",
+            timestamp_role_json("android_uptime_ms", "motion_event", "t_down_uptime_ms"),
+        );
+        record
+    }
+
+    fn fake_timed_input_record(run_id: &str, event: &str) -> Value {
+        json!({
+            "schema": "input_dynamics_event.v1",
+            "event": event,
+            "session_id": "s",
+            "external_run_id": run_id,
+            "t_wall_ms": 3_u64,
+            "t_uptime_ms": 3_u64,
+            "t_elapsed_realtime_ns": 5_u64,
+            "t_capture_elapsed_realtime_ns": 4_u64,
+            "t_event_uptime_ms": 3_u64,
+            "t_event_uptime_ns": 3_000_000_u64,
+            "target_package": "org.example.input",
+            "password_field": false,
+            "event_time": timestamp_role_json("android_uptime_ms", "motion_event", "t_event_uptime_ms"),
+            "capture_time": timestamp_role_json("device_elapsed_realtime_ns", "callback_capture", "t_capture_elapsed_realtime_ns"),
+            "write_time": timestamp_role_json("device_elapsed_realtime_ns", "writer", "t_elapsed_realtime_ns"),
+        })
+    }
+
+    fn timestamp_role_json(clock_domain: &str, source: &str, field: &str) -> Value {
+        let mut role = json!({
+            "clock_domain": clock_domain,
+            "timestamp_source": source,
+            "timestamp_precision": if field.ends_with("_ns") { "nanoseconds" } else { "milliseconds" },
+            "field": field,
+        });
+        if field.ends_with("_ms") {
+            set_json_field(
+                &mut role,
+                "field_ns",
+                json!(format!("{}ns", field.trim_end_matches("ms"))),
+            );
+            set_json_field(
+                &mut role,
+                "field_ns_precision",
+                json!("milliseconds_converted_to_nanoseconds"),
+            );
+        }
+        role
+    }
+
+    fn fake_session_stop_record(run_id: &str) -> Value {
+        json!({
+            "schema": "input_dynamics_event.v1",
+            "event": "session_stop",
+            "session_id": "s",
+            "external_run_id": run_id,
+            "t_wall_ms": 4_u64,
+            "t_uptime_ms": 4_u64,
+            "target_package": "org.example.input",
+            "password_field": false
+        })
+    }
+
+    fn set_json_field(record: &mut Value, key: &str, value: Value) {
+        if let Some(object) = record.as_object_mut() {
+            object.insert(String::from(key), value);
+        }
     }
 
     fn fake_run_id_for_pull(out: &Path) -> Option<String> {
@@ -3458,6 +4059,13 @@ mod tests {
                 None
             }
         }
+    }
+
+    fn read_json_file(path: &Path) -> Value {
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .unwrap_or(Value::Null)
     }
 
     fn cleanup_paths(root: &Path, runtime: &RuntimeSessionPaths) {

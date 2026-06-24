@@ -46,7 +46,7 @@ pub struct FfprobeInvocation {
 /// Configuration for deriving an encoded video frame index.
 #[derive(Clone, Debug)]
 pub struct DeriveVideoMapConfig {
-    /// Recording directory created by `input-dynamics record`.
+    /// Recording directory created by the complete session workflow.
     pub recording_dir: PathBuf,
     /// Video-map output directory. Defaults to `derived/video_map`.
     pub output_dir: Option<PathBuf>,

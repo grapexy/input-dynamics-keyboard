@@ -103,7 +103,15 @@ Local release builds use the same project signing key when signing is configured
 app/build/outputs/apk/release/*-release.apk
 ```
 
-Prerelease device smoke should use the canonical complete-session lifecycle:
+Prerelease device smoke should use the canonical bounded session path:
+
+```bash
+RUN_ID=run-YYYYMMDD-HHMMSS-release-bounded-smoke
+input-dynamics session run --input-actor human --run-id "$RUN_ID" --out "runs/$RUN_ID" --duration-ms 10000
+input-dynamics recording inspect --dir "runs/$RUN_ID"
+```
+
+Also run a complete human-operated session before publishing:
 
 ```bash
 RUN_ID=run-YYYYMMDD-HHMMSS-release-smoke

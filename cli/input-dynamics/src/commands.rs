@@ -32,11 +32,11 @@ use crate::profile::{
     self, InterKeyDelaySampling, KeyProfileContext, ProfileProvenance, RuntimeProfile,
 };
 use crate::ratio::{RatioPpm, SignedRatioPpm};
-use crate::record::{RecordConfig, VideoMode, record_run};
 use crate::recording::inspect_recording;
 use crate::session_lifecycle::{
-    HumanSessionStart, SessionStatusRequest, SessionStopRequest, diagnostic_ime_mutation_guard,
-    session_status, start_human_session, stop_session,
+    HumanSessionRun, HumanSessionStart, SessionStatusRequest, SessionStopRequest,
+    diagnostic_ime_mutation_guard, run_human_session, session_status, start_human_session,
+    stop_session,
 };
 use crate::session_state::schema::{COMMAND_RESULT_SCHEMA, INPUT_CONTROLLER_CLI};
 use crate::uinput::{self, PathSpec, TapSpec, TouchPoint};
@@ -263,34 +263,142 @@ fn run_record_command(app: &App, command: &Commands) -> CliResult<Value> {
         ref run_id,
         ref out,
         duration_ms,
-        with_input_controller,
         with_evidence,
         full_accessibility_evidence,
         no_video,
         ref input_actor,
-        ref input_controller,
-        ref input_cadence_policy,
+        ..
     } = command
     else {
         return Err(CliError::new("expected record command"));
     };
-    let config = RecordConfig {
-        run_id: run_id.clone(),
-        out: out.clone(),
-        duration_ms,
-        with_input_controller,
-        with_evidence,
-        full_accessibility_evidence,
-        video_mode: if no_video {
-            VideoMode::Disabled
-        } else {
-            VideoMode::Enabled
+    Ok(legacy_record_removed(
+        app,
+        &LegacyRecordRemovedInput {
+            run_id,
+            out,
+            duration_ms,
+            input_actor,
+            with_evidence,
+            full_accessibility_evidence,
+            no_video,
         },
-        input_actor: input_actor.clone(),
-        input_controller: input_controller.clone(),
-        input_cadence_policy: input_cadence_policy.clone(),
-    };
-    record_run(app, &config)
+    ))
+}
+
+struct LegacyRecordRemovedInput<'a> {
+    run_id: &'a str,
+    out: &'a Path,
+    duration_ms: Option<u64>,
+    input_actor: &'a str,
+    with_evidence: bool,
+    full_accessibility_evidence: bool,
+    no_video: bool,
+}
+
+fn legacy_record_removed(app: &App, input: &LegacyRecordRemovedInput<'_>) -> Value {
+    let normalized_actor = legacy_record_session_actor(input.input_actor);
+    let dropped_legacy_actor =
+        (normalized_actor != input.input_actor).then(|| json!(input.input_actor));
+    let bounded_argv = input
+        .duration_ms
+        .filter(|value| *value > 0_u64)
+        .map(|duration_ms| {
+            legacy_record_session_argv(
+                "run",
+                normalized_actor,
+                input,
+                LegacyRecordSessionOptions {
+                    duration_ms: Some(duration_ms),
+                    include_capture_flags: true,
+                },
+            )
+        });
+    let manual_start_argv = legacy_record_session_argv(
+        "start",
+        normalized_actor,
+        input,
+        LegacyRecordSessionOptions {
+            duration_ms: None,
+            include_capture_flags: true,
+        },
+    );
+    json!({
+        "schema": COMMAND_RESULT_SCHEMA,
+        "ok": false,
+        "command": "record",
+        "error_code": "record_removed",
+        "message": "legacy record is removed from the normal capture workflow and did not mutate state",
+        "mutated": false,
+        "package_name": app.package(),
+        "run_id": input.run_id,
+        "out": input.out,
+        "duration_ms": input.duration_ms,
+        "with_evidence": input.with_evidence,
+        "full_accessibility_evidence": input.full_accessibility_evidence,
+        "no_video": input.no_video,
+        "normalized_input_actor": normalized_actor,
+        "dropped_legacy_actor": dropped_legacy_actor,
+        "suggested_next_command": {
+            "argv": bounded_argv
+                .as_ref()
+                .map_or_else(|| argv_json(&manual_start_argv), |argv| argv_json(argv)),
+            "reason": "use the canonical session workflow; bounded smoke runs use session run --duration-ms, complete human observation uses session start/status/stop",
+        },
+        "alternate_unbounded_workflow": [
+            argv_json(&manual_start_argv),
+            ["input-dynamics", "session", "status", "--run-id", input.run_id],
+            ["input-dynamics", "session", "stop", "--run-id", input.run_id]
+        ],
+    })
+}
+
+#[derive(Clone, Copy)]
+struct LegacyRecordSessionOptions {
+    duration_ms: Option<u64>,
+    include_capture_flags: bool,
+}
+
+fn legacy_record_session_actor(actor: &str) -> &'static str {
+    if actor == "agent" { "agent" } else { "human" }
+}
+
+fn argv_json(argv: &[String]) -> Value {
+    Value::Array(argv.iter().cloned().map(Value::String).collect())
+}
+
+fn legacy_record_session_argv(
+    action: &str,
+    actor: &str,
+    input: &LegacyRecordRemovedInput<'_>,
+    options: LegacyRecordSessionOptions,
+) -> Vec<String> {
+    let mut argv = vec![
+        String::from("input-dynamics"),
+        String::from("session"),
+        String::from(action),
+        String::from("--input-actor"),
+        String::from(actor),
+        String::from("--run-id"),
+        String::from(input.run_id),
+        String::from("--out"),
+        input.out.to_string_lossy().into_owned(),
+    ];
+    if let Some(duration_ms) = options.duration_ms {
+        argv.extend([String::from("--duration-ms"), duration_ms.to_string()]);
+    }
+    if options.include_capture_flags {
+        if input.with_evidence {
+            argv.push(String::from("--with-evidence"));
+        }
+        if input.full_accessibility_evidence {
+            argv.push(String::from("--full-accessibility-evidence"));
+        }
+        if input.no_video {
+            argv.push(String::from("--no-video"));
+        }
+    }
+    argv
 }
 
 fn derive(command: DeriveCommand) -> CliResult<Value> {
@@ -728,6 +836,7 @@ fn start(app: &App, config: &LoggingStartConfig<'_>) -> CliResult<Value> {
 fn session(app: &App, command: SessionCommand) -> Value {
     match command {
         start @ SessionCommand::Start { .. } => session_start(app, start),
+        run @ SessionCommand::Run { .. } => session_run(app, run),
         SessionCommand::Status { run_id } => session_status(app, &SessionStatusRequest { run_id })
             .unwrap_or_else(|error| session_operation_error("session status", &error)),
         SessionCommand::Stop { run_id } => stop_session(app, &SessionStopRequest { run_id })
@@ -778,6 +887,18 @@ struct SessionStartProfile<'a> {
 struct SessionWorkflowUnavailableInput<'a> {
     run_id: &'a str,
     out: &'a Path,
+    actor: &'a str,
+    with_evidence: bool,
+    full_accessibility_evidence: bool,
+    no_video: bool,
+    input_profile: Option<&'a Path>,
+    input_profile_seed: Option<u64>,
+}
+
+struct SessionRunWorkflowUnavailableInput<'a> {
+    run_id: &'a str,
+    out: &'a Path,
+    duration_ms: u64,
     actor: &'a str,
     with_evidence: bool,
     full_accessibility_evidence: bool,
@@ -944,6 +1065,175 @@ fn session_workflow_unavailable(input: &SessionWorkflowUnavailableInput<'_>) -> 
         "session start",
         "session_workflow_unavailable",
         "session start is reserved in this build and did not mutate state",
+        &details,
+    )
+}
+
+fn session_run_out_required(run_id: &str, actor: Option<&str>, duration_ms: Option<u64>) -> Value {
+    let suggested_actor = actor.filter(|value| matches!(*value, "human" | "agent"));
+    let details = json!({
+        "run_id": run_id,
+        "input_actor": actor,
+        "duration_ms": duration_ms,
+        "suggested_next_command": {
+            "argv": ["input-dynamics", "session", "run", "--input-actor", suggested_actor.unwrap_or("human"), "--run-id", run_id, "--out", "<run-dir>", "--duration-ms", duration_ms.unwrap_or(10_000_u64).to_string()],
+            "reason": "--out is required for bounded complete-observation sessions",
+        },
+    });
+    session_command_error(
+        "session run",
+        "session_run_out_required",
+        "session run requires --out for the bounded observation workflow",
+        &details,
+    )
+}
+
+fn session_run_duration_required(run_id: &str, out: &Path, actor: Option<&str>) -> Value {
+    let suggested_actor = actor.filter(|value| matches!(*value, "human" | "agent"));
+    let details = json!({
+        "run_id": run_id,
+        "out": out.to_string_lossy(),
+        "input_actor": actor,
+        "suggested_next_command": {
+            "argv": ["input-dynamics", "session", "run", "--input-actor", suggested_actor.unwrap_or("human"), "--run-id", run_id, "--out", out.to_string_lossy().as_ref(), "--duration-ms", "10000"],
+            "reason": "--duration-ms is required and must be positive",
+        },
+    });
+    session_command_error(
+        "session run",
+        "session_run_duration_required",
+        "session run requires a positive --duration-ms",
+        &details,
+    )
+}
+
+fn session_run_duration_invalid(
+    run_id: &str,
+    out: &Path,
+    duration_ms: u64,
+    actor: Option<&str>,
+) -> Value {
+    let details = json!({
+        "run_id": run_id,
+        "out": out.to_string_lossy(),
+        "duration_ms": duration_ms,
+        "input_actor": actor,
+        "minimum_duration_ms": 1_u64,
+    });
+    session_command_error(
+        "session run",
+        "session_run_duration_invalid",
+        "session run --duration-ms must be positive",
+        &details,
+    )
+}
+
+fn session_run_input_actor_required(run_id: &str, out: &Path, duration_ms: u64) -> Value {
+    let details = json!({
+        "run_id": run_id,
+        "out": out.to_string_lossy(),
+        "duration_ms": duration_ms,
+        "suggested_next_command": {
+            "argv": ["input-dynamics", "session", "run", "--input-actor", "human", "--run-id", run_id, "--out", out.to_string_lossy().as_ref(), "--duration-ms", duration_ms.to_string()],
+            "reason": "choose who is producing input for the bounded run",
+        },
+    });
+    session_command_error(
+        "session run",
+        "session_run_input_actor_required",
+        "session run requires --input-actor human or --input-actor agent",
+        &details,
+    )
+}
+
+fn session_run_input_actor_invalid(
+    run_id: &str,
+    out: &Path,
+    duration_ms: u64,
+    actor: &str,
+) -> Value {
+    let details = json!({
+        "run_id": run_id,
+        "out": out.to_string_lossy(),
+        "duration_ms": duration_ms,
+        "input_actor": actor,
+        "allowed_input_actors": ["human", "agent"],
+    });
+    session_command_error(
+        "session run",
+        "session_run_input_actor_invalid",
+        "session run input actor must be human or agent",
+        &details,
+    )
+}
+
+fn session_run_input_profile_not_allowed(
+    run_id: &str,
+    out: &Path,
+    duration_ms: u64,
+    input_profile: Option<&Path>,
+    input_profile_seed: Option<u64>,
+) -> Value {
+    let details = json!({
+        "run_id": run_id,
+        "out": out.to_string_lossy(),
+        "duration_ms": duration_ms,
+        "input_actor": "human",
+        "input_profile": input_profile.map(|path| path.to_string_lossy().to_string()),
+        "input_profile_seed": input_profile_seed,
+        "suggested_next_command": {
+            "argv": ["input-dynamics", "session", "run", "--input-actor", "human", "--run-id", run_id, "--out", out.to_string_lossy().as_ref(), "--duration-ms", duration_ms.to_string()],
+            "reason": "human sessions use manual cadence and do not have generated input profile provenance",
+        },
+    });
+    session_command_error(
+        "session run",
+        "session_run_input_profile_not_allowed",
+        "human session runs cannot use input profiles or profile seeds",
+        &details,
+    )
+}
+
+fn session_run_workflow_unavailable(input: &SessionRunWorkflowUnavailableInput<'_>) -> Value {
+    let input_controller = derived_session_input_controller(input.actor);
+    let input_cadence_policy = derived_session_cadence_policy(input.actor);
+    let profile_source = derived_session_profile_source(input.actor, input.input_profile);
+    let input_profile = input
+        .input_profile
+        .map(|path| path.to_string_lossy().to_string());
+    let details = json!({
+        "run_id": input.run_id,
+        "out": input.out.to_string_lossy(),
+        "duration_ms": input.duration_ms,
+        "input_actor": input.actor,
+        "input_controller": input_controller,
+        "input_cadence_policy": input_cadence_policy,
+        "with_evidence": input.with_evidence,
+        "full_accessibility_evidence": input.full_accessibility_evidence,
+        "no_video": input.no_video,
+        "input_profile": input_profile,
+        "input_profile_seed": input.input_profile_seed,
+        "profile_provenance": null,
+        "input_provenance": {
+            "input_actor": input.actor,
+            "input_controller": input_controller,
+            "input_cadence_policy": input_cadence_policy,
+            "profile_source": profile_source,
+            "input_profile": input_profile,
+            "input_profile_seed": input.input_profile_seed,
+        },
+        "availability": "reserved",
+        "reason_code": "not_available",
+        "suggested_diagnostic_command": {
+            "argv": ["input-dynamics", "controller", "start", "--run-id", input.run_id],
+            "reason": "agent complete sessions are reserved in this build; controller start is diagnostic live input only and does not create a complete observation bundle",
+            "diagnostic_only": true,
+        },
+    });
+    session_command_error(
+        "session run",
+        "session_run_workflow_unavailable",
+        "session run for this actor is reserved in this build and did not mutate state",
         &details,
     )
 }
@@ -1126,6 +1416,73 @@ fn session_start_with_out(
     })
 }
 
+fn session_run(app: &App, command: SessionCommand) -> Value {
+    let SessionCommand::Run {
+        run_id,
+        out,
+        input_actor,
+        duration_ms,
+        with_evidence,
+        full_accessibility_evidence,
+        no_video,
+        input_profile,
+        input_profile_seed,
+    } = command
+    else {
+        return moved_session_command(command);
+    };
+    let Some(out_path) = out else {
+        return session_run_out_required(&run_id, input_actor.as_deref(), duration_ms);
+    };
+    let Some(duration) = duration_ms else {
+        return session_run_duration_required(&run_id, &out_path, input_actor.as_deref());
+    };
+    if duration == 0_u64 {
+        return session_run_duration_invalid(&run_id, &out_path, duration, input_actor.as_deref());
+    }
+    let Some(actor) = input_actor.as_deref() else {
+        return session_run_input_actor_required(&run_id, &out_path, duration);
+    };
+    if !matches!(actor, "human" | "agent") {
+        return session_run_input_actor_invalid(&run_id, &out_path, duration, actor);
+    }
+    if actor == "human" && (input_profile.is_some() || input_profile_seed.is_some()) {
+        return session_run_input_profile_not_allowed(
+            &run_id,
+            &out_path,
+            duration,
+            input_profile.as_deref(),
+            input_profile_seed,
+        );
+    }
+    if actor == "human" {
+        return run_human_session(
+            app,
+            &HumanSessionRun {
+                start: HumanSessionStart {
+                    run_id,
+                    out: out_path,
+                    with_evidence,
+                    full_accessibility_evidence,
+                    video_enabled: !no_video,
+                },
+                duration_ms: duration,
+            },
+        );
+    }
+    session_run_workflow_unavailable(&SessionRunWorkflowUnavailableInput {
+        run_id: &run_id,
+        out: &out_path,
+        duration_ms: duration,
+        actor,
+        with_evidence,
+        full_accessibility_evidence,
+        no_video,
+        input_profile: input_profile.as_deref(),
+        input_profile_seed,
+    })
+}
+
 fn moved_session_command(command: SessionCommand) -> Value {
     let moved_command = moved_session_argv(command);
     moved_command_value(&moved_command)
@@ -1158,6 +1515,11 @@ fn moved_session_argv(command: SessionCommand) -> MovedCommand {
             deprecated_argv: command_argv("session", "stop"),
             moved_argv: command_argv("controller", "stop"),
             action: "stop",
+        },
+        SessionCommand::Run { .. } => MovedCommand {
+            deprecated_argv: command_argv("session", "run"),
+            moved_argv: command_argv("session", "run"),
+            action: "run",
         },
     }
 }
@@ -2733,7 +3095,7 @@ mod tests {
         controller_not_ready_error, derive_video_map_command, ime_is_registered,
         input_scope_not_ready_error, is_debug_apk, keyboard_layout_visible,
         keyboard_visible_target_node, latest_release_tag_from_json, moved_session_command,
-        planned_type_step, press_key_code, session, type_key_target,
+        planned_type_step, press_key_code, run_record_command, session, type_key_target,
     };
 
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0_u64);
@@ -2891,6 +3253,171 @@ mod tests {
                 "validation-only session start must not create output directory"
             );
         }
+    }
+
+    #[test]
+    fn umbrella_session_run_rejects_invalid_inputs_without_mutation() {
+        let app = test_app();
+        let missing_actor_out = unique_temp_dir("session-run-missing-actor");
+        let zero_duration_out = unique_temp_dir("session-run-zero-duration");
+        let profile_out = unique_temp_dir("session-run-human-profile");
+        let missing_actor = session(
+            &app,
+            SessionCommand::Run {
+                run_id: String::from("run-test"),
+                out: Some(missing_actor_out.clone()),
+                input_actor: None,
+                duration_ms: Some(1_u64),
+                with_evidence: false,
+                full_accessibility_evidence: false,
+                no_video: false,
+                input_profile: None,
+                input_profile_seed: None,
+            },
+        );
+        let zero_duration = session(
+            &app,
+            SessionCommand::Run {
+                run_id: String::from("run-test"),
+                out: Some(zero_duration_out.clone()),
+                input_actor: Some(String::from("human")),
+                duration_ms: Some(0_u64),
+                with_evidence: false,
+                full_accessibility_evidence: false,
+                no_video: false,
+                input_profile: None,
+                input_profile_seed: None,
+            },
+        );
+        let human_profile = session(
+            &app,
+            SessionCommand::Run {
+                run_id: String::from("run-test"),
+                out: Some(profile_out.clone()),
+                input_actor: Some(String::from("human")),
+                duration_ms: Some(1_u64),
+                with_evidence: false,
+                full_accessibility_evidence: false,
+                no_video: false,
+                input_profile: None,
+                input_profile_seed: Some(7_u64),
+            },
+        );
+
+        assert_session_error_command(
+            &missing_actor,
+            "session run",
+            "session_run_input_actor_required",
+        );
+        assert_session_error_command(
+            &zero_duration,
+            "session run",
+            "session_run_duration_invalid",
+        );
+        assert_session_error_command(
+            &human_profile,
+            "session run",
+            "session_run_input_profile_not_allowed",
+        );
+        for out in [missing_actor_out, zero_duration_out, profile_out] {
+            assert!(
+                !out.exists(),
+                "validation-only session run must not create output directory"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_record_command_is_non_mutating_and_points_to_session_run() {
+        let app = test_app();
+        let out = unique_temp_dir("legacy-record-removed");
+        let command = Commands::Record {
+            run_id: String::from("run-test"),
+            out: out.clone(),
+            duration_ms: Some(1000_u64),
+            with_input_controller: false,
+            with_evidence: false,
+            full_accessibility_evidence: false,
+            no_video: false,
+            input_actor: String::from("human"),
+            input_controller: None,
+            input_cadence_policy: String::from("manual"),
+        };
+        let result = run_record_command(&app, &command).unwrap_or_else(|error| error.to_json());
+
+        assert_eq!(
+            result.get("error_code").and_then(Value::as_str),
+            Some("record_removed"),
+            "legacy record should hard-fail: {result}"
+        );
+        assert_eq!(
+            result.get("mutated").and_then(Value::as_bool),
+            Some(false),
+            "legacy record must not mutate"
+        );
+        assert_eq!(
+            result
+                .pointer("/suggested_next_command/argv/1")
+                .and_then(Value::as_str),
+            Some("session"),
+            "legacy record should point to canonical session namespace"
+        );
+        assert_eq!(
+            result
+                .pointer("/suggested_next_command/argv/2")
+                .and_then(Value::as_str),
+            Some("run"),
+            "positive-duration legacy record should point to bounded session run"
+        );
+        assert!(!out.exists(), "legacy record must not create artifacts");
+    }
+
+    #[test]
+    fn legacy_record_suggestion_normalizes_actor_and_preserves_capture_flags() {
+        let app = test_app();
+        let out = unique_temp_dir("legacy-record-flags");
+        let command = Commands::Record {
+            run_id: String::from("run-test"),
+            out: out.clone(),
+            duration_ms: Some(1000_u64),
+            with_input_controller: true,
+            with_evidence: true,
+            full_accessibility_evidence: true,
+            no_video: true,
+            input_actor: String::from("agent_adb"),
+            input_controller: Some(String::from("input-dynamics-cli")),
+            input_cadence_policy: String::from("input_profile"),
+        };
+        let result = run_record_command(&app, &command).unwrap_or_else(|error| error.to_json());
+        let argv = result
+            .pointer("/suggested_next_command/argv")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+
+        assert_eq!(
+            result
+                .pointer("/suggested_next_command/argv/4")
+                .and_then(Value::as_str),
+            Some("human"),
+            "legacy unsupported actor should not be copied into canonical suggestion"
+        );
+        assert_eq!(
+            result.get("dropped_legacy_actor").and_then(Value::as_str),
+            Some("agent_adb"),
+            "record_removed should expose actor normalization"
+        );
+        for flag in [
+            "--with-evidence",
+            "--full-accessibility-evidence",
+            "--no-video",
+        ] {
+            assert!(
+                argv.iter().any(|value| value == flag),
+                "suggested session run should preserve {flag}"
+            );
+        }
+        assert!(!out.exists(), "legacy record must not create artifacts");
     }
 
     #[test]
@@ -3555,6 +4082,10 @@ mod tests {
     }
 
     fn assert_session_error(value: &Value, error_code: &str) {
+        assert_session_error_command(value, "session start", error_code);
+    }
+
+    fn assert_session_error_command(value: &Value, command: &str, error_code: &str) {
         assert_eq!(
             value.get("schema").and_then(Value::as_str),
             Some("input_dynamics_session_command_result.v1"),
@@ -3567,7 +4098,7 @@ mod tests {
         );
         assert_eq!(
             value.get("command").and_then(Value::as_str),
-            Some("session start"),
+            Some(command),
             "session command error should identify the command"
         );
         assert_eq!(

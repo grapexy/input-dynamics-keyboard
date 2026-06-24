@@ -16,7 +16,6 @@ pub(crate) mod output;
 pub(crate) mod process;
 pub(crate) mod profile;
 pub(crate) mod ratio;
-pub(crate) mod record;
 pub(crate) mod recording;
 pub(crate) mod session_lifecycle;
 pub(crate) mod session_process;

@@ -77,6 +77,31 @@ Video is enabled by default for complete sessions and stored under `video/`.
 Treat `video/screen.mp4`, ADB event streams, screenshots, accessibility dumps,
 and pulled JSONL as sensitive local run artifacts.
 
+## Bounded Smoke Session
+
+For smoke tests or externally bounded capture windows, use `session run
+--duration-ms`. It starts the same umbrella lifecycle, waits for the requested
+positive capture window after start succeeds, then finalizes through the same
+stop path. It does not depend on stdin. Current complete-session examples use
+`--input-actor human`; agent-owned complete sessions remain reserved until the
+agent umbrella lifecycle exists.
+
+```bash
+RUN_ID=run-YYYYMMDD-HHMMSS-smoke
+
+cargo run --quiet -p input-dynamics -- session run \
+  --input-actor human \
+  --run-id "$RUN_ID" \
+  --out "runs/$RUN_ID" \
+  --duration-ms 10000
+cargo run --quiet -p input-dynamics -- recording inspect --dir "runs/$RUN_ID"
+```
+
+The output directory has the same artifact layout as `session start/status/stop`.
+Video is enabled by default. Add `--with-evidence` to capture start/end
+observation bundles, and reserve `--no-video` for diagnostics or CI runs that do
+not need video artifacts.
+
 ## Diagnostic Live Input
 
 For live agent-driven input outside a full capture run, use the diagnostic
@@ -224,6 +249,10 @@ scraping human-oriented text.
   touchscreen event capture, runtime state, and finalization metadata. Add
   `--with-evidence` for start/end observation bundles. Use `--no-video` only
   for diagnostics or CI.
+- `session run --input-actor human --run-id <id> --out <dir> --duration-ms
+  <ms>`: runs a bounded capture window for smoke tests or externally bounded
+  capture using the same session lifecycle and finalization path.
+  `--duration-ms` must be positive.
 - `session status [--run-id <id>]`: reads the active umbrella session runtime
   and process liveness without mutating state.
 - `session stop --run-id <id>`: finalizes the active umbrella session, stops
@@ -416,6 +445,10 @@ By default, `manifest.json` includes `video.enabled: true`,
 cleanup status, and the pulled `screen.mp4` file fingerprint. The companion
 `video/timing.json` repeats the video metadata next to the media file for
 artifact-local inspection.
+
+Bounded `session run` manifests identify `session_command.name: "session run"`,
+`bounded: true`, the requested `bounded_duration_ms`, `timer_policy:
+"after_active"`, and `stop_trigger: "duration_elapsed"`.
 
 Timing fields use explicit clock domains. Android input event timestamps are
 in the Android uptime domain, `t_elapsed_realtime_ns` is a session/status

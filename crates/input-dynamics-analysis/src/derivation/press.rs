@@ -18,7 +18,7 @@ const CLOCK_ALIGNMENT_STATUS: &str = "not_estimated";
 /// Configuration for deriving per-press summaries from a recording.
 #[derive(Clone, Debug)]
 pub struct DerivePressesConfig {
-    /// Recording directory created by `input-dynamics record`.
+    /// Recording directory created by the complete session workflow.
     pub recording_dir: PathBuf,
     /// IME session JSONL path. Defaults to the single `ime/session-*.jsonl`.
     pub ime_jsonl: Option<PathBuf>,

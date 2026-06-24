@@ -252,6 +252,7 @@ fn synthetic_lock() -> CaptureSessionLock {
         command: CaptureSessionCommand {
             name: CaptureSessionCommandName::SessionStart,
             bounded: false,
+            duration_ms: None,
         },
         output_dir: String::from("/tmp/input-dynamics-runs/run-synthetic-001"),
         state_path: String::from("/tmp/input-dynamics-runs/run-synthetic-001/session/state.json"),

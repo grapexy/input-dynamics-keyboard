@@ -85,6 +85,14 @@ input-dynamics session stop --run-id "$RUN_ID"
 input-dynamics recording inspect --dir "runs/$RUN_ID"
 ```
 
+Bounded smoke capture:
+
+```bash
+RUN_ID=run-YYYYMMDD-HHMMSS-smoke
+input-dynamics session run --input-actor human --run-id "$RUN_ID" --out "runs/$RUN_ID" --duration-ms 10000
+input-dynamics recording inspect --dir "runs/$RUN_ID"
+```
+
 ```bash
 PKG=org.inputdynamics.ime.debug
 IME=helium314.keyboard.latin.LatinIME

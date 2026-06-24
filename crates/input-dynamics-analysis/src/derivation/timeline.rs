@@ -32,7 +32,7 @@ const EVIDENCE_END_SOURCE_RANK: u8 = 60;
 /// Configuration for deriving a cross-source recording timeline.
 #[derive(Clone, Debug)]
 pub struct DeriveTimelineConfig {
-    /// Recording directory created by `input-dynamics record`.
+    /// Recording directory created by the complete session workflow.
     pub recording_dir: PathBuf,
     /// IME session JSONL path. Defaults to the single `ime/session-*.jsonl`.
     pub ime_jsonl: Option<PathBuf>,

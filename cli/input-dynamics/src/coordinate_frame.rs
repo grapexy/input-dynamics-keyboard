@@ -4,12 +4,16 @@ use std::fs;
 use std::path::Path;
 
 use input_dynamics_analysis::derivation::ScreenConfig;
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 
 use crate::error::{CliError, CliResult};
 
+#[cfg(test)]
 const COORDINATE_FRAME_SCHEMA: &str = "input_dynamics_coordinate_frame.v1";
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ScreenFrame {
     x_min: i64,
@@ -20,6 +24,7 @@ struct ScreenFrame {
     height: i64,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct KeyboardFrame {
     source: String,
@@ -28,6 +33,7 @@ struct KeyboardFrame {
     visible: bool,
 }
 
+#[cfg(test)]
 pub(crate) fn manifest_coordinate_frame(
     touchscreen_snapshot: &Value,
     layout_snapshots: &[(&str, &Value)],
@@ -100,6 +106,7 @@ fn screen_config_from_manifest(manifest: &Value) -> CliResult<ScreenConfig> {
     })
 }
 
+#[cfg(test)]
 fn coordinate_frame_errors(
     screen: Option<ScreenFrame>,
     touchscreen_snapshot: &Value,
@@ -116,6 +123,7 @@ fn coordinate_frame_errors(
     errors
 }
 
+#[cfg(test)]
 fn screen_frame_from_touchscreen(touchscreen: &Value) -> Option<ScreenFrame> {
     let x_min = i64_pointer(touchscreen, "/x_range/minimum")?;
     let x_max = i64_pointer(touchscreen, "/x_range/maximum")?;
@@ -133,6 +141,7 @@ fn screen_frame_from_touchscreen(touchscreen: &Value) -> Option<ScreenFrame> {
     })
 }
 
+#[cfg(test)]
 fn keyboard_frame_from_layout(source: &str, value: &Value) -> Option<KeyboardFrame> {
     let layout = value.get("keyboard_layout")?;
     let available = layout
@@ -156,10 +165,12 @@ fn keyboard_frame_from_layout(source: &str, value: &Value) -> Option<KeyboardFra
     })
 }
 
+#[cfg(test)]
 fn inclusive_size(minimum: i64, maximum: i64) -> Option<i64> {
     maximum.checked_sub(minimum)?.checked_add(1)
 }
 
+#[cfg(test)]
 fn screen_frame_json(frame: ScreenFrame) -> Value {
     json!({
         "width_px": frame.width,
@@ -171,6 +182,7 @@ fn screen_frame_json(frame: ScreenFrame) -> Value {
     })
 }
 
+#[cfg(test)]
 fn keyboard_frame_json(frame: &KeyboardFrame) -> Value {
     json!({
         "source": frame.source,

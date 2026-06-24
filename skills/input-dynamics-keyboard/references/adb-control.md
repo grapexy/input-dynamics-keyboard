@@ -93,6 +93,14 @@ idk session stop --run-id "$RUN_ID"
 idk recording inspect --dir "runs/$RUN_ID"
 ```
 
+Bounded smoke capture:
+
+```bash
+RUN_ID=run-YYYYMMDD-HHMMSS-smoke
+idk session run --input-actor human --run-id "$RUN_ID" --out "runs/$RUN_ID" --duration-ms 10000
+idk recording inspect --dir "runs/$RUN_ID"
+```
+
 ```bash
 RUN_ID=run-YYYYMMDD-HHMMSS-local-android
 

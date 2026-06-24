@@ -551,6 +551,36 @@ pub(crate) enum SessionCommand {
         #[arg(long)]
         input_profile_seed: Option<u64>,
     },
+    /// Run a bounded complete observation session for smoke tests.
+    Run {
+        /// External run id for provenance and finalization.
+        #[arg(long)]
+        run_id: String,
+        /// Required. Local output directory for session artifacts.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Required. Input actor for this run.
+        #[arg(long)]
+        input_actor: Option<String>,
+        /// Required. Positive bounded capture duration in milliseconds.
+        #[arg(long)]
+        duration_ms: Option<u64>,
+        /// Capture start/end observation evidence bundles.
+        #[arg(long)]
+        with_evidence: bool,
+        /// Use full accessibility hierarchy dumps for --with-evidence.
+        #[arg(long, requires = "with_evidence")]
+        full_accessibility_evidence: bool,
+        /// Disable default screen video capture for diagnostics or CI.
+        #[arg(long)]
+        no_video: bool,
+        /// Local input profile JSON file. Supported for agent sessions after agent lifecycle is implemented.
+        #[arg(long)]
+        input_profile: Option<PathBuf>,
+        /// Explicit input profile seed for reproducible sampled input.
+        #[arg(long)]
+        input_profile_seed: Option<u64>,
+    },
     /// Read active umbrella session status.
     Status {
         /// Optional run id selector. When omitted, status reads the active pointer.
@@ -627,6 +657,9 @@ pub(crate) enum ControllerCommand {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::Path;
+
     use clap::{CommandFactory, Parser};
 
     use super::{Cli, Commands, ControllerCommand, ImeCommand, SessionCommand};
@@ -887,6 +920,37 @@ mod tests {
     }
 
     #[test]
+    fn umbrella_session_run_shape_parses_for_json_handling() {
+        let parsed = Cli::try_parse_from([
+            "input-dynamics",
+            "session",
+            "run",
+            "--input-actor",
+            "human",
+            "--run-id",
+            "run-test",
+            "--out",
+            "/tmp/run-test",
+            "--duration-ms",
+            "1000",
+            "--with-evidence",
+        ]);
+
+        assert!(
+            matches!(
+                parsed,
+                Ok(Cli {
+                    command: Commands::Session {
+                        command: SessionCommand::Run { .. }
+                    },
+                    ..
+                })
+            ),
+            "umbrella session run shape should parse so command handling can return JSON"
+        );
+    }
+
+    #[test]
     fn controller_help_is_visible_but_internal_run_is_hidden() {
         let top_help = Cli::command().render_help().to_string();
         let controller_help = Cli::command()
@@ -945,9 +1009,10 @@ mod tests {
         );
         assert!(
             session_help.contains("start")
+                && session_help.contains("run")
                 && session_help.contains("status")
                 && session_help.contains("stop"),
-            "session help should expose start/status/stop"
+            "session help should expose start/run/status/stop"
         );
         assert!(
             direct_start_help.contains("Start a complete observation session")
@@ -982,6 +1047,75 @@ mod tests {
                 "direct hidden session status/stop help should not advertise start-only flags: {help}"
             );
         }
+    }
+
+    #[test]
+    fn session_run_help_advertises_bounded_flags() {
+        let direct_run_help = session_subcommand_help("run");
+
+        assert!(
+            direct_run_help.contains("Run a bounded complete observation session")
+                && direct_run_help.contains("--input-actor")
+                && direct_run_help.contains("--out")
+                && direct_run_help.contains("--duration-ms"),
+            "direct session run help should advertise bounded-run flags: {direct_run_help}"
+        );
+        assert!(
+            !direct_run_help.contains("Start IME logging")
+                && !direct_run_help.contains("Read IME and local input-controller status")
+                && !direct_run_help.contains("Stop the persistent input controller"),
+            "direct session run help should not promote old lifecycle: {direct_run_help}"
+        );
+    }
+
+    #[test]
+    fn public_docs_and_skill_advertise_bounded_session_run_not_record() -> std::io::Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| std::io::Error::other("failed to resolve keyboard repo root"))?;
+        let files = [
+            root.join("README.md"),
+            root.join("docs").join("cli.md"),
+            root.join("docs").join("adb-control.md"),
+            root.join("docs").join("releases.md"),
+            root.join("skills")
+                .join("input-dynamics-keyboard")
+                .join("SKILL.md"),
+            root.join("skills")
+                .join("input-dynamics-keyboard")
+                .join("references")
+                .join("adb-control.md"),
+        ];
+        for path in files {
+            let text = fs::read_to_string(&path)?;
+            if !(text.contains("session run")
+                && text.contains("--input-actor human")
+                && text.contains("--run-id")
+                && text.contains("--out")
+                && text.contains("--duration-ms"))
+            {
+                return Err(doc_contract_error(
+                    &path,
+                    "should document bounded session run with explicit human provenance",
+                ));
+            }
+            let contains_legacy_record = text.contains("record --run-id")
+                || text.contains(" record \\\n")
+                || text.contains("input-dynamics record ")
+                || text.contains("input-dynamics record\n");
+            if contains_legacy_record {
+                return Err(doc_contract_error(
+                    &path,
+                    "should not advertise legacy record",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn doc_contract_error(path: &Path, message: &str) -> std::io::Error {
+        std::io::Error::other(format!("{} {message}", path.display()))
     }
 
     fn session_subcommand_help(name: &str) -> String {

@@ -91,6 +91,18 @@ stream, records screen video, writes normalized `adb/getevent.jsonl`, pulls
 logs, writes `manifest.json`, and writes `validation.json`. Screen video is
 sensitive local recording data.
 
+For a bounded smoke capture that uses the same lifecycle and finalization path:
+
+```bash
+RUN_ID=run-YYYYMMDD-HHMMSS-smoke
+target/debug/input-dynamics session run \
+  --input-actor human \
+  --run-id "$RUN_ID" \
+  --out "runs/$RUN_ID" \
+  --duration-ms 10000
+target/debug/input-dynamics recording inspect --dir "runs/$RUN_ID"
+```
+
 To build and install a local debug APK instead:
 
 ```bash

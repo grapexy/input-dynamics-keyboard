@@ -23,7 +23,7 @@ const CLOCK_ALIGNMENT_NOT_ESTIMATED: &str = "not_estimated";
 /// Configuration for deriving a run-level summary from press summaries.
 #[derive(Clone, Debug)]
 pub struct DeriveRunSummaryConfig {
-    /// Recording directory created by `input-dynamics record`.
+    /// Recording directory created by the complete session workflow.
     pub recording_dir: PathBuf,
     /// Derived press summary JSONL path. Defaults under `recording_dir`.
     pub press_summaries_jsonl: Option<PathBuf>,

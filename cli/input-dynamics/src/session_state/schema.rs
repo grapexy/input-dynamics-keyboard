@@ -107,6 +107,8 @@ pub(crate) enum CaptureSessionCommandName {
 pub(crate) struct CaptureSessionCommand {
     pub(crate) name: CaptureSessionCommandName,
     pub(crate) bounded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) duration_ms: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
