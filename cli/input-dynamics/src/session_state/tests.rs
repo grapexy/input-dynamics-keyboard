@@ -13,10 +13,11 @@ use super::paths::{RunSessionPaths, RuntimeSessionPaths, sanitize_path_component
 use super::schema::{
     ArtifactStatus, CURRENT_SCHEMA, CaptureSessionCommand, CaptureSessionCommandName,
     CaptureSessionCurrent, CaptureSessionLock, CaptureSessionState, CommandErrorEnvelope,
-    FINALIZATION_SCHEMA, FinalizationLedger, FinalizationStep, LOCK_SCHEMA, LifecycleSnapshot,
-    LifecycleState, LockState, ProcessDescriptor, ProcessKind, ProcessState, ProfileProvenance,
-    ReadStatus, RepairResult, Requirement, STATE_SCHEMA, SessionErrorCode, StepStatus,
-    finalization_complete, profile_provenance_value_is_public_safe, required_artifacts_complete,
+    FINALIZATION_SCHEMA, FinalizationLedger, FinalizationStep, InputProvenance, LOCK_SCHEMA,
+    LifecycleSnapshot, LifecycleState, LockState, ProcessDescriptor, ProcessKind, ProcessState,
+    ProfileProvenance, ReadStatus, RepairResult, Requirement, STATE_SCHEMA, SessionErrorCode,
+    StepStatus, finalization_complete, input_provenance_value_is_valid,
+    profile_provenance_value_is_public_safe, required_artifacts_complete,
 };
 
 #[test]
@@ -127,6 +128,42 @@ fn schema_vocabulary_serializes_to_public_contract_names() {
     assert!(
         profile_provenance_value_is_public_safe(&provenance_json),
         "profile provenance struct should serialize to public-safe fields"
+    );
+    let human_input = serde_json::to_value(InputProvenance::human()).unwrap_or(Value::Null);
+    assert_eq!(
+        human_input,
+        json!({
+            "input_actor": "human",
+            "input_controller": null,
+            "input_backend": null,
+            "input_cadence_policy": "manual",
+            "profile_provenance": null,
+        }),
+        "human input provenance should use explicit nulls for non-applicable generated-input fields"
+    );
+    let agent_input = serde_json::to_value(InputProvenance::agent(synthetic_profile_provenance()))
+        .unwrap_or(Value::Null);
+    assert_eq!(
+        agent_input,
+        json!({
+            "input_actor": "agent",
+            "input_controller": "input-dynamics-cli",
+            "input_backend": "uinput",
+            "input_cadence_policy": "input_profile",
+            "profile_provenance": {
+                "source": "bundled",
+                "id": "baseline-v1",
+                "schema": "input_dynamics_profile.v1",
+                "hash": "sha256:abc",
+                "seed": 123_u64,
+                "parameter_count": 4_u64,
+            },
+        }),
+        "agent input provenance should use the complete normalized umbrella actor vocabulary"
+    );
+    assert!(
+        input_provenance_value_is_valid(&agent_input),
+        "agent input provenance should satisfy nested state validation"
     );
 }
 
@@ -256,6 +293,7 @@ fn synthetic_state(lock: &CaptureSessionLock) -> CaptureSessionState {
         updated_wall_ms: 2_u64,
         lifecycle: synthetic_lifecycle(),
         start_config: json!({}),
+        input: InputProvenance::human(),
         artifacts: BTreeMap::new(),
         processes: BTreeMap::from([(String::from("screenrecord"), synthetic_process())]),
         ime: json!({}),
@@ -264,11 +302,28 @@ fn synthetic_state(lock: &CaptureSessionLock) -> CaptureSessionState {
     }
 }
 
+fn synthetic_agent_state(lock: &CaptureSessionLock) -> CaptureSessionState {
+    let mut state = synthetic_state(lock);
+    state.input = InputProvenance::agent(synthetic_profile_provenance());
+    state
+}
+
 fn synthetic_lifecycle() -> LifecycleSnapshot {
     LifecycleSnapshot {
         state: LifecycleState::Active,
         stage: String::from("active"),
         history: Vec::new(),
+    }
+}
+
+fn synthetic_profile_provenance() -> ProfileProvenance {
+    ProfileProvenance {
+        source: String::from("bundled"),
+        id: Some(String::from("baseline-v1")),
+        schema: Some(String::from("input_dynamics_profile.v1")),
+        hash: Some(String::from("sha256:abc")),
+        seed: Some(123_u64),
+        parameter_count: Some(4_u64),
     }
 }
 
@@ -409,6 +464,97 @@ fn read_json_requires_schema_identity_fields() {
         ReadStatus::Corrupt,
         "state JSON missing required identity should be corrupt"
     );
+    cleanup_dir(&root);
+}
+
+#[test]
+fn legacy_state_without_input_remains_readable_during_schema_transition() {
+    let root = unique_temp_dir("session-state-legacy-input-transition");
+    let path = root.join("state.json");
+    let mut legacy_state = synthetic_state_value();
+    if let Some(object) = legacy_state.as_object_mut() {
+        object.remove("input");
+    }
+
+    assert!(
+        write_json_atomic(&path, &legacy_state).is_ok(),
+        "test should write legacy state fixture"
+    );
+
+    let classified = read_json_classified(&path, STATE_SCHEMA);
+    assert_eq!(
+        classified.status,
+        ReadStatus::Valid,
+        "unchanged .v1 states without input provenance should remain readable"
+    );
+    let decode_result =
+        serde_json::from_value::<CaptureSessionState>(classified.value.unwrap_or(Value::Null));
+    assert!(
+        decode_result.is_ok(),
+        "legacy state should deserialize with human input provenance default: {decode_result:?}"
+    );
+    if let Ok(decoded) = decode_result {
+        assert_eq!(
+            decoded.input,
+            InputProvenance::human(),
+            "typed legacy deserialization should default to human input provenance"
+        );
+    }
+    cleanup_dir(&root);
+}
+
+#[test]
+fn state_with_malformed_input_provenance_is_corrupt() {
+    let root = unique_temp_dir("session-state-malformed-input");
+    let bad_inputs = [
+        json!({}),
+        json!({
+            "input_actor": "human",
+            "input_controller": "input-dynamics-cli",
+            "input_backend": null,
+            "input_cadence_policy": "manual",
+            "profile_provenance": null
+        }),
+        json!({
+            "input_actor": "agent",
+            "input_controller": "input-dynamics-cli",
+            "input_backend": "uinput",
+            "input_cadence_policy": "input_profile",
+            "profile_provenance": null
+        }),
+        json!({
+            "input_actor": "agent",
+            "input_controller": "input-dynamics-cli",
+            "input_backend": "uinput",
+            "input_cadence_policy": "input_profile",
+            "profile_provenance": {
+                "source": "profiles/baseline-v1.json",
+                "id": "baseline-v1",
+                "schema": "input_dynamics_profile.v1",
+                "hash": "sha256:abc",
+                "seed": 123_u64,
+                "parameter_count": 4_u64
+            }
+        }),
+    ];
+
+    for (index, input) in bad_inputs.iter().enumerate() {
+        let path = root.join(format!("state-{index}.json"));
+        let mut state = synthetic_state_value();
+        if let Some(object) = state.as_object_mut() {
+            object.insert(String::from("input"), input.clone());
+        }
+        assert!(
+            write_json_atomic(&path, &state).is_ok(),
+            "test should write malformed state fixture {index}"
+        );
+        let classified = read_json_classified(&path, STATE_SCHEMA);
+        assert_eq!(
+            classified.status,
+            ReadStatus::Corrupt,
+            "malformed input provenance should corrupt state fixture {index}"
+        );
+    }
     cleanup_dir(&root);
 }
 
@@ -741,6 +887,7 @@ fn profile_provenance_rejects_private_profile_shapes() {
         }
     });
     let path_under_allowed_key = json!({"source": "/absolute/profile/location.json"});
+    let relative_path_under_allowed_key = json!({"source": "profiles/baseline-v1.json"});
     let learned_value = json!({"source": "bundled", "threshold_ms": 42_u64});
     let nested_distribution = json!({
         "source": "bundled",
@@ -758,6 +905,10 @@ fn profile_provenance_rejects_private_profile_shapes() {
     assert!(
         !profile_provenance_value_is_public_safe(&path_under_allowed_key),
         "allowed string fields should still reject path-like values"
+    );
+    assert!(
+        !profile_provenance_value_is_public_safe(&relative_path_under_allowed_key),
+        "allowed string fields should reject relative path-like values"
     );
     assert!(
         !profile_provenance_value_is_public_safe(&learned_value),
@@ -816,6 +967,7 @@ fn public_fixture_sanitizer_rejects_private_fragments() {
         serde_json::to_value(lock.clone()).unwrap_or(Value::Null),
         serde_json::to_value(synthetic_current(&lock)).unwrap_or(Value::Null),
         serde_json::to_value(synthetic_state(&lock)).unwrap_or(Value::Null),
+        serde_json::to_value(synthetic_agent_state(&lock)).unwrap_or(Value::Null),
         serde_json::to_value(synthetic_finalization(&lock)).unwrap_or(Value::Null),
         serde_json::to_value(synthetic_repair(&lock)).unwrap_or(Value::Null),
         serde_json::to_value(CommandErrorEnvelope::new(

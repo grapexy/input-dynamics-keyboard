@@ -14,6 +14,7 @@ use crate::error::{CliError, CliResult};
 
 use super::schema::{
     CURRENT_SCHEMA, FINALIZATION_SCHEMA, LOCK_SCHEMA, ReadStatus, STATE_SCHEMA, SessionErrorCode,
+    input_provenance_value_is_valid,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -472,6 +473,9 @@ fn malformed_required_fields(value: &Value, schema: &str) -> Vec<String> {
     require_string_fields(value, fields.strings, &mut malformed);
     require_u64_fields(value, fields.u64s, &mut malformed);
     require_object_fields(value, fields.objects, &mut malformed);
+    if schema == STATE_SCHEMA {
+        require_valid_optional_state_input(value, &mut malformed);
+    }
     malformed
 }
 
@@ -542,6 +546,14 @@ fn require_object_fields(value: &Value, fields: &[&str], malformed: &mut Vec<Str
         if !value.get(*field).is_some_and(Value::is_object) {
             malformed.push(String::from(*field));
         }
+    }
+}
+
+fn require_valid_optional_state_input(value: &Value, malformed: &mut Vec<String>) {
+    if let Some(input) = value.get("input")
+        && !input_provenance_value_is_valid(input)
+    {
+        malformed.push(String::from("input"));
     }
 }
 

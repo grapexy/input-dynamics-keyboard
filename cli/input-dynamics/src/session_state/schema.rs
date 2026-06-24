@@ -12,6 +12,7 @@ pub(crate) const LOCK_SCHEMA: &str = "input_dynamics_capture_session_lock.v1";
 pub(crate) const CURRENT_SCHEMA: &str = "input_dynamics_capture_session_current.v1";
 pub(crate) const FINALIZATION_SCHEMA: &str = "input_dynamics_capture_session_finalization.v1";
 pub(crate) const COMMAND_RESULT_SCHEMA: &str = "input_dynamics_session_command_result.v1";
+pub(crate) const INPUT_CONTROLLER_CLI: &str = "input-dynamics-cli";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -167,6 +168,57 @@ pub(crate) struct ProfileProvenance {
     pub(crate) parameter_count: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum InputActor {
+    Human,
+    Agent,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum InputBackend {
+    Uinput,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum InputCadencePolicy {
+    Manual,
+    InputProfile,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct InputProvenance {
+    pub(crate) input_actor: InputActor,
+    pub(crate) input_controller: Option<String>,
+    pub(crate) input_backend: Option<InputBackend>,
+    pub(crate) input_cadence_policy: InputCadencePolicy,
+    pub(crate) profile_provenance: Option<ProfileProvenance>,
+}
+
+impl InputProvenance {
+    pub(crate) const fn human() -> Self {
+        Self {
+            input_actor: InputActor::Human,
+            input_controller: None,
+            input_backend: None,
+            input_cadence_policy: InputCadencePolicy::Manual,
+            profile_provenance: None,
+        }
+    }
+
+    pub(crate) fn agent(profile_provenance: ProfileProvenance) -> Self {
+        Self {
+            input_actor: InputActor::Agent,
+            input_controller: Some(String::from(INPUT_CONTROLLER_CLI)),
+            input_backend: Some(InputBackend::Uinput),
+            input_cadence_policy: InputCadencePolicy::InputProfile,
+            profile_provenance: Some(profile_provenance),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct SuggestedNextCommand {
     pub(crate) argv: Vec<String>,
@@ -272,6 +324,8 @@ pub(crate) struct CaptureSessionState {
     pub(crate) updated_wall_ms: u64,
     pub(crate) lifecycle: LifecycleSnapshot,
     pub(crate) start_config: Value,
+    #[serde(default = "InputProvenance::human")]
+    pub(crate) input: InputProvenance,
     pub(crate) artifacts: BTreeMap<String, ArtifactStatus>,
     pub(crate) processes: BTreeMap<String, ProcessDescriptor>,
     pub(crate) ime: Value,
@@ -460,6 +514,57 @@ pub(crate) fn profile_provenance_value_is_public_safe(value: &Value) -> bool {
     })
 }
 
+pub(crate) fn input_provenance_value_is_valid(value: &Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    if object.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "input_actor"
+                | "input_controller"
+                | "input_backend"
+                | "input_cadence_policy"
+                | "profile_provenance"
+        )
+    }) {
+        return false;
+    }
+    match object.get("input_actor").and_then(Value::as_str) {
+        Some("human") => human_input_provenance_value_is_valid(value),
+        Some("agent") => agent_input_provenance_value_is_valid(value),
+        Some(_) | None => false,
+    }
+}
+
+fn human_input_provenance_value_is_valid(value: &Value) -> bool {
+    value.get("input_controller").is_some_and(Value::is_null)
+        && value.get("input_backend").is_some_and(Value::is_null)
+        && value
+            .get("input_cadence_policy")
+            .and_then(Value::as_str)
+            .is_some_and(|policy| policy == "manual")
+        && value.get("profile_provenance").is_some_and(Value::is_null)
+}
+
+fn agent_input_provenance_value_is_valid(value: &Value) -> bool {
+    value
+        .get("input_controller")
+        .and_then(Value::as_str)
+        .is_some_and(|controller| controller == INPUT_CONTROLLER_CLI)
+        && value
+            .get("input_backend")
+            .and_then(Value::as_str)
+            .is_some_and(|backend| backend == "uinput")
+        && value
+            .get("input_cadence_policy")
+            .and_then(Value::as_str)
+            .is_some_and(|policy| policy == "input_profile")
+        && value
+            .get("profile_provenance")
+            .is_some_and(profile_provenance_value_is_public_safe)
+}
+
 fn public_safe_optional_string(value: &Value) -> bool {
     value.is_null()
         || value
@@ -470,6 +575,7 @@ fn public_safe_optional_string(value: &Value) -> bool {
 fn string_has_private_location_shape(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     value.starts_with('/')
+        || value.contains('/')
         || value.contains('\\')
         || lower.contains("://")
         || lower.contains("/users/")
