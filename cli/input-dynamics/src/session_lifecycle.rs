@@ -29,7 +29,7 @@ use crate::session_state::schema::{
     CaptureSessionCurrent, CaptureSessionLock, CaptureSessionState, FINALIZATION_SCHEMA,
     FinalizationLedger, FinalizationOwner, FinalizationStep, InputProvenance, LOCK_SCHEMA,
     LifecycleSnapshot, LifecycleState, LockState, ProcessDescriptor, ProcessState, ReadStatus,
-    Requirement, STATE_SCHEMA, StepStatus, finalization_complete,
+    Requirement, STATE_SCHEMA, SessionErrorCode, StepStatus, finalization_complete,
 };
 use crate::validate::validate_logs;
 
@@ -656,6 +656,10 @@ fn session_status_with_effects(
         "lock_read": classified_json(&loaded.lock_read),
         "identity_mismatches": loaded.identity_mismatches,
         "process_liveness": loaded.process_liveness,
+        "failure_conditions": status_failure_conditions(
+            &loaded.process_liveness,
+            current.get("run_id").and_then(Value::as_str),
+        ),
     }))
 }
 
@@ -749,6 +753,38 @@ fn status_process_liveness(
         process_liveness.insert(name.clone(), process_liveness_json(&liveness));
     }
     process_liveness
+}
+
+fn status_failure_conditions(
+    process_liveness: &BTreeMap<String, Value>,
+    run_id: Option<&str>,
+) -> Vec<Value> {
+    let mut failures = Vec::new();
+    if let Some(screenrecord) = process_liveness.get(SCREENRECORD_PROCESS) {
+        let status = screenrecord.get("status").and_then(Value::as_str);
+        if status.is_some_and(screenrecord_ended_early_status) {
+            let selected_run_id = run_id.unwrap_or("<run-id>");
+            failures.push(json!({
+                "error_code": SessionErrorCode::VideoEndedEarly,
+                "process": SCREENRECORD_PROCESS,
+                "status": status,
+                "message": "screenrecord ended before session stop was requested",
+                "recommended_next_action": "session_stop",
+                "recommended_argv": [
+                    "input-dynamics",
+                    "session",
+                    "stop",
+                    "--run-id",
+                    selected_run_id,
+                ],
+            }));
+        }
+    }
+    failures
+}
+
+fn screenrecord_ended_early_status(status: &str) -> bool {
+    matches!(status, "exited" | "missing")
 }
 
 fn stop_session_with_effects(
@@ -981,10 +1017,14 @@ fn stop_process_step(
         && active.state.processes.contains_key(SCREENRECORD_PROCESS))
     .then(|| effects.capture_clock_probe("before_screenrecord_stop"));
     let stop = stop_named_process(effects, &active.identity, &mut active.state, process_name);
+    let mut stop_value = result_value(&stop);
+    if process_name == SCREENRECORD_PROCESS {
+        annotate_screenrecord_stop_result(&mut stop_value);
+    }
     if process_name == SCREENRECORD_PROCESS
         && active.state.processes.contains_key(SCREENRECORD_PROCESS)
     {
-        let timing = capture_video_stop_timing(effects, timing_before, &stop);
+        let timing = capture_video_stop_timing(effects, timing_before, &stop_value);
         if let Ok(value) = timing.as_ref() {
             let _set =
                 set_start_config_value(&mut active.state, "video_stop_timing", value.clone());
@@ -995,22 +1035,41 @@ fn stop_process_step(
             result_value(&timing),
         );
     }
-    record_step(
+    record_step_value(
         ledger,
         stop_step_name(process_name),
         process_requirement(&active.state, process_name),
-        &stop,
+        &stop_value,
     );
-    outcomes.insert(
-        String::from(stop_step_name(process_name)),
-        result_value(&stop),
+    outcomes.insert(String::from(stop_step_name(process_name)), stop_value);
+}
+
+fn annotate_screenrecord_stop_result(value: &mut Value) {
+    let initial_status = value
+        .pointer("/initial_liveness/status")
+        .and_then(Value::as_str);
+    if value.get("ok").and_then(Value::as_bool) != Some(false)
+        || !initial_status.is_some_and(screenrecord_ended_early_status)
+    {
+        return;
+    }
+    set_json_object_field(value, "video_ended_early", json!(true));
+    set_json_object_field(
+        value,
+        "error_code",
+        json!(SessionErrorCode::VideoEndedEarly),
+    );
+    set_json_object_field(
+        value,
+        "message",
+        json!("screenrecord ended before stop was requested"),
     );
 }
 
 fn capture_video_stop_timing(
     effects: &dyn LifecycleEffects,
     before_result: Option<CliResult<Value>>,
-    stop: &CliResult<Value>,
+    stop: &Value,
 ) -> CliResult<Value> {
     let before_marker = before_result
         .ok_or_else(|| CliError::new("screenrecord stop timing was not requested"))??;
@@ -1020,7 +1079,7 @@ fn capture_video_stop_timing(
         "ok": true,
         "before": before_marker,
         "after": after,
-        "stop": result_value(stop),
+        "stop": stop,
     }))
 }
 
@@ -2206,6 +2265,10 @@ fn record_step_value(
             ledger.failure_stage = Some(String::from(name));
         }
     }
+    step.error_code = value
+        .get("error_code")
+        .and_then(Value::as_str)
+        .map(String::from);
     ledger.steps.push(step);
 }
 
@@ -3131,6 +3194,121 @@ mod tests {
     }
 
     #[test]
+    fn status_reports_screenrecord_ended_early_without_mutation() {
+        let root = unique_temp_dir("session-lifecycle-status-video-ended");
+        let mut effects = FakeEffects::new("serial-status-video-ended");
+        let request = HumanSessionStart {
+            run_id: String::from("run-status-video-ended"),
+            out: root.clone(),
+            with_evidence: false,
+            full_accessibility_evidence: false,
+            video_enabled: true,
+        };
+        let Some(_start) = assert_ok(
+            start_human_session_with_effects(&mut effects, &request),
+            "fake video start",
+        ) else {
+            return;
+        };
+        let Some(before_state) = assert_ok(
+            read_state(&root.join("session").join("state.json")),
+            "read state before status",
+        ) else {
+            return;
+        };
+        effects.set_screenrecord_probe_status(ProcessLivenessStatus::Exited);
+
+        let Some(status) = assert_ok(
+            session_status_with_effects(
+                &effects,
+                &SessionStatusRequest {
+                    run_id: Some(String::from("run-status-video-ended")),
+                },
+            ),
+            "status after screenrecord exit",
+        ) else {
+            return;
+        };
+
+        assert_eq!(
+            status
+                .pointer("/process_liveness/screenrecord/status")
+                .and_then(Value::as_str),
+            Some("exited")
+        );
+        assert_video_ended_early_status_condition(&status, "exited", "run-status-video-ended");
+        let Some(after_state) = assert_ok(
+            read_state(&root.join("session").join("state.json")),
+            "read state after status",
+        ) else {
+            return;
+        };
+        assert_eq!(
+            before_state, after_state,
+            "status must report early video exit without mutating state"
+        );
+        let runtime = runtime_paths(effects.package_name(), &effects.serial);
+        cleanup_paths(&root, &runtime);
+    }
+
+    #[test]
+    fn status_reports_missing_screenrecord_as_ended_early() {
+        let root = unique_temp_dir("session-lifecycle-status-video-missing");
+        let mut effects = FakeEffects::new("serial-status-video-missing");
+        start_fake_video_session(&root, &mut effects, "run-status-video-missing");
+        effects.set_screenrecord_probe_status(ProcessLivenessStatus::Missing);
+
+        let Some(status) = assert_ok(
+            session_status_with_effects(
+                &effects,
+                &SessionStatusRequest {
+                    run_id: Some(String::from("run-status-video-missing")),
+                },
+            ),
+            "status after missing screenrecord",
+        ) else {
+            return;
+        };
+
+        assert_video_ended_early_status_condition(&status, "missing", "run-status-video-missing");
+        let runtime = runtime_paths(effects.package_name(), &effects.serial);
+        cleanup_paths(&root, &runtime);
+    }
+
+    #[test]
+    fn status_does_not_label_probe_failure_as_video_ended_early() {
+        let root = unique_temp_dir("session-lifecycle-status-video-probe-failed");
+        let mut effects = FakeEffects::new("serial-status-video-probe-failed");
+        start_fake_video_session(&root, &mut effects, "run-status-video-probe-failed");
+        effects.set_screenrecord_probe_status(ProcessLivenessStatus::ProbeFailed);
+
+        let Some(status) = assert_ok(
+            session_status_with_effects(
+                &effects,
+                &SessionStatusRequest {
+                    run_id: Some(String::from("run-status-video-probe-failed")),
+                },
+            ),
+            "status after screenrecord probe failure",
+        ) else {
+            return;
+        };
+
+        assert_eq!(
+            status
+                .pointer("/process_liveness/screenrecord/status")
+                .and_then(Value::as_str),
+            Some("probe_failed")
+        );
+        assert_eq!(
+            status.get("failure_conditions").and_then(Value::as_array),
+            Some(&Vec::new())
+        );
+        let runtime = runtime_paths(effects.package_name(), &effects.serial);
+        cleanup_paths(&root, &runtime);
+    }
+
+    #[test]
     fn status_reports_lock_only_runtime_as_repair_required() {
         let root = unique_temp_dir("session-lifecycle-lock-only");
         let mut effects = FakeEffects::new("serial-lock-only");
@@ -3375,6 +3553,230 @@ mod tests {
         cleanup_paths(&root, &runtime);
     }
 
+    #[test]
+    fn stop_reports_screenrecord_ended_early() {
+        let root = unique_temp_dir("session-lifecycle-video-ended-early");
+        let mut effects = FakeEffects::new("serial-video-ended");
+        let request = HumanSessionStart {
+            run_id: String::from("run-video-ended-early"),
+            out: root.clone(),
+            with_evidence: false,
+            full_accessibility_evidence: false,
+            video_enabled: true,
+        };
+        let Some(_start) = assert_ok(
+            start_human_session_with_effects(&mut effects, &request),
+            "fake video start",
+        ) else {
+            return;
+        };
+        effects.set_screenrecord_probe_status(ProcessLivenessStatus::Exited);
+
+        let Some(stop) = assert_ok(
+            stop_session_with_effects(
+                &mut effects,
+                &SessionStopRequest {
+                    run_id: Some(String::from("run-video-ended-early")),
+                },
+            ),
+            "fake early video stop",
+        ) else {
+            return;
+        };
+
+        assert_video_ended_early_stop_result(&stop);
+        let Some(inspection) = assert_ok(
+            crate::recording::inspect_recording(&root),
+            "inspect early video stop",
+        ) else {
+            return;
+        };
+        assert_video_ended_early_inspection(&inspection);
+        let runtime = runtime_paths(effects.package_name(), &effects.serial);
+        cleanup_paths(&root, &runtime);
+    }
+
+    #[test]
+    fn stop_reports_missing_screenrecord_as_ended_early() {
+        let root = unique_temp_dir("session-lifecycle-video-missing");
+        let mut effects = FakeEffects::new("serial-video-missing");
+        start_fake_video_session(&root, &mut effects, "run-video-missing");
+        effects.set_screenrecord_probe_status(ProcessLivenessStatus::Missing);
+
+        let Some(stop) = assert_ok(
+            stop_session_with_effects(
+                &mut effects,
+                &SessionStopRequest {
+                    run_id: Some(String::from("run-video-missing")),
+                },
+            ),
+            "fake missing video stop",
+        ) else {
+            return;
+        };
+
+        assert_video_ended_early_stop_result(&stop);
+        let Some(inspection) = assert_ok(
+            crate::recording::inspect_recording(&root),
+            "inspect missing video stop",
+        ) else {
+            return;
+        };
+        assert_video_ended_early_inspection(&inspection);
+        let runtime = runtime_paths(effects.package_name(), &effects.serial);
+        cleanup_paths(&root, &runtime);
+    }
+
+    #[test]
+    fn stop_does_not_label_probe_failure_as_video_ended_early() {
+        let root = unique_temp_dir("session-lifecycle-video-probe-failed");
+        let mut effects = FakeEffects::new("serial-video-probe-failed");
+        start_fake_video_session(&root, &mut effects, "run-video-probe-failed");
+        effects.set_screenrecord_probe_status(ProcessLivenessStatus::ProbeFailed);
+
+        let Some(stop) = assert_ok(
+            stop_session_with_effects(
+                &mut effects,
+                &SessionStopRequest {
+                    run_id: Some(String::from("run-video-probe-failed")),
+                },
+            ),
+            "fake probe-failed video stop",
+        ) else {
+            return;
+        };
+
+        assert_eq!(
+            stop.pointer("/outcomes/stop_screenrecord/error_code")
+                .and_then(Value::as_str),
+            None
+        );
+        let Some(inspection) = assert_ok(
+            crate::recording::inspect_recording(&root),
+            "inspect probe-failed video stop",
+        ) else {
+            return;
+        };
+        assert_eq!(
+            inspection
+                .pointer("/flags/video_ended_early")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        let runtime = runtime_paths(effects.package_name(), &effects.serial);
+        cleanup_paths(&root, &runtime);
+    }
+
+    fn start_fake_video_session(root: &Path, effects: &mut FakeEffects, run_id: &str) {
+        let request = HumanSessionStart {
+            run_id: String::from(run_id),
+            out: root.to_path_buf(),
+            with_evidence: false,
+            full_accessibility_evidence: false,
+            video_enabled: true,
+        };
+        let start = start_human_session_with_effects(effects, &request);
+        assert!(start.is_ok(), "fake video start failed: {start:?}");
+    }
+
+    fn assert_video_ended_early_status_condition(status: &Value, state: &str, run_id: &str) {
+        assert_eq!(
+            status
+                .pointer("/process_liveness/screenrecord/status")
+                .and_then(Value::as_str),
+            Some(state)
+        );
+        assert_eq!(
+            status
+                .pointer("/failure_conditions/0/error_code")
+                .and_then(Value::as_str),
+            Some("video_ended_early")
+        );
+        assert_eq!(
+            status
+                .pointer("/failure_conditions/0/recommended_next_action")
+                .and_then(Value::as_str),
+            Some("session_stop")
+        );
+        assert_eq!(
+            status.pointer("/failure_conditions/0/recommended_argv/4"),
+            Some(&json!(run_id))
+        );
+    }
+
+    fn assert_video_ended_early_stop_result(stop: &Value) {
+        assert_eq!(
+            stop.get("ok").and_then(Value::as_bool),
+            Some(false),
+            "screenrecord early exit should make the run incomplete"
+        );
+        assert_eq!(
+            stop.get("lifecycle_state").and_then(Value::as_str),
+            Some("incomplete")
+        );
+        assert_eq!(
+            stop.pointer("/outcomes/stop_screenrecord/video_ended_early")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            stop.pointer("/outcomes/stop_screenrecord/error_code")
+                .and_then(Value::as_str),
+            Some("video_ended_early")
+        );
+        assert_eq!(
+            stop.pointer("/finalization/run_state")
+                .and_then(Value::as_str),
+            Some("incomplete")
+        );
+        assert!(
+            finalization_has_step_error(stop, "stop_screenrecord", "video_ended_early"),
+            "finalization step should carry stable video error code: {stop}"
+        );
+    }
+
+    fn assert_video_ended_early_inspection(inspection: &Value) {
+        assert_eq!(
+            inspection
+                .pointer("/session/classification")
+                .and_then(Value::as_str),
+            Some("incomplete")
+        );
+        assert_eq!(
+            inspection
+                .pointer("/session/finalization/summary/failed_step_error_codes/stop_screenrecord")
+                .and_then(Value::as_str),
+            Some("video_ended_early")
+        );
+        assert_eq!(
+            inspection
+                .pointer("/flags/video_ended_early")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            inspection
+                .pointer("/flags/needs_session_rerun")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(
+            next_actions_has_kind(inspection, "session_rerun"),
+            "early video inspection should expose a canonical rerun action: {inspection}"
+        );
+    }
+
+    fn next_actions_has_kind(inspection: &Value, kind: &str) -> bool {
+        inspection
+            .get("next_actions")
+            .and_then(Value::as_array)
+            .is_some_and(|actions| {
+                actions
+                    .iter()
+                    .any(|action| action.get("kind").and_then(Value::as_str) == Some(kind))
+            })
+    }
+
     fn assert_bounded_run_result(result: &Value) {
         assert_eq!(result.get("ok").and_then(Value::as_bool), Some(true));
         assert_eq!(
@@ -3588,6 +3990,17 @@ mod tests {
         );
     }
 
+    fn finalization_has_step_error(stop: &Value, step_name: &str, error_code: &str) -> bool {
+        stop.pointer("/finalization/steps")
+            .and_then(Value::as_array)
+            .is_some_and(|steps| {
+                steps.iter().any(|step| {
+                    step.get("name").and_then(Value::as_str) == Some(step_name)
+                        && step.get("error_code").and_then(Value::as_str) == Some(error_code)
+                })
+            })
+    }
+
     fn assert_final_manifest(root: &Path) {
         let manifest_value = fs::read_to_string(root.join("manifest.json"))
             .ok()
@@ -3686,6 +4099,7 @@ mod tests {
         adb: String,
         serial: String,
         next_pid: Cell<u32>,
+        screenrecord_probe_status: Cell<ProcessLivenessStatus>,
     }
 
     impl FakeEffects {
@@ -3696,7 +4110,12 @@ mod tests {
                 adb: String::from("adb"),
                 serial: format!("{serial_suffix}-{}-{id}", process::id()),
                 next_pid: Cell::new(10_000_u32),
+                screenrecord_probe_status: Cell::new(ProcessLivenessStatus::Running),
             }
+        }
+
+        fn set_screenrecord_probe_status(&self, status: ProcessLivenessStatus) {
+            self.screenrecord_probe_status.set(status);
         }
     }
 
@@ -3863,17 +4282,37 @@ mod tests {
         }
 
         fn probe_process(&self, descriptor: &ProcessDescriptor) -> ProcessLiveness {
+            let status = if descriptor.name == SCREENRECORD_PROCESS {
+                self.screenrecord_probe_status.get()
+            } else {
+                ProcessLivenessStatus::Running
+            };
             ProcessLiveness {
-                status: ProcessLivenessStatus::Running,
+                status,
                 host_pid: descriptor.host_pid,
                 host_process_group_id: descriptor.host_process_group_id,
-                observed_process_group_id: descriptor.host_process_group_id,
+                observed_process_group_id: (status != ProcessLivenessStatus::Missing)
+                    .then_some(descriptor.host_process_group_id)
+                    .flatten(),
                 message: None,
             }
         }
 
         fn stop_process(&mut self, descriptor: &ProcessDescriptor) -> StopOutcome {
             let initial = self.probe_process(descriptor);
+            if initial.status != ProcessLivenessStatus::Running {
+                return StopOutcome {
+                    ok: false,
+                    method: descriptor
+                        .stop_method
+                        .as_deref()
+                        .and_then(|method| method.parse::<StopMethod>().ok()),
+                    final_liveness: initial.clone(),
+                    initial_liveness: initial,
+                    attempts: Vec::new(),
+                    recommended_state: ProcessState::Failed,
+                };
+            }
             let final_liveness = ProcessLiveness {
                 status: ProcessLivenessStatus::Missing,
                 host_pid: descriptor.host_pid,

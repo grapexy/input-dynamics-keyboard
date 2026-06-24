@@ -17,7 +17,7 @@ use crate::error::{CliError, CliResult};
 use crate::session_state::io::read_json_classified;
 use crate::session_state::schema::{
     CaptureSessionLock, CaptureSessionState, FINALIZATION_SCHEMA, FinalizationLedger, LOCK_SCHEMA,
-    ReadStatus, STATE_SCHEMA,
+    ReadStatus, STATE_SCHEMA, SessionErrorCode,
 };
 use crate::validate::validate_logs;
 
@@ -122,6 +122,18 @@ enum SessionClassification {
     Active,
     InProgress,
     Stale,
+}
+
+#[derive(Clone, Copy)]
+enum EvidenceRefresh {
+    Include,
+    Omit,
+}
+
+impl EvidenceRefresh {
+    const fn include(self) -> bool {
+        matches!(self, Self::Include)
+    }
 }
 
 impl SessionClassification {
@@ -521,6 +533,21 @@ fn finalization_summary(value: &Value) -> Value {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let failed_step_error_codes = value
+        .get("steps")
+        .and_then(Value::as_array)
+        .map(|steps| {
+            steps
+                .iter()
+                .filter(|step| step.get("status").and_then(Value::as_str) == Some("failed"))
+                .filter_map(|step| {
+                    let name = step.get("name").and_then(Value::as_str)?;
+                    let error_code = step.get("error_code").and_then(Value::as_str)?;
+                    Some((String::from(name), json!(error_code)))
+                })
+                .collect::<Map<_, _>>()
+        })
+        .unwrap_or_default();
     json!({
         "run_id": value.get("run_id").cloned().unwrap_or(Value::Null),
         "run_state": value.get("run_state").cloned().unwrap_or(Value::Null),
@@ -533,6 +560,7 @@ fn finalization_summary(value: &Value) -> Value {
             .and_then(Value::as_array)
             .map_or(Value::Null, |steps| json!(steps.len())),
         "failed_steps": failed_steps,
+        "failed_step_error_codes": failed_step_error_codes,
     })
 }
 
@@ -2409,6 +2437,12 @@ fn flags_json(inputs: &FlagInputs<'_>) -> Value {
     let needs_canonical_evidence = bool_at(&inputs.clock.value, "/evidence/requested")
         && !bool_at(&inputs.clock.value, "/evidence/canonical");
     let session_blocks_analysis = inputs.session_state.classification.blocks_analysis();
+    let video_ended_early = finalization_has_error_code(
+        &inputs.session_state.finalization.summary,
+        SessionErrorCode::VideoEndedEarly,
+    );
+    let needs_session_rerun =
+        video_ended_early || inputs.session_state.classification.is_incomplete();
     let incomplete_or_superseded = !inputs.validation.current_ok
         || session_blocks_analysis
         || inputs
@@ -2452,10 +2486,22 @@ fn flags_json(inputs: &FlagInputs<'_>) -> Value {
         "session_classification": inputs.session_state.classification.as_str(),
         "needs_session_stop": inputs.session_state.classification.needs_stop(),
         "needs_session_repair": inputs.session_state.classification.needs_repair(),
+        "video_ended_early": video_ended_early,
+        "needs_session_rerun": needs_session_rerun,
         "has_sensitive_evidence": has_evidence || has_video,
         "incomplete_or_superseded": incomplete_or_superseded,
         "needs_cleanup": needs_cleanup(inputs.manifest),
     })
+}
+
+fn finalization_has_error_code(summary: &Value, error_code: SessionErrorCode) -> bool {
+    let Ok(expected) = serde_json::to_value(error_code) else {
+        return false;
+    };
+    summary
+        .get("failed_step_error_codes")
+        .and_then(Value::as_object)
+        .is_some_and(|codes| codes.values().any(|code| code == &expected))
 }
 
 fn next_actions(
@@ -2614,84 +2660,109 @@ fn session_run_id(session: &SessionInspection) -> Option<&str> {
 }
 
 fn add_session_next_action(actions: &mut Vec<Value>, flags: &Value) {
-    if bool_at(flags, "/needs_video") || bool_at(flags, "/needs_canonical_recording") {
-        let include_evidence = bool_at(flags, "/needs_canonical_evidence");
-        let kind = if bool_at(flags, "/needs_video") {
-            "session_with_video"
+    if session_refresh_needed(flags) {
+        let evidence = if bool_at(flags, "/needs_canonical_evidence") {
+            EvidenceRefresh::Include
         } else {
-            "session_with_canonical_clocks"
+            EvidenceRefresh::Omit
         };
-        let mut start_command = String::from(
-            "input-dynamics session start --input-actor human --run-id <new-run-id> --out <new-run-dir>",
-        );
-        if include_evidence {
-            start_command.push_str(" --with-evidence");
-        }
-        let start_argv = if include_evidence {
-            json!([
-                "input-dynamics",
-                "session",
-                "start",
-                "--input-actor",
-                "human",
-                "--run-id",
-                "<new-run-id>",
-                "--out",
-                "<new-run-dir>",
-                "--with-evidence"
-            ])
-        } else {
-            json!([
-                "input-dynamics",
-                "session",
-                "start",
-                "--input-actor",
-                "human",
-                "--run-id",
-                "<new-run-id>",
-                "--out",
-                "<new-run-dir>"
-            ])
-        };
-        let commands = json!([
-            {
-                "step": "start",
-                "command": start_command.clone(),
-                "argv": start_argv,
-            },
-            {
-                "step": "status",
-                "command": "input-dynamics session status --run-id <new-run-id>",
-                "argv": ["input-dynamics", "session", "status", "--run-id", "<new-run-id>"],
-            },
-            {
-                "step": "stop",
-                "command": "input-dynamics session stop --run-id <new-run-id>",
-                "argv": ["input-dynamics", "session", "stop", "--run-id", "<new-run-id>"],
-            },
-            {
-                "step": "inspect",
-                "command": "input-dynamics recording inspect --dir <new-run-dir>",
-                "argv": ["input-dynamics", "recording", "inspect", "--dir", "<new-run-dir>"],
-            },
-        ]);
-        let reason = match (include_evidence, bool_at(flags, "/needs_video")) {
-            (true, true) => {
-                "rerun with video and evidence to refresh request-correlated device clock anchors"
-            }
-            (true, false) => {
-                "rerun with evidence to refresh request-correlated device clock anchors"
-            }
-            (false, true) => "rerun with video to refresh request-correlated device clock anchors",
-            (false, false) => "start a new session to refresh device clock anchors",
-        };
+        let kind = session_refresh_kind(flags);
+        let start_command = session_refresh_start_command(evidence);
+        let commands = session_refresh_commands(&start_command, evidence);
         actions.push(json!({
             "kind": kind,
             "workflow": "session_start_status_stop_inspect",
             "command": start_command,
             "commands": commands,
-            "reason": reason,
+            "reason": session_refresh_reason(flags, evidence),
         }));
+    }
+}
+
+fn session_refresh_needed(flags: &Value) -> bool {
+    bool_at(flags, "/needs_session_rerun")
+        || bool_at(flags, "/needs_video")
+        || bool_at(flags, "/needs_canonical_recording")
+}
+
+fn session_refresh_kind(flags: &Value) -> &'static str {
+    if bool_at(flags, "/needs_session_rerun") {
+        "session_rerun"
+    } else if bool_at(flags, "/needs_video") {
+        "session_with_video"
+    } else {
+        "session_with_canonical_clocks"
+    }
+}
+
+fn session_refresh_start_command(evidence: EvidenceRefresh) -> String {
+    let mut command = String::from(
+        "input-dynamics session start --input-actor human --run-id <new-run-id> --out <new-run-dir>",
+    );
+    if evidence.include() {
+        command.push_str(" --with-evidence");
+    }
+    command
+}
+
+fn session_refresh_commands(start_command: &str, evidence: EvidenceRefresh) -> Value {
+    json!([
+        {
+            "step": "start",
+            "command": start_command,
+            "argv": session_refresh_start_argv(evidence),
+        },
+        {
+            "step": "status",
+            "command": "input-dynamics session status --run-id <new-run-id>",
+            "argv": ["input-dynamics", "session", "status", "--run-id", "<new-run-id>"],
+        },
+        {
+            "step": "stop",
+            "command": "input-dynamics session stop --run-id <new-run-id>",
+            "argv": ["input-dynamics", "session", "stop", "--run-id", "<new-run-id>"],
+        },
+        {
+            "step": "inspect",
+            "command": "input-dynamics recording inspect --dir <new-run-dir>",
+            "argv": ["input-dynamics", "recording", "inspect", "--dir", "<new-run-dir>"],
+        },
+    ])
+}
+
+fn session_refresh_start_argv(evidence: EvidenceRefresh) -> Value {
+    let mut argv = vec![
+        "input-dynamics",
+        "session",
+        "start",
+        "--input-actor",
+        "human",
+        "--run-id",
+        "<new-run-id>",
+        "--out",
+        "<new-run-dir>",
+    ];
+    if evidence.include() {
+        argv.push("--with-evidence");
+    }
+    json!(argv)
+}
+
+fn session_refresh_reason(flags: &Value, evidence: EvidenceRefresh) -> &'static str {
+    if bool_at(flags, "/video_ended_early") {
+        return "rerun because screen recording ended before session finalization";
+    }
+    match (evidence, bool_at(flags, "/needs_video")) {
+        (EvidenceRefresh::Include, true) => {
+            "rerun with video and evidence to refresh request-correlated device clock anchors"
+        }
+        (EvidenceRefresh::Include, false) => {
+            "rerun with evidence to refresh request-correlated device clock anchors"
+        }
+        (EvidenceRefresh::Omit, true) => {
+            "rerun with video to refresh request-correlated device clock anchors"
+        }
+        (EvidenceRefresh::Omit, false) => "start a new session to refresh device clock anchors",
     }
 }
 

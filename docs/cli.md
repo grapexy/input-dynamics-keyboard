@@ -254,7 +254,10 @@ scraping human-oriented text.
   capture using the same session lifecycle and finalization path.
   `--duration-ms` must be positive.
 - `session status [--run-id <id>]`: reads the active umbrella session runtime
-  and process liveness without mutating state.
+  and process liveness without mutating state. If an owned capture process has
+  ended early, `failure_conditions` reports a stable `error_code`,
+  `recommended_next_action`, and `recommended_argv`; stop/finalize the matching
+  run id before analysis.
 - `session stop --run-id <id>`: finalizes the active umbrella session, stops
   capture processes, pulls IME logs, writes validation, and clears runtime
   ownership. Omitting `--run-id` is non-mutating and returns the active run id.
@@ -506,7 +509,7 @@ flags such as `valid_for_analysis`, `has_video`, `needs_video`,
 `needs_video_frame_index`, `has_video_map`, `needs_video_map`,
 `session_classification`, `lifecycle_complete`, `lifecycle_incomplete`,
 `lifecycle_active`, `lifecycle_in_progress`, `needs_session_stop`, and
-`needs_session_repair`.
+`needs_session_repair`, `video_ended_early`, and `needs_session_rerun`.
 
 For umbrella-session recordings, inspect also reports a summarized `session`
 object sourced from `session/state.json`, `session/finalization.json`, and
@@ -542,14 +545,18 @@ with `start`, `status`, `stop`, and `inspect` steps. The compatibility
 `command` field mirrors the first `start` step only; agents should execute the
 full `commands` sequence. Current action kinds are `validate`,
 `session_with_video`, `session_with_canonical_clocks`, `session_stop`,
-`session_status`, `session_repair_required`, `derive_presses`,
+`session_rerun`, `session_status`, `session_repair_required`, `derive_presses`,
 `derive_summary`, `derive_dismissals`, `derive_timeline`, and
 `derive_video_map`. Branch first on `flags.session_classification`: `complete`
 may proceed to artifact and timing gates; `active` should execute
 `session_stop`; `in_progress` should execute `session_status` and inspect again;
 `incomplete`, `aborted`, and `repair_required` must not be derived or analyzed
-as complete; `untracked_legacy` uses legacy artifact gates. It does not probe
-the device or derive new clock alignment.
+as complete; `untracked_legacy` uses legacy artifact gates. `recording inspect`
+does not probe the device or derive new clock alignment. If
+`flags.video_ended_early` is true, the screen recording process ended before
+finalization; treat the run as incomplete, preserve it for diagnostics, and
+capture a new session through the same `session start/status/stop/inspect`
+workflow.
 
 Treat `valid_for_analysis` as a base artifact/readability gate. For any
 video/evidence anchor claim, cross-source timeline claim, or ordering claim that
