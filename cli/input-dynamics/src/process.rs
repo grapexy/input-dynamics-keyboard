@@ -46,6 +46,27 @@ impl StdinProcess {
     }
 }
 
+#[derive(Debug)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct SpawnedProcess {
+    child: Child,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl SpawnedProcess {
+    pub(crate) fn child_id(&self) -> u32 {
+        self.child.id()
+    }
+
+    pub(crate) fn try_wait(&mut self) -> CliResult<Option<ExitStatus>> {
+        Ok(self.child.try_wait()?)
+    }
+
+    pub(crate) fn wait(&mut self) -> CliResult<ExitStatus> {
+        Ok(self.child.wait()?)
+    }
+}
+
 impl ProcessOutput {
     pub(crate) fn stdout(&self) -> &str {
         &self.stdout
@@ -127,6 +148,17 @@ pub(crate) fn spawn_process_to_files(
         ))
     })?;
     Ok(child)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn spawn_detached_process_to_files(
+    program: &str,
+    args: &[String],
+    stdout_path: &Path,
+    stderr_path: &Path,
+) -> CliResult<SpawnedProcess> {
+    spawn_process_to_files(program, args, stdout_path, stderr_path)
+        .map(|child| SpawnedProcess { child })
 }
 
 pub(crate) fn spawn_process_with_stdin_to_files(
