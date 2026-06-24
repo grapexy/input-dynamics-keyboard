@@ -8,11 +8,17 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use input_dynamics_analysis::clock::{AlignmentStatus, ClockDomain};
+use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::clock_probe::{validate_probe_marker, validate_probe_order};
 use crate::error::{CliError, CliResult};
+use crate::session_state::io::read_json_classified;
+use crate::session_state::schema::{
+    CaptureSessionLock, CaptureSessionState, FINALIZATION_SCHEMA, FinalizationLedger, LOCK_SCHEMA,
+    ReadStatus, STATE_SCHEMA,
+};
 use crate::validate::validate_logs;
 
 const INSPECTION_SCHEMA: &str = "input_dynamics_recording_inspection.v1";
@@ -94,8 +100,91 @@ struct ClockInspection {
     warnings: Vec<String>,
 }
 
+struct SessionInspection {
+    state: SessionFileInspection,
+    finalization: SessionFileInspection,
+    lock_snapshot: SessionFileInspection,
+    classification: SessionClassification,
+    lifecycle_state: Option<String>,
+    finalization_run_state: Option<String>,
+    command: Value,
+    stale_reasons: Vec<String>,
+    warnings: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SessionClassification {
+    UntrackedLegacy,
+    RepairRequired,
+    Complete,
+    Incomplete,
+    Aborted,
+    Active,
+    InProgress,
+    Stale,
+}
+
+impl SessionClassification {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::UntrackedLegacy => "untracked_legacy",
+            Self::RepairRequired => "repair_required",
+            Self::Complete => "complete",
+            Self::Incomplete => "incomplete",
+            Self::Aborted => "aborted",
+            Self::Active => "active",
+            Self::InProgress => "in_progress",
+            Self::Stale => "stale",
+        }
+    }
+
+    const fn is_complete(self) -> bool {
+        matches!(self, Self::Complete)
+    }
+
+    const fn is_incomplete(self) -> bool {
+        matches!(self, Self::Incomplete | Self::Aborted)
+    }
+
+    const fn is_active_or_in_progress(self) -> bool {
+        matches!(self, Self::Active | Self::InProgress)
+    }
+
+    const fn is_active(self) -> bool {
+        matches!(self, Self::Active)
+    }
+
+    const fn is_in_progress(self) -> bool {
+        matches!(self, Self::InProgress)
+    }
+
+    const fn needs_stop(self) -> bool {
+        matches!(self, Self::Active)
+    }
+
+    const fn needs_repair(self) -> bool {
+        matches!(self, Self::RepairRequired)
+    }
+
+    const fn blocks_analysis(self) -> bool {
+        !matches!(self, Self::UntrackedLegacy | Self::Complete)
+    }
+}
+
+struct SessionFileInspection {
+    present: bool,
+    status: String,
+    path: String,
+    schema: Value,
+    error: Option<String>,
+    summary: Value,
+}
+
+type SessionJsonValidator = fn(Value) -> Result<(), serde_json::Error>;
+
 struct FlagInputs<'a> {
     manifest: Option<&'a Value>,
+    session_state: &'a SessionInspection,
     session: &'a SessionSelection,
     validation: &'a ValidationInspection,
     run_summary: &'a RunSummaryInspection,
@@ -126,6 +215,7 @@ pub(crate) fn inspect_recording(dir: &Path) -> CliResult<Value> {
             .and_then(OsStr::to_str)
             .map(ToOwned::to_owned)
     });
+    let session_state = inspect_session_state(dir);
     let session = select_session_jsonl(dir)?;
     let validation = inspect_validation(dir, &validation_path, external_run_id.as_deref());
     let run_summary = inspect_run_summary(dir)?;
@@ -137,6 +227,7 @@ pub(crate) fn inspect_recording(dir: &Path) -> CliResult<Value> {
     let note_flags = note_flags(dir)?;
     let flag_inputs = FlagInputs {
         manifest: manifest_ref,
+        session_state: &session_state,
         session: &session,
         validation: &validation,
         run_summary: &run_summary,
@@ -148,13 +239,14 @@ pub(crate) fn inspect_recording(dir: &Path) -> CliResult<Value> {
         note_flags: &note_flags,
     };
     let flags = flags_json(&flag_inputs);
-    let next_actions = next_actions(dir, external_run_id.as_deref(), &flags)?;
+    let next_actions = next_actions(dir, &session_state, external_run_id.as_deref(), &flags)?;
     let warnings = warnings(&flag_inputs);
     Ok(inspection_json(&InspectionJson {
         dir,
         external_run_id,
         manifest_ref,
         artifacts,
+        session_state: &session_state,
         session: &session,
         validation: &validation,
         run_summary: &run_summary,
@@ -174,6 +266,7 @@ struct InspectionJson<'a> {
     external_run_id: Option<String>,
     manifest_ref: Option<&'a Value>,
     artifacts: Value,
+    session_state: &'a SessionInspection,
     session: &'a SessionSelection,
     validation: &'a ValidationInspection,
     run_summary: &'a RunSummaryInspection,
@@ -192,7 +285,7 @@ fn inspection_json(input: &InspectionJson<'_>) -> Value {
         "ok": true,
         "schema": INSPECTION_SCHEMA,
         "cli_version": env!("CARGO_PKG_VERSION"),
-        "recording_dir": path_text(input.dir),
+        "recording_dir": ".",
         "external_run_id": input.external_run_id,
         "package_name": string_at(input.manifest_ref, "/package_name"),
         "provenance": provenance_json(input.manifest_ref),
@@ -203,13 +296,9 @@ fn inspection_json(input: &InspectionJson<'_>) -> Value {
             .cloned()
             .unwrap_or(Value::Null),
         "artifacts": input.artifacts,
+        "session": session_state_json(input.session_state),
         "session_jsonl": session_json(input.dir, input.session),
-        "validation": {
-            "stored_present": input.validation.stored_present,
-            "stored": input.validation.stored,
-            "current": input.validation.current,
-            "stale_reasons": input.validation.stale_reasons,
-        },
+        "validation": validation_json(input.dir, input.validation),
         "run_summary": {
             "exists": input.run_summary.exists,
             "stale_reasons": input.run_summary.stale_reasons,
@@ -251,6 +340,443 @@ fn require_directory(dir: &Path) -> CliResult<()> {
         )));
     }
     Ok(())
+}
+
+fn inspect_session_state(dir: &Path) -> SessionInspection {
+    let state = inspect_session_file(
+        dir,
+        &dir.join("session").join("state.json"),
+        STATE_SCHEMA,
+        session_state_summary,
+        validate_session_json::<CaptureSessionState>,
+    );
+    let finalization = inspect_session_file(
+        dir,
+        &dir.join("session").join("finalization.json"),
+        FINALIZATION_SCHEMA,
+        finalization_summary,
+        validate_session_json::<FinalizationLedger>,
+    );
+    let lock_snapshot = inspect_session_file(
+        dir,
+        &dir.join("session").join("lock.snapshot.json"),
+        LOCK_SCHEMA,
+        lock_snapshot_summary,
+        validate_session_json::<CaptureSessionLock>,
+    );
+    let lifecycle_state = string_from_summary(&state.summary, "lifecycle_state");
+    let finalization_run_state = string_from_summary(&finalization.summary, "run_state");
+    let command = session_command_summary(&state, &lock_snapshot);
+    let stale_reasons = session_stale_reasons(&state, &finalization, &lock_snapshot);
+    let classification = session_classification(&SessionClassificationInput {
+        state: &state,
+        finalization: &finalization,
+        lock_snapshot: &lock_snapshot,
+        lifecycle_state: lifecycle_state.as_deref(),
+        finalization_run_state: finalization_run_state.as_deref(),
+        embedded_finalization_state: state
+            .summary
+            .get("finalization_run_state")
+            .and_then(Value::as_str),
+        stale_reasons: &stale_reasons,
+    });
+    let warnings = session_warnings(&state, &finalization, &stale_reasons);
+    SessionInspection {
+        state,
+        finalization,
+        lock_snapshot,
+        classification,
+        lifecycle_state,
+        finalization_run_state,
+        command,
+        stale_reasons,
+        warnings,
+    }
+}
+
+fn inspect_session_file(
+    dir: &Path,
+    path: &Path,
+    expected_schema: &str,
+    summarize: fn(&Value) -> Value,
+    validate: SessionJsonValidator,
+) -> SessionFileInspection {
+    let classified = read_json_classified(path, expected_schema);
+    let present = classified.status != ReadStatus::Missing;
+    let schema = classified
+        .observed_schema
+        .as_ref()
+        .map_or(Value::Null, |schema| json!(schema));
+    if classified.status != ReadStatus::Valid {
+        return SessionFileInspection {
+            present,
+            status: read_status_text(classified.status),
+            path: relative_path_text(dir, path),
+            schema,
+            error: classified.message,
+            summary: Value::Null,
+        };
+    }
+    let Some(value) = classified.value else {
+        return SessionFileInspection {
+            present,
+            status: String::from("corrupt"),
+            path: relative_path_text(dir, path),
+            schema,
+            error: Some(String::from("valid read had no JSON value")),
+            summary: Value::Null,
+        };
+    };
+    if let Err(error) = validate(value.clone()) {
+        return SessionFileInspection {
+            present: true,
+            status: String::from("corrupt"),
+            path: relative_path_text(dir, path),
+            schema,
+            error: Some(error.to_string()),
+            summary: Value::Null,
+        };
+    }
+    SessionFileInspection {
+        present: true,
+        status: String::from("valid"),
+        path: relative_path_text(dir, path),
+        schema,
+        error: None,
+        summary: summarize(&value),
+    }
+}
+
+fn string_from_summary(summary: &Value, key: &str) -> Option<String> {
+    summary
+        .get(key)
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn session_command_summary(
+    state: &SessionFileInspection,
+    lock_snapshot: &SessionFileInspection,
+) -> Value {
+    state
+        .summary
+        .get("command")
+        .cloned()
+        .or_else(|| lock_snapshot.summary.get("command").cloned())
+        .unwrap_or(Value::Null)
+}
+
+fn validate_session_json<T>(value: Value) -> Result<(), serde_json::Error>
+where
+    T: DeserializeOwned,
+{
+    serde_json::from_value::<T>(value).map(|_parsed| ())
+}
+
+fn read_status_text(status: ReadStatus) -> String {
+    match status {
+        ReadStatus::Missing => "missing",
+        ReadStatus::Valid => "valid",
+        ReadStatus::Mismatched => "mismatched",
+        ReadStatus::Corrupt => "corrupt",
+        ReadStatus::UnsupportedSchema => "unsupported_schema",
+        ReadStatus::Stale => "stale",
+        ReadStatus::IoError => "io_error",
+    }
+    .to_owned()
+}
+
+fn session_state_summary(value: &Value) -> Value {
+    json!({
+        "run_id": value.get("run_id").cloned().unwrap_or(Value::Null),
+        "package_name": value.get("package_name").cloned().unwrap_or(Value::Null),
+        "device_serial": value.get("device_serial").cloned().unwrap_or(Value::Null),
+        "lifecycle_state": value.pointer("/lifecycle/state").cloned().unwrap_or(Value::Null),
+        "lifecycle_stage": value.pointer("/lifecycle/stage").cloned().unwrap_or(Value::Null),
+        "history_count": value
+            .pointer("/lifecycle/history")
+            .and_then(Value::as_array)
+            .map_or(Value::Null, |history| json!(history.len())),
+        "command": value.pointer("/start_config/command").cloned().unwrap_or(Value::Null),
+        "input": value.get("input").cloned().unwrap_or(Value::Null),
+        "finalization_run_state": value.pointer("/finalization/run_state").cloned().unwrap_or(Value::Null),
+        "finalization_cleanup_ok": value.pointer("/finalization/cleanup_ok").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn finalization_summary(value: &Value) -> Value {
+    let failure_count = value
+        .get("failure_reasons")
+        .and_then(Value::as_array)
+        .map_or(Value::Null, |reasons| json!(reasons.len()));
+    let failed_steps = value
+        .get("steps")
+        .and_then(Value::as_array)
+        .map(|steps| {
+            steps
+                .iter()
+                .filter(|step| step.get("status").and_then(Value::as_str) == Some("failed"))
+                .filter_map(|step| step.get("name").and_then(Value::as_str))
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    json!({
+        "run_id": value.get("run_id").cloned().unwrap_or(Value::Null),
+        "run_state": value.get("run_state").cloned().unwrap_or(Value::Null),
+        "failure_stage": value.get("failure_stage").cloned().unwrap_or(Value::Null),
+        "failure_reason_count": failure_count,
+        "cleanup_attempted": value.get("cleanup_attempted").cloned().unwrap_or(Value::Null),
+        "cleanup_ok": value.get("cleanup_ok").cloned().unwrap_or(Value::Null),
+        "step_count": value
+            .get("steps")
+            .and_then(Value::as_array)
+            .map_or(Value::Null, |steps| json!(steps.len())),
+        "failed_steps": failed_steps,
+    })
+}
+
+fn lock_snapshot_summary(value: &Value) -> Value {
+    json!({
+        "run_id": value.get("run_id").cloned().unwrap_or(Value::Null),
+        "package_name": value.get("package_name").cloned().unwrap_or(Value::Null),
+        "device_serial": value.get("device_serial").cloned().unwrap_or(Value::Null),
+        "lock_state": value.get("lock_state").cloned().unwrap_or(Value::Null),
+        "observed_lifecycle_state": value.get("observed_lifecycle_state").cloned().unwrap_or(Value::Null),
+        "command": value.get("command").cloned().unwrap_or(Value::Null),
+        "mutation_seq": value.get("mutation_seq").cloned().unwrap_or(Value::Null),
+    })
+}
+
+struct SessionClassificationInput<'a> {
+    state: &'a SessionFileInspection,
+    finalization: &'a SessionFileInspection,
+    lock_snapshot: &'a SessionFileInspection,
+    lifecycle_state: Option<&'a str>,
+    finalization_run_state: Option<&'a str>,
+    embedded_finalization_state: Option<&'a str>,
+    stale_reasons: &'a [String],
+}
+
+fn session_classification(input: &SessionClassificationInput<'_>) -> SessionClassification {
+    if !input.state.present {
+        if input.finalization.present || input.lock_snapshot.present {
+            return SessionClassification::RepairRequired;
+        }
+        return SessionClassification::UntrackedLegacy;
+    }
+    if session_needs_repair(input) {
+        return SessionClassification::RepairRequired;
+    }
+    if session_is_complete(input) {
+        return SessionClassification::Complete;
+    }
+    if input.lifecycle_state == Some("aborted") {
+        return SessionClassification::Aborted;
+    }
+    if session_is_incomplete(input) {
+        return SessionClassification::Incomplete;
+    }
+    if input.lifecycle_state == Some("active") {
+        return SessionClassification::Active;
+    }
+    if lifecycle_is_in_progress(input.lifecycle_state) {
+        return SessionClassification::InProgress;
+    }
+    SessionClassification::Stale
+}
+
+fn session_is_complete(input: &SessionClassificationInput<'_>) -> bool {
+    input.state.status == "valid"
+        && input.finalization.status == "valid"
+        && input.lock_snapshot.status == "valid"
+        && input.lifecycle_state == Some("complete")
+        && input.finalization_run_state == Some("complete")
+        && input
+            .embedded_finalization_state
+            .is_none_or(|state| state == "complete")
+}
+
+fn session_is_incomplete(input: &SessionClassificationInput<'_>) -> bool {
+    input
+        .lifecycle_state
+        .is_some_and(|state| matches!(state, "incomplete" | "aborted"))
+        || input
+            .finalization_run_state
+            .is_some_and(|state| matches!(state, "incomplete" | "aborted"))
+}
+
+fn session_needs_repair(input: &SessionClassificationInput<'_>) -> bool {
+    [input.state, input.finalization, input.lock_snapshot]
+        .iter()
+        .any(|file| {
+            matches!(
+                file.status.as_str(),
+                "io_error" | "corrupt" | "unsupported_schema"
+            )
+        })
+        || input.stale_reasons.iter().any(|reason| {
+            matches!(
+                reason.as_str(),
+                "session finalization is missing"
+                    | "session lock snapshot is missing"
+                    | "session finalization exists without session state"
+                    | "session lock snapshot exists without session state"
+                    | "session state and finalization run ids differ"
+                    | "session state and lock snapshot run ids differ"
+                    | "session state and lock snapshot package names differ"
+                    | "session state and lock snapshot device serials differ"
+                    | "embedded and standalone finalization states differ"
+            )
+        })
+}
+
+fn lifecycle_is_in_progress(lifecycle_state: Option<&str>) -> bool {
+    lifecycle_state.is_some_and(|state| {
+        matches!(
+            state,
+            "starting"
+                | "ime_started"
+                | "video_started"
+                | "getevent_started"
+                | "start_evidence_captured"
+                | "controller_started"
+                | "stop_requested"
+                | "stopping"
+                | "end_evidence_capturing"
+                | "finalizing"
+        )
+    })
+}
+
+fn session_stale_reasons(
+    state: &SessionFileInspection,
+    finalization: &SessionFileInspection,
+    lock_snapshot: &SessionFileInspection,
+) -> Vec<String> {
+    let mut reasons = Vec::new();
+    append_session_file_reason(&mut reasons, "session state", state);
+    append_session_file_reason(&mut reasons, "session finalization", finalization);
+    append_session_file_reason(&mut reasons, "session lock snapshot", lock_snapshot);
+    if state_lifecycle_value(state) == Some("complete") && !finalization.present {
+        reasons.push(String::from("session finalization is missing"));
+    }
+    if state.present && !lock_snapshot.present {
+        reasons.push(String::from("session lock snapshot is missing"));
+    }
+    if !state.present && finalization.present {
+        reasons.push(String::from(
+            "session finalization exists without session state",
+        ));
+    }
+    if !state.present && lock_snapshot.present {
+        reasons.push(String::from(
+            "session lock snapshot exists without session state",
+        ));
+    }
+    if state.summary.get("run_id") != finalization.summary.get("run_id")
+        && state.present
+        && finalization.present
+    {
+        reasons.push(String::from(
+            "session state and finalization run ids differ",
+        ));
+    }
+    append_summary_mismatch_reason(
+        &mut reasons,
+        state,
+        lock_snapshot,
+        "run_id",
+        "session state and lock snapshot run ids differ",
+    );
+    append_summary_mismatch_reason(
+        &mut reasons,
+        state,
+        lock_snapshot,
+        "package_name",
+        "session state and lock snapshot package names differ",
+    );
+    append_summary_mismatch_reason(
+        &mut reasons,
+        state,
+        lock_snapshot,
+        "device_serial",
+        "session state and lock snapshot device serials differ",
+    );
+    if let (Some(state_value), Some(finalization_value)) = (
+        state.summary.get("finalization_run_state"),
+        finalization.summary.get("run_state"),
+    ) {
+        if !state_value.is_null()
+            && !finalization_value.is_null()
+            && state_value != finalization_value
+        {
+            reasons.push(String::from(
+                "embedded and standalone finalization states differ",
+            ));
+        }
+    }
+    reasons
+}
+
+fn session_lifecycle_is_terminal(state: &SessionFileInspection) -> bool {
+    state_lifecycle_value(state)
+        .is_some_and(|lifecycle| matches!(lifecycle, "complete" | "incomplete" | "aborted"))
+}
+
+fn state_lifecycle_value(state: &SessionFileInspection) -> Option<&str> {
+    state.summary.get("lifecycle_state").and_then(Value::as_str)
+}
+
+fn append_summary_mismatch_reason(
+    reasons: &mut Vec<String>,
+    left: &SessionFileInspection,
+    right: &SessionFileInspection,
+    key: &str,
+    reason: &str,
+) {
+    if !left.present || !right.present {
+        return;
+    }
+    let left_value = left.summary.get(key).unwrap_or(&Value::Null);
+    let right_value = right.summary.get(key).unwrap_or(&Value::Null);
+    if !left_value.is_null() && !right_value.is_null() && left_value != right_value {
+        reasons.push(String::from(reason));
+    }
+}
+
+fn append_session_file_reason(
+    reasons: &mut Vec<String>,
+    label: &str,
+    file: &SessionFileInspection,
+) {
+    match file.status.as_str() {
+        "missing" | "valid" => {}
+        status => reasons.push(format!("{label} status is {status}")),
+    }
+}
+
+fn session_warnings(
+    state: &SessionFileInspection,
+    finalization: &SessionFileInspection,
+    stale_reasons: &[String],
+) -> Vec<String> {
+    let mut warnings = stale_reasons.to_vec();
+    if state.summary.get("lifecycle_state").and_then(Value::as_str) == Some("incomplete") {
+        warnings.push(String::from("umbrella session lifecycle is incomplete"));
+    }
+    if state.summary.get("lifecycle_state").and_then(Value::as_str) == Some("aborted") {
+        warnings.push(String::from("umbrella session lifecycle is aborted"));
+    }
+    if finalization
+        .summary
+        .get("run_state")
+        .and_then(Value::as_str)
+        == Some("incomplete")
+    {
+        warnings.push(String::from("umbrella session finalization is incomplete"));
+    }
+    warnings
 }
 
 fn inspect_validation(
@@ -1436,6 +1962,7 @@ fn timeline_source_stale_reasons(dir: &Path, source: &Value) -> CliResult<Vec<St
 fn artifact_specs(dir: &Path, session_jsonl: Option<&Path>) -> Vec<ArtifactSpec> {
     let mut specs = Vec::new();
     specs.extend(core_artifact_specs(dir));
+    specs.extend(session_artifact_specs(dir));
     specs.extend(adb_artifact_specs(dir));
     specs.extend(video_artifact_specs(dir));
     specs.extend(derived_artifact_specs(dir));
@@ -1449,6 +1976,29 @@ fn artifact_specs(dir: &Path, session_jsonl: Option<&Path>) -> Vec<ArtifactSpec>
         ));
     }
     specs
+}
+
+fn session_artifact_specs(dir: &Path) -> [ArtifactSpec; 3] {
+    [
+        artifact(
+            "session_state",
+            dir.join("session").join("state.json"),
+            ArtifactRequirement::Optional,
+            ArtifactSensitivity::Sensitive,
+        ),
+        artifact(
+            "session_finalization",
+            dir.join("session").join("finalization.json"),
+            ArtifactRequirement::Optional,
+            ArtifactSensitivity::Sensitive,
+        ),
+        artifact(
+            "session_lock_snapshot",
+            dir.join("session").join("lock.snapshot.json"),
+            ArtifactRequirement::Optional,
+            ArtifactSensitivity::Sensitive,
+        ),
+    ]
 }
 
 fn video_artifact_specs(dir: &Path) -> [ArtifactSpec; 5] {
@@ -1725,6 +2275,100 @@ fn session_json(dir: &Path, session: &SessionSelection) -> Value {
     })
 }
 
+fn validation_json(dir: &Path, validation: &ValidationInspection) -> Value {
+    json!({
+        "stored_present": validation.stored_present,
+        "stored": sanitize_inspect_value(dir, &validation.stored),
+        "current": sanitize_inspect_value(dir, &validation.current),
+        "stale_reasons": validation
+            .stale_reasons
+            .iter()
+            .map(|reason| sanitize_inspect_text(dir, reason))
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn sanitize_inspect_value(dir: &Path, value: &Value) -> Value {
+    match *value {
+        Value::String(ref text) => json!(sanitize_inspect_text(dir, text)),
+        Value::Array(ref items) => Value::Array(
+            items
+                .iter()
+                .map(|item| sanitize_inspect_value(dir, item))
+                .collect(),
+        ),
+        Value::Object(ref map) => {
+            let sanitized = map
+                .iter()
+                .map(|(key, item)| (key.clone(), sanitize_inspect_value(dir, item)))
+                .collect::<Map<_, _>>();
+            Value::Object(sanitized)
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => value.clone(),
+    }
+}
+
+fn sanitize_inspect_text(dir: &Path, text: &str) -> String {
+    if let Some(relative) = recording_relative_text(dir, text) {
+        return relative;
+    }
+    if contains_private_path_marker(text) {
+        return String::from("<redacted-path>");
+    }
+    text.to_owned()
+}
+
+fn recording_relative_text(dir: &Path, text: &str) -> Option<String> {
+    let path = Path::new(text);
+    if let Ok(relative) = path.strip_prefix(dir) {
+        return Some(path_text(relative));
+    }
+    if path.is_absolute() {
+        let canonical_dir = fs::canonicalize(dir).ok()?;
+        if let Ok(relative) = path.strip_prefix(&canonical_dir) {
+            return Some(path_text(relative));
+        }
+    }
+    None
+}
+
+fn contains_private_path_marker(text: &str) -> bool {
+    text.contains("/Users/")
+        || text.contains("/home/")
+        || text.contains("../lab/")
+        || text.contains("lab/experiments")
+}
+
+fn session_state_json(session: &SessionInspection) -> Value {
+    json!({
+        "classification": session.classification.as_str(),
+        "state": session_file_json(&session.state),
+        "finalization": session_file_json(&session.finalization),
+        "lock_snapshot": session_file_json(&session.lock_snapshot),
+        "lifecycle_state": session.lifecycle_state.clone(),
+        "finalization_run_state": session.finalization_run_state.clone(),
+        "command": session.command.clone(),
+        "terminal": session_lifecycle_is_terminal(&session.state),
+        "complete": session.classification.is_complete(),
+        "incomplete": session.classification.is_incomplete(),
+        "active": session.classification.is_active_or_in_progress(),
+        "needs_stop": session.classification.needs_stop(),
+        "needs_repair": session.classification.needs_repair(),
+        "stale_reasons": session.stale_reasons.clone(),
+    })
+}
+
+fn session_file_json(file: &SessionFileInspection) -> Value {
+    json!({
+        "present": file.present,
+        "status": file.status.clone(),
+        "path": file.path.clone(),
+        "schema": file.schema.clone(),
+        "error": file.error.clone(),
+        "summary": file.summary.clone(),
+    })
+}
+
 fn note_flags(dir: &Path) -> CliResult<Value> {
     let readme_path = dir.join("README.md");
     if !readme_path.exists() {
@@ -1764,7 +2408,9 @@ fn flags_json(inputs: &FlagInputs<'_>) -> Value {
         && !bool_at(&inputs.clock.value, "/video/canonical");
     let needs_canonical_evidence = bool_at(&inputs.clock.value, "/evidence/requested")
         && !bool_at(&inputs.clock.value, "/evidence/canonical");
+    let session_blocks_analysis = inputs.session_state.classification.blocks_analysis();
     let incomplete_or_superseded = !inputs.validation.current_ok
+        || session_blocks_analysis
         || inputs
             .note_flags
             .get("mentions_incomplete")
@@ -1780,6 +2426,7 @@ fn flags_json(inputs: &FlagInputs<'_>) -> Value {
             && inputs.session.selected.is_some()
             && has_getevent_jsonl
             && inputs.validation.current_ok
+            && !session_blocks_analysis
             && !needs_video,
         "needs_validation": !inputs.validation.stored_present
             || !inputs.validation.stale_reasons.is_empty(),
@@ -1798,14 +2445,27 @@ fn flags_json(inputs: &FlagInputs<'_>) -> Value {
         "needs_video_frame_index": needs_video_frame_index,
         "has_video_map": has_video_map,
         "needs_video_map": needs_video_map,
+        "lifecycle_complete": inputs.session_state.classification.is_complete(),
+        "lifecycle_incomplete": inputs.session_state.classification.is_incomplete(),
+        "lifecycle_active": inputs.session_state.classification.is_active(),
+        "lifecycle_in_progress": inputs.session_state.classification.is_in_progress(),
+        "session_classification": inputs.session_state.classification.as_str(),
+        "needs_session_stop": inputs.session_state.classification.needs_stop(),
+        "needs_session_repair": inputs.session_state.classification.needs_repair(),
         "has_sensitive_evidence": has_evidence || has_video,
         "incomplete_or_superseded": incomplete_or_superseded,
         "needs_cleanup": needs_cleanup(inputs.manifest),
     })
 }
 
-fn next_actions(dir: &Path, external_run_id: Option<&str>, flags: &Value) -> CliResult<Value> {
+fn next_actions(
+    dir: &Path,
+    session: &SessionInspection,
+    external_run_id: Option<&str>,
+    flags: &Value,
+) -> CliResult<Value> {
     let mut actions = Vec::new();
+    add_lifecycle_next_action(&mut actions, session, external_run_id, flags);
     if bool_at(flags, "/needs_validation") {
         let mut command = format!("input-dynamics validate {}", shellish(&dir.join("ime"))?);
         if let Some(run_id) = external_run_id {
@@ -1819,8 +2479,138 @@ fn next_actions(dir: &Path, external_run_id: Option<&str>, flags: &Value) -> Cli
         }));
     }
     add_session_next_action(&mut actions, flags);
-    add_derivation_next_actions(&mut actions, dir, flags)?;
+    if !bool_at(flags, "/incomplete_or_superseded") && !bool_at(flags, "/lifecycle_active") {
+        add_derivation_next_actions(&mut actions, dir, flags)?;
+    }
     Ok(Value::Array(actions))
+}
+
+fn add_lifecycle_next_action(
+    actions: &mut Vec<Value>,
+    session: &SessionInspection,
+    external_run_id: Option<&str>,
+    flags: &Value,
+) {
+    if bool_at(flags, "/needs_session_stop") {
+        push_session_stop_action(actions, session_action_run_id(session, external_run_id));
+        return;
+    }
+    if bool_at(flags, "/lifecycle_in_progress") {
+        push_session_status_action(actions, session_action_run_id(session, external_run_id));
+        return;
+    }
+    if bool_at(flags, "/needs_session_repair") {
+        push_session_repair_action(actions);
+    }
+}
+
+fn session_action_run_id<'a>(
+    session: &'a SessionInspection,
+    external_run_id: Option<&'a str>,
+) -> &'a str {
+    session_run_id(session)
+        .or(external_run_id)
+        .unwrap_or("<run-id>")
+}
+
+fn push_session_stop_action(actions: &mut Vec<Value>, run_id: &str) {
+    actions.push(json!({
+        "kind": "session_stop",
+        "workflow": "session_status_stop_inspect",
+        "command": format!(
+            "input-dynamics session stop --run-id {}",
+            shellish_text(run_id)
+        ),
+        "commands": [
+            {
+                "step": "status",
+                "command": format!(
+                    "input-dynamics session status --run-id {}",
+                    shellish_text(run_id)
+                ),
+                "argv": ["input-dynamics", "session", "status", "--run-id", run_id],
+            },
+            {
+                "step": "stop",
+                "command": format!(
+                    "input-dynamics session stop --run-id {}",
+                    shellish_text(run_id)
+                ),
+                "argv": ["input-dynamics", "session", "stop", "--run-id", run_id],
+            },
+            {
+                "step": "inspect",
+                "command": "input-dynamics recording inspect --dir <run-dir>",
+                "argv": ["input-dynamics", "recording", "inspect", "--dir", "<run-dir>"],
+            },
+        ],
+        "reason": "umbrella session state is active; finalize the active session before analysis",
+    }));
+}
+
+fn push_session_status_action(actions: &mut Vec<Value>, run_id: &str) {
+    actions.push(json!({
+        "kind": "session_status",
+        "workflow": "session_status_inspect",
+        "command": format!(
+            "input-dynamics session status --run-id {}",
+            shellish_text(run_id)
+        ),
+        "commands": [
+            {
+                "step": "status",
+                "command": format!(
+                    "input-dynamics session status --run-id {}",
+                    shellish_text(run_id)
+                ),
+                "argv": ["input-dynamics", "session", "status", "--run-id", run_id],
+            },
+            {
+                "step": "inspect",
+                "command": "input-dynamics recording inspect --dir <run-dir>",
+                "argv": ["input-dynamics", "recording", "inspect", "--dir", "<run-dir>"],
+            },
+        ],
+        "reason": "umbrella session state is in progress; check lifecycle status before taking another action",
+    }));
+}
+
+fn push_session_repair_action(actions: &mut Vec<Value>) {
+    actions.push(json!({
+        "kind": "session_repair_required",
+        "workflow": "inspect_session_files",
+        "command": "input-dynamics recording inspect --dir <run-dir>",
+        "commands": [
+            {
+                "step": "inspect",
+                "command": "input-dynamics recording inspect --dir <run-dir>",
+                "argv": ["input-dynamics", "recording", "inspect", "--dir", "<run-dir>"],
+            },
+        ],
+        "reason": "umbrella session files are missing, corrupt, unsupported, or inconsistent; do not analyze this directory as complete",
+    }));
+}
+
+fn session_run_id(session: &SessionInspection) -> Option<&str> {
+    session
+        .state
+        .summary
+        .get("run_id")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            session
+                .lock_snapshot
+                .summary
+                .get("run_id")
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            session
+                .finalization
+                .summary
+                .get("run_id")
+                .and_then(Value::as_str)
+        })
 }
 
 fn add_session_next_action(actions: &mut Vec<Value>, flags: &Value) {
@@ -1965,6 +2755,7 @@ fn add_derivation_next_actions(
 
 fn warnings(inputs: &FlagInputs<'_>) -> Vec<String> {
     let mut warnings = inputs.session.warnings.clone();
+    warnings.extend(inputs.session_state.warnings.iter().cloned());
     warnings.extend(inputs.validation.stale_reasons.iter().cloned());
     warnings.extend(inputs.run_summary.stale_reasons.iter().cloned());
     warnings.extend(inputs.timeline.stale_reasons.iter().cloned());

@@ -503,7 +503,18 @@ flags such as `valid_for_analysis`, `has_video`, `needs_video`,
 `canonical_clock_ready`, `has_legacy_timing`, `needs_canonical_recording`,
 `needs_validation`, `needs_press_summaries`, `needs_run_summary`,
 `needs_derivation`, `needs_timeline`, `has_video_frame_index`, and
-`needs_video_frame_index`, `has_video_map`, and `needs_video_map`.
+`needs_video_frame_index`, `has_video_map`, `needs_video_map`,
+`session_classification`, `lifecycle_complete`, `lifecycle_incomplete`,
+`lifecycle_active`, `lifecycle_in_progress`, `needs_session_stop`, and
+`needs_session_repair`.
+
+For umbrella-session recordings, inspect also reports a summarized `session`
+object sourced from `session/state.json`, `session/finalization.json`, and
+`session/lock.snapshot.json`. It exposes lifecycle state, finalization state,
+bounded command metadata, cleanup status, failure counts, and read status for
+each session file. It does not echo raw finalization failure payloads. Treat
+the underlying session state, finalization, and lock snapshot files as sensitive
+local artifacts because they can contain operational metadata.
 
 `validation.current.clock_validation` splits timestamp metadata diagnostics into
 specific counters. Stable keys are
@@ -530,10 +541,15 @@ Session refresh actions include placeholders such as `<new-run-id>` and
 with `start`, `status`, `stop`, and `inspect` steps. The compatibility
 `command` field mirrors the first `start` step only; agents should execute the
 full `commands` sequence. Current action kinds are `validate`,
-`session_with_video`,
-`session_with_canonical_clocks`, `derive_presses`, `derive_summary`,
-`derive_dismissals`, `derive_timeline`, and `derive_video_map`. It does not
-probe the device or derive new clock alignment.
+`session_with_video`, `session_with_canonical_clocks`, `session_stop`,
+`session_status`, `session_repair_required`, `derive_presses`,
+`derive_summary`, `derive_dismissals`, `derive_timeline`, and
+`derive_video_map`. Branch first on `flags.session_classification`: `complete`
+may proceed to artifact and timing gates; `active` should execute
+`session_stop`; `in_progress` should execute `session_status` and inspect again;
+`incomplete`, `aborted`, and `repair_required` must not be derived or analyzed
+as complete; `untracked_legacy` uses legacy artifact gates. It does not probe
+the device or derive new clock alignment.
 
 Treat `valid_for_analysis` as a base artifact/readability gate. For any
 video/evidence anchor claim, cross-source timeline claim, or ordering claim that

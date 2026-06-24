@@ -138,6 +138,690 @@ fn inspect_selects_session_jsonl_from_pulled_log_layout() {
 }
 
 #[test]
+fn inspect_consumes_complete_umbrella_session_state() {
+    let root = unique_temp_dir("recording-inspect-session-complete");
+    let Some(()) = assert_ok(create_fixture(&root, FixtureShape::DerivedOnly), "fixture") else {
+        return;
+    };
+    let Some(()) = assert_ok(
+        write_session_files(&root, "complete", Some("complete")),
+        "write session files",
+    ) else {
+        return;
+    };
+
+    let Some(result) = assert_ok(inspect_recording(&root), "inspect recording") else {
+        return;
+    };
+
+    assert_eq!(
+        result
+            .pointer("/session/lifecycle_state")
+            .and_then(Value::as_str),
+        Some("complete")
+    );
+    assert_eq!(
+        result
+            .pointer("/session/finalization_run_state")
+            .and_then(Value::as_str),
+        Some("complete")
+    );
+    assert_eq!(
+        result
+            .pointer("/artifacts/session_state/exists")
+            .and_then(Value::as_bool),
+        Some(true),
+        "session state should be visible in artifact map"
+    );
+    assert_eq!(
+        result
+            .pointer("/artifacts/session_state/sensitive")
+            .and_then(Value::as_bool),
+        Some(true),
+        "session state should be marked sensitive"
+    );
+    assert_eq!(
+        result
+            .pointer("/artifacts/session_finalization/sensitive")
+            .and_then(Value::as_bool),
+        Some(true),
+        "session finalization should be marked sensitive"
+    );
+    assert_eq!(
+        result
+            .pointer("/artifacts/session_lock_snapshot/sensitive")
+            .and_then(Value::as_bool),
+        Some(true),
+        "session lock snapshot should be marked sensitive"
+    );
+    assert_eq!(
+        result
+            .pointer("/flags/lifecycle_complete")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        result
+            .pointer("/flags/valid_for_analysis")
+            .and_then(Value::as_bool),
+        Some(true),
+        "complete umbrella state should not block otherwise ready recordings"
+    );
+    let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
+}
+
+#[test]
+fn inspect_blocks_analysis_for_incomplete_umbrella_session_state() {
+    let root = unique_temp_dir("recording-inspect-session-incomplete");
+    let Some(()) = assert_ok(create_fixture(&root, FixtureShape::DerivedOnly), "fixture") else {
+        return;
+    };
+    let Some(()) = assert_ok(
+        write_session_files(&root, "incomplete", Some("incomplete")),
+        "write session files",
+    ) else {
+        return;
+    };
+    let Some(()) = assert_ok(
+        fs::remove_file(root.join("derived").join("touch_gestures.jsonl")),
+        "remove derivation source",
+    ) else {
+        return;
+    };
+
+    let Some(result) = assert_ok(inspect_recording(&root), "inspect recording") else {
+        return;
+    };
+
+    assert_eq!(
+        result
+            .pointer("/flags/lifecycle_incomplete")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        result
+            .pointer("/flags/incomplete_or_superseded")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        result
+            .pointer("/flags/valid_for_analysis")
+            .and_then(Value::as_bool),
+        Some(false),
+        "incomplete umbrella state should block analysis readiness"
+    );
+    let has_derivation_action = result
+        .get("next_actions")
+        .and_then(Value::as_array)
+        .is_some_and(|actions| {
+            actions.iter().any(|action| {
+                action
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| kind.starts_with("derive_"))
+            })
+        });
+    assert!(
+        !has_derivation_action,
+        "incomplete runs should not suggest derivations over partial data"
+    );
+    let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
+}
+
+#[test]
+fn inspect_keeps_incomplete_session_without_finalization_incomplete() {
+    let root = unique_temp_dir("recording-inspect-session-incomplete-no-finalization");
+    let Some(()) = assert_ok(create_fixture(&root, FixtureShape::DerivedOnly), "fixture") else {
+        return;
+    };
+    let Some(()) = assert_ok(
+        write_session_files(&root, "incomplete", None),
+        "write incomplete session without finalization",
+    ) else {
+        return;
+    };
+
+    let Some(result) = assert_ok(inspect_recording(&root), "inspect recording") else {
+        return;
+    };
+
+    assert_eq!(
+        result
+            .pointer("/session/classification")
+            .and_then(Value::as_str),
+        Some("incomplete")
+    );
+    assert_eq!(
+        result
+            .pointer("/flags/lifecycle_incomplete")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        result
+            .pointer("/flags/needs_session_repair")
+            .and_then(Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        result
+            .pointer("/flags/valid_for_analysis")
+            .and_then(Value::as_bool),
+        Some(false)
+    );
+    let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
+}
+
+#[test]
+fn inspect_marks_lock_identity_mismatch_repair_required() {
+    let root = unique_temp_dir("recording-inspect-session-lock-mismatch");
+    let Some(()) = assert_ok(create_fixture(&root, FixtureShape::DerivedOnly), "fixture") else {
+        return;
+    };
+    let Some(()) = assert_ok(
+        write_session_files(&root, "complete", Some("complete")),
+        "write session files",
+    ) else {
+        return;
+    };
+    let mut lock = session_lock_snapshot_fixture(&root, "complete");
+    let Some(lock_object) = lock.as_object_mut() else {
+        return;
+    };
+    let _previous = lock_object.insert(String::from("run_id"), json!("run-other"));
+    let Some(()) = assert_ok(
+        write_json(&root.join("session").join("lock.snapshot.json"), &lock),
+        "write mismatched lock snapshot",
+    ) else {
+        return;
+    };
+
+    let Some(result) = assert_ok(inspect_recording(&root), "inspect recording") else {
+        return;
+    };
+
+    assert_eq!(
+        result
+            .pointer("/session/classification")
+            .and_then(Value::as_str),
+        Some("repair_required")
+    );
+    assert_eq!(
+        result
+            .pointer("/flags/valid_for_analysis")
+            .and_then(Value::as_bool),
+        Some(false)
+    );
+    let stale_reasons = result
+        .pointer("/session/stale_reasons")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        stale_reasons.iter().any(|reason| {
+            reason.as_str() == Some("session state and lock snapshot run ids differ")
+        }),
+        "lock identity mismatch should be machine-visible"
+    );
+    let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
+}
+
+#[test]
+fn inspect_redacts_finalization_failure_payloads() {
+    let root = unique_temp_dir("recording-inspect-session-redaction");
+    let Some(()) = assert_ok(create_fixture(&root, FixtureShape::DerivedOnly), "fixture") else {
+        return;
+    };
+    let Some(()) = assert_ok(
+        write_session_files(&root, "incomplete", Some("incomplete")),
+        "write session files",
+    ) else {
+        return;
+    };
+    let Some(()) = assert_ok(
+        write_json(
+            &root.join("session").join("finalization.json"),
+            &json!({
+                "schema": "input_dynamics_capture_session_finalization.v1",
+                "run_id": "run-test",
+                "run_state": "incomplete",
+                "attempt_id": "attempt-test",
+                "owner_pid": 42_u64,
+                "owner_host": "host-test",
+                "started_wall_ms": 1_500_u64,
+                "finished_wall_ms": 2_000_u64,
+                "failure_stage": "validation",
+                "failure_reasons": [
+                    "validation failed for /Users/private/lab/run-secret with token-private"
+                ],
+                "cleanup_attempted": true,
+                "cleanup_ok": false,
+                "last_completed_step": "pull_ime_logs",
+                "steps": []
+            }),
+        ),
+        "write sensitive finalization payload",
+    ) else {
+        return;
+    };
+
+    let Some(result) = assert_ok(inspect_recording(&root), "inspect recording") else {
+        return;
+    };
+    let Some(serialized) = assert_ok(serde_json::to_string(&result), "serialize inspect result")
+    else {
+        return;
+    };
+
+    assert!(
+        !serialized.contains("/Users/private/lab"),
+        "inspect output should not echo raw finalization failure paths"
+    );
+    assert!(
+        !serialized.contains("token-private"),
+        "inspect output should not echo raw finalization failure tokens"
+    );
+    assert_eq!(
+        result
+            .pointer("/session/finalization/summary/failure_reason_count")
+            .and_then(Value::as_u64),
+        Some(1_u64),
+        "inspect should preserve stable failure counts"
+    );
+    let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
+}
+
+#[test]
+fn inspect_redacts_validation_paths_from_output() {
+    let root = unique_temp_dir("recording-inspect-validation-redaction");
+    let Some(()) = assert_ok(create_fixture(&root, FixtureShape::DerivedOnly), "fixture") else {
+        return;
+    };
+    let Some(()) = assert_ok(
+        write_session_files(&root, "complete", Some("complete")),
+        "write session files",
+    ) else {
+        return;
+    };
+    let Some(()) = assert_ok(
+        write_json(
+            &root.join("validation.json"),
+            &json!({
+                "ok": false,
+                "path": "/Users/private/lab/experiments/run-secret/ime",
+                "failure_reasons": [
+                    "validation read /Users/private/lab/experiments/run-secret/ime"
+                ]
+            }),
+        ),
+        "write validation with private path",
+    ) else {
+        return;
+    };
+
+    let Some(result) = assert_ok(inspect_recording(&root), "inspect recording") else {
+        return;
+    };
+    let Some(serialized) = assert_ok(serde_json::to_string(&result), "serialize inspect result")
+    else {
+        return;
+    };
+
+    assert_eq!(
+        result.get("recording_dir").and_then(Value::as_str),
+        Some(".")
+    );
+    assert!(
+        !serialized.contains("/Users/private/lab"),
+        "inspect output should not echo private validation paths"
+    );
+    assert!(
+        !serialized.contains("lab/experiments"),
+        "inspect output should not echo lab experiment paths"
+    );
+    let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
+}
+
+#[test]
+fn inspect_redacts_corrupt_session_state_payloads() {
+    let root = unique_temp_dir("recording-inspect-session-state-redaction");
+    let Some(()) = assert_ok(create_fixture(&root, FixtureShape::DerivedOnly), "fixture") else {
+        return;
+    };
+    let Some(()) = assert_ok(
+        write_session_files(&root, "complete", Some("complete")),
+        "write session files",
+    ) else {
+        return;
+    };
+    let mut state = session_state_fixture(&root, "complete", Some("complete"));
+    let Some(state_object) = state.as_object_mut() else {
+        return;
+    };
+    let _previous = state_object.insert(
+        String::from("input"),
+        json!({
+            "input_actor": "agent",
+            "input_controller": "input-dynamics-cli",
+            "input_backend": "diagnostic",
+            "input_cadence_policy": "profiled",
+            "profile_provenance": {
+                "kind": "local_private_profile",
+                "source": "/Users/private/lab/profile-token-private.json"
+            }
+        }),
+    );
+    let Some(()) = assert_ok(
+        write_json(&root.join("session").join("state.json"), &state),
+        "write corrupt private state payload",
+    ) else {
+        return;
+    };
+
+    let Some(result) = assert_ok(inspect_recording(&root), "inspect recording") else {
+        return;
+    };
+    let Some(serialized) = assert_ok(serde_json::to_string(&result), "serialize inspect result")
+    else {
+        return;
+    };
+
+    assert_eq!(
+        result
+            .pointer("/session/classification")
+            .and_then(Value::as_str),
+        Some("repair_required")
+    );
+    assert_eq!(
+        result
+            .pointer("/session/state/status")
+            .and_then(Value::as_str),
+        Some("corrupt")
+    );
+    assert_eq!(
+        result.pointer("/session/state/summary"),
+        Some(&Value::Null),
+        "corrupt session state should not be summarized"
+    );
+    assert!(
+        !serialized.contains("/Users/private/lab"),
+        "inspect output should not echo private state paths"
+    );
+    assert!(
+        !serialized.contains("token-private"),
+        "inspect output should not echo private state tokens"
+    );
+    let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
+}
+
+#[test]
+fn inspect_marks_partial_session_artifacts_repair_required() {
+    let root = unique_temp_dir("recording-inspect-session-partial");
+    let Some(()) = assert_ok(create_fixture(&root, FixtureShape::DerivedOnly), "fixture") else {
+        return;
+    };
+    let session_dir = root.join("session");
+    let Some(()) = assert_ok(fs::create_dir_all(&session_dir), "create session dir") else {
+        return;
+    };
+    let Some(()) = assert_ok(
+        write_json(
+            &session_dir.join("finalization.json"),
+            &session_finalization_fixture("complete"),
+        ),
+        "write finalization without state",
+    ) else {
+        return;
+    };
+
+    let Some(result) = assert_ok(inspect_recording(&root), "inspect recording") else {
+        return;
+    };
+
+    assert_eq!(
+        result
+            .pointer("/session/classification")
+            .and_then(Value::as_str),
+        Some("repair_required")
+    );
+    assert_eq!(
+        result
+            .pointer("/flags/valid_for_analysis")
+            .and_then(Value::as_bool),
+        Some(false),
+        "partial umbrella session artifacts should block analysis readiness"
+    );
+    let has_repair_action = result
+        .get("next_actions")
+        .and_then(Value::as_array)
+        .is_some_and(|actions| {
+            actions.iter().any(|action| {
+                action.get("kind").and_then(Value::as_str) == Some("session_repair_required")
+            })
+        });
+    assert!(
+        has_repair_action,
+        "partial umbrella session artifacts should produce a repair action"
+    );
+    let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
+}
+
+#[test]
+fn inspect_requires_standalone_finalization_for_complete_umbrella_state() {
+    let root = unique_temp_dir("recording-inspect-session-missing-finalization");
+    let Some(()) = assert_ok(create_fixture(&root, FixtureShape::DerivedOnly), "fixture") else {
+        return;
+    };
+    let Some(()) = assert_ok(
+        write_session_files(&root, "complete", Some("complete")),
+        "write session files",
+    ) else {
+        return;
+    };
+    let Some(()) = assert_ok(
+        fs::remove_file(root.join("session").join("finalization.json")),
+        "remove standalone finalization",
+    ) else {
+        return;
+    };
+
+    let Some(result) = assert_ok(inspect_recording(&root), "inspect recording") else {
+        return;
+    };
+
+    assert_eq!(
+        result
+            .pointer("/session/classification")
+            .and_then(Value::as_str),
+        Some("repair_required")
+    );
+    assert_eq!(
+        result
+            .pointer("/flags/valid_for_analysis")
+            .and_then(Value::as_bool),
+        Some(false),
+        "missing standalone finalization should block complete analysis"
+    );
+    let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
+}
+
+#[test]
+fn inspect_marks_schema_only_session_state_repair_required() {
+    let root = unique_temp_dir("recording-inspect-session-schema-only");
+    let Some(()) = assert_ok(create_fixture(&root, FixtureShape::DerivedOnly), "fixture") else {
+        return;
+    };
+    let Some(()) = assert_ok(
+        write_session_files(&root, "complete", Some("complete")),
+        "write session files",
+    ) else {
+        return;
+    };
+    let Some(()) = assert_ok(
+        write_json(
+            &root.join("session").join("state.json"),
+            &json!({"schema": "input_dynamics_capture_session_state.v1"}),
+        ),
+        "write schema-only state",
+    ) else {
+        return;
+    };
+
+    let Some(result) = assert_ok(inspect_recording(&root), "inspect recording") else {
+        return;
+    };
+
+    assert_eq!(
+        result
+            .pointer("/session/state/status")
+            .and_then(Value::as_str),
+        Some("corrupt")
+    );
+    assert_eq!(
+        result
+            .pointer("/session/classification")
+            .and_then(Value::as_str),
+        Some("repair_required")
+    );
+    assert_eq!(
+        result
+            .pointer("/flags/needs_session_repair")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
+}
+
+#[test]
+fn inspect_suggests_stop_for_active_umbrella_session_state() {
+    let root = unique_temp_dir("recording-inspect-session-active");
+    let Some(()) = assert_ok(create_fixture(&root, FixtureShape::DerivedOnly), "fixture") else {
+        return;
+    };
+    let Some(()) = assert_ok(
+        write_session_files(&root, "active", None),
+        "write active session files",
+    ) else {
+        return;
+    };
+
+    let Some(result) = assert_ok(inspect_recording(&root), "inspect recording") else {
+        return;
+    };
+
+    assert_eq!(
+        result
+            .pointer("/flags/lifecycle_active")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        result
+            .pointer("/flags/lifecycle_in_progress")
+            .and_then(Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        result
+            .pointer("/flags/needs_session_stop")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        result
+            .pointer("/flags/valid_for_analysis")
+            .and_then(Value::as_bool),
+        Some(false),
+        "active umbrella state should block analysis readiness"
+    );
+    let has_stop_action = result
+        .get("next_actions")
+        .and_then(Value::as_array)
+        .is_some_and(|actions| {
+            actions.iter().any(|action| {
+                action.get("kind").and_then(Value::as_str) == Some("session_stop")
+                    && action
+                        .get("command")
+                        .and_then(Value::as_str)
+                        .is_some_and(|command| {
+                            command == "input-dynamics session stop --run-id run-test"
+                        })
+                    && action.pointer("/commands/1/argv/4").and_then(Value::as_str)
+                        == Some("run-test")
+            })
+        });
+    assert!(
+        has_stop_action,
+        "active umbrella state should suggest canonical session stop"
+    );
+    let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
+}
+
+#[test]
+fn inspect_suggests_status_for_in_progress_umbrella_session_state() {
+    let root = unique_temp_dir("recording-inspect-session-in-progress");
+    let Some(()) = assert_ok(create_fixture(&root, FixtureShape::DerivedOnly), "fixture") else {
+        return;
+    };
+    let Some(()) = assert_ok(
+        write_session_files(&root, "finalizing", None),
+        "write in-progress session files",
+    ) else {
+        return;
+    };
+
+    let Some(result) = assert_ok(inspect_recording(&root), "inspect recording") else {
+        return;
+    };
+
+    assert_eq!(
+        result
+            .pointer("/session/classification")
+            .and_then(Value::as_str),
+        Some("in_progress")
+    );
+    assert_eq!(
+        result
+            .pointer("/flags/lifecycle_active")
+            .and_then(Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        result
+            .pointer("/flags/lifecycle_in_progress")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        result
+            .pointer("/flags/valid_for_analysis")
+            .and_then(Value::as_bool),
+        Some(false)
+    );
+    let has_status_action = result
+        .get("next_actions")
+        .and_then(Value::as_array)
+        .is_some_and(|actions| {
+            actions.iter().any(|action| {
+                action.get("kind").and_then(Value::as_str) == Some("session_status")
+                    && action
+                        .get("command")
+                        .and_then(Value::as_str)
+                        .is_some_and(|command| {
+                            command == "input-dynamics session status --run-id run-test"
+                        })
+            })
+        });
+    assert!(
+        has_status_action,
+        "in-progress umbrella state should suggest canonical session status"
+    );
+    let _cleanup = assert_ok(fs::remove_dir_all(&root), "cleanup");
+}
+
+#[test]
 fn inspect_detects_run_summary_source_staleness() {
     let root = unique_temp_dir("recording-inspect-summary-stale");
     let Some(()) = assert_ok(create_fixture(&root, FixtureShape::DerivedOnly), "fixture") else {
@@ -1002,6 +1686,132 @@ fn create_fixture(root: &Path, shape: FixtureShape) -> TestResult<()> {
         create_timeline_fixture(root)?;
     }
     Ok(())
+}
+
+fn write_session_files(
+    root: &Path,
+    lifecycle_state: &str,
+    finalization_state: Option<&str>,
+) -> TestResult<()> {
+    let session_dir = root.join("session");
+    fs::create_dir_all(&session_dir)?;
+    write_json(
+        &session_dir.join("state.json"),
+        &session_state_fixture(root, lifecycle_state, finalization_state),
+    )?;
+    write_json(
+        &session_dir.join("lock.snapshot.json"),
+        &session_lock_snapshot_fixture(root, lifecycle_state),
+    )?;
+    if let Some(run_state) = finalization_state {
+        write_json(
+            &session_dir.join("finalization.json"),
+            &session_finalization_fixture(run_state),
+        )?;
+    }
+    Ok(())
+}
+
+fn session_state_fixture(
+    root: &Path,
+    lifecycle_state: &str,
+    finalization_state: Option<&str>,
+) -> Value {
+    json!({
+        "schema": "input_dynamics_capture_session_state.v1",
+        "run_id": "run-test",
+        "run_root": root,
+        "package_name": "org.inputdynamics.ime.debug",
+        "device_serial": "serial-test",
+        "cli_version": "0.1.0",
+        "transition_seq": 3_u64,
+        "created_wall_ms": 1_000_u64,
+        "updated_wall_ms": 2_000_u64,
+        "lifecycle": {
+            "state": lifecycle_state,
+            "stage": lifecycle_state,
+            "history": []
+        },
+        "start_config": {
+            "command": {
+                "name": "session start",
+                "bounded": false
+            }
+        },
+        "input": {
+            "input_actor": "human",
+            "input_controller": null,
+            "input_backend": null,
+            "input_cadence_policy": "manual",
+            "profile_provenance": null
+        },
+        "artifacts": {},
+        "processes": {},
+        "ime": {},
+        "controller": null,
+        "finalization": embedded_finalization_fixture(finalization_state),
+    })
+}
+
+fn embedded_finalization_fixture(finalization_state: Option<&str>) -> Value {
+    finalization_state.map_or(Value::Null, |run_state| {
+        json!({
+            "run_state": run_state,
+            "cleanup_ok": run_state == "complete"
+        })
+    })
+}
+
+fn session_lock_snapshot_fixture(root: &Path, lifecycle_state: &str) -> Value {
+    json!({
+        "schema": "input_dynamics_capture_session_lock.v1",
+        "lock_state": if lifecycle_state == "active" { "active" } else { "finalizing" },
+        "observed_lifecycle_state": lifecycle_state,
+        "mutation_seq": 3_u64,
+        "package_name": "org.inputdynamics.ime.debug",
+        "device_serial": "serial-test",
+        "run_id": "run-test",
+        "command": {
+            "name": "session start",
+            "bounded": false
+        },
+        "output_dir": root,
+        "state_path": root.join("session").join("state.json"),
+        "owner_pid": 42_u64,
+        "owner_host": "host-test",
+        "invocation_id": "invocation-test",
+        "created_wall_ms": 1_000_u64,
+        "updated_wall_ms": 2_000_u64,
+        "cli_version": "0.1.0",
+        "finalization_owner": null
+    })
+}
+
+fn session_finalization_fixture(run_state: &str) -> Value {
+    json!({
+        "schema": "input_dynamics_capture_session_finalization.v1",
+        "run_id": "run-test",
+        "run_state": run_state,
+        "attempt_id": "attempt-test",
+        "owner_pid": 42_u64,
+        "owner_host": "host-test",
+        "started_wall_ms": 1_500_u64,
+        "finished_wall_ms": 2_000_u64,
+        "failure_stage": if run_state == "complete" { Value::Null } else { json!("validation") },
+        "failure_reasons": if run_state == "complete" {
+            json!([])
+        } else {
+            json!(["no_input_scope_records"])
+        },
+        "cleanup_attempted": true,
+        "cleanup_ok": run_state == "complete",
+        "last_completed_step": if run_state == "complete" {
+            json!("clear_runtime")
+        } else {
+            json!("pull_ime_logs")
+        },
+        "steps": []
+    })
 }
 
 fn write_manifest(root: &Path, video: Option<Value>) -> TestResult<()> {

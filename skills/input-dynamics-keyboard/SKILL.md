@@ -228,7 +228,15 @@ Use `flags.valid_for_analysis`, `flags.needs_validation`,
 `flags.needs_press_summaries`, `flags.needs_run_summary`,
 `flags.needs_derivation`, `flags.needs_timeline`,
 `flags.has_video_frame_index`, `flags.needs_video_frame_index`,
-`flags.has_video_map`, and `flags.needs_video_map` to decide the next step.
+`flags.has_video_map`, `flags.needs_video_map`,
+`flags.session_classification`, `flags.lifecycle_complete`,
+`flags.lifecycle_incomplete`, `flags.lifecycle_active`,
+`flags.lifecycle_in_progress`, `flags.needs_session_stop`, and
+`flags.needs_session_repair` to decide the next step. Branch on
+`session_classification` first: `complete` may continue to artifact/timing gates;
+`active` follows `session_stop`; `in_progress` follows `session_status` and then
+inspects again; `incomplete`, `aborted`, and `repair_required` are not complete
+recordings and must not be derived or analyzed as if they were complete.
 Required missing or stale video makes `valid_for_analysis` false. The `clock`
 object classifies saved video/evidence anchors as `bracketed`,
 `legacy_wall_clock_bracketed`, `missing_source`, `stale_inputs`,
@@ -242,7 +250,8 @@ with `start`, `status`, `stop`, and `inspect` steps. The compatibility
 `command` field mirrors the first `start` step only; execute the full
 `commands` sequence for a complete observation refresh.
 Current action kinds are `validate`, `session_with_video`,
-`session_with_canonical_clocks`, `derive_presses`, `derive_summary`,
+`session_with_canonical_clocks`, `session_stop`, `session_status`,
+`session_repair_required`, `derive_presses`, `derive_summary`,
 `derive_dismissals`, `derive_timeline`, and `derive_video_map`.
 Use `has_video_frame_index` only for encoded frame metadata readiness. Use
 `has_video_map` for event-frame windows. Canonical timing confidence is
